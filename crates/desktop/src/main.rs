@@ -38,6 +38,7 @@ struct Explorer {
     selected: Option<PathBuf>,
     zone: DropZone,
     copy_in_progress: bool,
+    operation_busy: bool,
     copy_control: Option<Arc<CopyControl>>,
     context_menu: Option<Point<Pixels>>,
     rename_input: Entity<InputState>,
@@ -96,6 +97,7 @@ impl Explorer {
             selected: None,
             zone: DropZone::default(),
             copy_in_progress: false,
+            operation_busy: false,
             copy_control: None,
             context_menu: None,
             rename_input,
@@ -216,6 +218,106 @@ impl Explorer {
         }).detach();
     }
 
+    fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        let Some(path) = &self.selected else {
+            self.status = "Select a file or folder first".into();
+            cx.notify();
+            return;
+        };
+        let current = browser::display_name(path);
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(current, window, cx);
+        });
+        self.renaming = true;
+        self.status = "Enter the new name in the right panel".into();
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        if self.copy_in_progress || self.operation_busy {
+            self.status = "Wait for the current file operation to finish".into();
+            cx.notify();
+            return;
+        }
+        let Some(source) = self.selected.clone() else { return; };
+        let name = self.rename_input.read(cx).value().to_string();
+        let name = name.trim();
+        if name.is_empty() || name == "." || name == ".." ||
+            name.contains('/') || name.contains('\\') {
+            self.status = "Invalid new name (no path separators)".into();
+            cx.notify();
+            return;
+        }
+        let dest = source.with_file_name(name);
+        let plan = match Plan::prepare(Action::Rename, &source, Some(&dest)) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.status = format!("Cannot rename: {error}");
+                cx.notify();
+                return;
+            }
+        };
+        self.operation_busy = true;
+        self.status = "Renaming...".into();
+        let task = cx.background_spawn(async move {
+            let mut queue = OperationQueue::default();
+            queue.submit(plan);
+            queue.run_all().remove(0).1
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.operation_busy = false;
+                match result {
+                    Ok(receipt) => {
+                        this.selected = receipt.destination.clone();
+                        this.last_move = Some(receipt);
+                        this.renaming = false;
+                        this.status = "Renamed. Undo is available until another action.".into();
+                    }
+                    Err(error) => this.status = format!("Rename refused: {error}"),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn undo_move(&mut self, cx: &mut Context<Self>) {
+        if self.copy_in_progress || self.operation_busy {
+            self.status = "Wait for the active operation to finish".into();
+            cx.notify();
+            return;
+        }
+        let Some(receipt) = self.last_move.take() else {
+            self.status = "No rename or move to undo".into();
+            cx.notify();
+            return;
+        };
+        self.operation_busy = true;
+        let task = cx.background_spawn(async move {
+            let result = receipt.undo();
+            (receipt, result)
+        });
+        cx.spawn(async move |weak, cx| {
+            let (receipt, result) = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.operation_busy = false;
+                match result {
+                    Ok(()) => {
+                        this.selected = Some(receipt.source);
+                        this.status = "Undo successful".into();
+                    }
+                    Err(error) => {
+                        this.status = format!("Undo refused: {error}");
+                        this.last_move = Some(receipt);
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {
         if let Some(control) = &self.copy_control {
             control.cancel();
@@ -227,7 +329,7 @@ impl Explorer {
     }
 
     fn recycle(&mut self, cx: &mut Context<Self>) {
-        if self.copy_in_progress {
+        if self.copy_in_progress || self.operation_busy {
             self.status = "Wait for the current copy to finish before recycling".into();
             cx.notify();
             return;
@@ -257,6 +359,7 @@ impl Explorer {
         };
         self.selected = None;
         self.selected_history_event = None;
+        self.operation_busy = true;
         self.status = "Sending to Windows Recycle Bin...".into();
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
@@ -266,6 +369,7 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let result = task.await;
             let _ = weak.update(cx, |this, cx| {
+                this.operation_busy = false;
                 this.status = match result {
                     Ok(_) => "Moved to Recycle Bin".into(),
                     Err(error) => format!("Recycle refused: {error}"),
@@ -607,6 +711,50 @@ impl Explorer {
             .child(columns).into_any_element()
     }
 
+    fn context_popup(&self, position: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        div().id("file-context-menu").absolute()
+            .left(position.x).top(position.y).w(px(215.)).p_2()
+            .rounded_md().border_1().border_color(rgb(0x56687C))
+            .bg(rgb(0x1A2230)).flex().flex_col().gap_1()
+            .child(Self::control("Open", "ctx-open", cx.listener(|this, _, _, cx| {
+                this.context_menu = None;
+                if let Some(selected) = &this.selected {
+                    if selected.is_dir() {
+                        let selected = selected.clone();
+                        this.go_to(selected, Side::Left, cx);
+                    } else if let Err(error) = open::that(selected) {
+                        this.status = format!("Cannot open file: {error}");
+                    }
+                }
+                cx.notify();
+            })))
+            .child(Self::control("Stage to Drop Zone", "ctx-stage", cx.listener(|this, _, _, cx| {
+                this.context_menu = None;
+                this.stage(cx);
+            })))
+            .child(Self::control("Rename", "ctx-rename", cx.listener(|this, _, window, cx| {
+                this.begin_rename(window, cx);
+            })))
+            .child(Self::control("Copy full path", "ctx-copy-path", cx.listener(|this, _, _, cx| {
+                this.context_menu = None;
+                if let Some(path) = &this.selected {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                        path.to_string_lossy().into_owned()
+                    ));
+                }
+                cx.notify();
+            })))
+            .child(Self::control("Recycle (confirm twice)", "ctx-recycle", cx.listener(|this, _, _, cx| {
+                this.context_menu = None;
+                this.recycle(cx);
+            })))
+            .child(Self::control("Dismiss menu", "ctx-close", cx.listener(|this, _, _, cx| {
+                this.context_menu = None;
+                cx.notify();
+            })))
+            .into_any_element()
+    }
+
     fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut box_ = div().id("inspector-panel").w(px(260.)).h_full().min_h_0()
             .overflow_y_scroll().flex().flex_col().gap_2()
@@ -628,6 +776,24 @@ impl Explorer {
                             cx.notify();
                         }))
                 );
+            if self.renaming {
+                box_ = box_
+                    .child(div().mt_2().child("RENAME"))
+                    .child(div().w_full().child(Input::new(&self.rename_input)))
+                    .child(
+                        div().id("rename-commit").p_2().rounded_md()
+                            .cursor_pointer().bg(rgb(0x344F69))
+                            .child("Apply rename")
+                            .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx)))
+                    );
+            }
+            if self.last_move.is_some() {
+                box_ = box_.child(
+                    div().id("undo-rename").p_2().rounded_md().cursor_pointer()
+                        .bg(rgb(0x273544)).child("Undo last rename")
+                        .on_click(cx.listener(|this, _, _, cx| this.undo_move(cx)))
+                );
+            }
             if let Ok(p) = search::preview(path, 1024) {
                 box_ = box_.child(format!("{} preview:", p.kind))
                     .child(div().id("preview-scroll").max_h(px(170.)).overflow_y_scroll().child(p.description));
@@ -824,7 +990,7 @@ impl Render for Explorer {
             }
         }
         body = body.child(self.inspector(cx));
-        div().size_full().flex().flex_col().bg(rgb(0x222C3A))
+        let mut root = div().relative().size_full().flex().flex_col().bg(rgb(0x222C3A))
             .text_size(px(13.))
             .key_context("Filemanager")
             .on_action(cx.listener(Self::key_find))
@@ -837,7 +1003,11 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::key_stage))
             .child(tabs).child(toolbar).child(searchbar).child(body)
             .child(div().p_2().bg(rgb(0x141C27)).text_color(rgb(0xB7C6D6))
-                .child(self.status.clone()))
+                .child(self.status.clone()));
+        if let Some(position) = self.context_menu {
+            root = root.child(self.context_popup(position, cx));
+        }
+        root
     }
 }
 
