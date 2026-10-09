@@ -260,8 +260,9 @@ impl Explorer {
                         box_ = box_.child(
                             div().border_t_1().border_color(rgb(0x303E50)).pt_2()
                                 .child(format!("#{} · {} · {}", event.id, event.kind, event.display_time()))
+                                .child(format!("Author: {}", event.author.as_deref().unwrap_or("not verified")))
                                 .child(format!("Observer: {}", event.recorded_by))
-                                .child(event.comment)
+                                .child(if event.comment.is_empty() { "(no comment)".to_owned() } else { event.comment })
                         );
                     }
                 }
