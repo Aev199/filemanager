@@ -7,3 +7,5 @@ pub mod search;
 pub mod workspace;
 
 pub mod folder_copy;
+
+pub mod persistent_index;
