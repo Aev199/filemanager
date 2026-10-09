@@ -83,6 +83,9 @@ fn enumerate(source: &Path, control: &CopyControl) -> io::Result<Vec<Item>> {
             return Err(invalid("Folder has more than 100,000 items; narrow the operation"));
         }
     }
+    // WalkDir's enumeration order may vary even when files are unchanged.
+    // Sort to compare two consistent snapshots and create parents first.
+    result.sort_by(|a, b| a.relative.cmp(&b.relative));
     control.set_total_bytes(total_bytes);
     Ok(result)
 }
