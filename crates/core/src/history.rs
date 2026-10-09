@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
+use chrono::{DateTime, Utc};
 
 pub struct Journal { database: PathBuf }
 
@@ -21,8 +22,21 @@ pub struct Event {
     pub comment: String,
 }
 
+impl Event {
+    /// Human-readable timestamp in the user's local time.
+    pub fn display_time(&self) -> String {
+        DateTime::<Utc>::from_timestamp_millis(self.observed_ms)
+            .map(|utc| utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "unknown time".into())
+    }
+}
+
 fn clock_ms(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH).map(|x| x.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0)
+}
+
+fn clock_ns(t: SystemTime) -> i64 {
+    t.duration_since(UNIX_EPOCH).map(|x| x.as_nanos().min(i64::MAX as u128) as i64).unwrap_or(0)
 }
 
 fn observer() -> String {
@@ -43,7 +57,7 @@ impl Journal {
         let journal = Self { database };
         journal.connect()?.execute_batch("
             CREATE TABLE IF NOT EXISTS observed (
-                path TEXT PRIMARY KEY, size INTEGER NOT NULL, modified_ms INTEGER NOT NULL
+                path TEXT PRIMARY KEY, size INTEGER NOT NULL, modified_ns INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,18 +93,18 @@ impl Journal {
         };
         if !metadata.is_file() || metadata.file_type().is_symlink() { return Ok(false); }
         let size = metadata.len().min(i64::MAX as u64) as i64;
-        let modified = clock_ms(metadata.modified().unwrap_or(UNIX_EPOCH));
+        let modified = clock_ns(metadata.modified().unwrap_or(UNIX_EPOCH));
         let path = path.to_string_lossy().into_owned();
         let mut connection = self.connect()?;
         let tx = connection.transaction().map_err(sqlite_error)?;
         let old: Option<(i64, i64)> = tx.query_row(
-            "SELECT size, modified_ms FROM observed WHERE path=?1",
+            "SELECT size, modified_ns FROM observed WHERE path=?1",
             params![path], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional().map_err(sqlite_error)?;
         if old == Some((size, modified)) { return Ok(false); }
         let kind = if old.is_none() { "observed" } else { "modified" };
-        tx.execute("INSERT INTO observed(path,size,modified_ms) VALUES(?1,?2,?3)
-                    ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ms=excluded.modified_ms",
+        tx.execute("INSERT INTO observed(path,size,modified_ns) VALUES(?1,?2,?3)
+                    ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ns=excluded.modified_ns",
             params![path, size, modified]).map_err(sqlite_error)?;
         tx.execute("INSERT INTO events(path,kind,observed_ms,recorded_by) VALUES(?1,?2,?3,?4)",
             params![path, kind, clock_ms(SystemTime::now()), observer()]).map_err(sqlite_error)?;
