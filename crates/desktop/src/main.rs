@@ -8,6 +8,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::Root;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find]);
 
@@ -178,8 +179,8 @@ impl Explorer {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
-        if self.copy_in_progress {
-            self.status = "A copy is already running. Wait for it to finish.".into();
+        if self.copy_in_progress || self.operation_busy {
+            self.status = "Another file operation is running. Wait for it to finish.".into();
             cx.notify();
             return;
         }
@@ -203,6 +204,24 @@ impl Explorer {
             });
             (zone, ok, errors, first_error)
         });
+        // UI heartbeat reads atomic byte progress without touching source
+        // files and without blocking the rendering thread.
+        let progress = self.copy_control.as_ref().unwrap().clone();
+        cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_spawn(async {
+                    std::thread::sleep(Duration::from_millis(250));
+                }).await;
+                let keep_going = weak.update(cx, |this, cx| {
+                    if !this.copy_in_progress { return false; }
+                    let mib = progress.bytes_copied() as f64 / 1_048_576.0;
+                    this.status = format!("Copying... {mib:.1} MiB transferred · Cancel copy to stop");
+                    cx.notify();
+                    true
+                }).unwrap_or(false);
+                if !keep_going { break; }
+            }
+        }).detach();
         cx.spawn(async move |weak, cx| {
             let (zone, ok, errors, first_error) = task.await;
             let _ = weak.update(cx, |this, cx| {
