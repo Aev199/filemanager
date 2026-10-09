@@ -15,6 +15,28 @@ pub struct Plan {
     pub action: Action,
     pub source: PathBuf,
     pub destination: Option<PathBuf>,
+    /// The queued command is only valid for the source observed at preflight.
+    stamp: SourceStamp,
+}
+
+/// Best-effort protection against a file being replaced or edited after
+/// a user has queued an operation. Identity-by-open-handle comes later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceStamp {
+    is_dir: bool,
+    size: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+}
+impl SourceStamp {
+    fn read(meta: &fs::Metadata) -> Self {
+        Self {
+            is_dir: meta.is_dir(),
+            size: meta.len(),
+            modified: meta.modified().ok(),
+            created: meta.created().ok(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -37,8 +59,9 @@ impl OperationQueue {
     pub fn run_all(&mut self) -> Vec<(Plan, io::Result<Receipt>)> {
         let mut results = Vec::new();
         while let Some(plan) = self.pending.pop_front() {
-            let result = Plan::prepare(plan.action, &plan.source, plan.destination.as_deref())
-                .and_then(|validated| validated.execute());
+            // IMPORTANT: do not re-prepare here! Doing so would silently
+            // approve a different file that appeared at the same path.
+            let result = plan.execute();
             results.push((plan, result));
         }
         results
@@ -109,12 +132,18 @@ impl Plan {
                 Some(normalized)
             }
         };
-        Ok(Self { action, source, destination: dest })
+        let stamp = SourceStamp::read(&fs::symlink_metadata(&source)?);
+        Ok(Self { action, source, destination: dest, stamp })
     }
 
     /// Call only after an explicit user click / confirmation; prepare() performs no changes.
     pub fn execute(&self) -> io::Result<Receipt> {
-        let meta = fs::metadata(&self.source)?;
+        let meta = fs::symlink_metadata(&self.source)?;
+        if meta.file_type().is_symlink() || SourceStamp::read(&meta) != self.stamp {
+            return Err(io::Error::other(
+                "Source was changed/replaced since preparation; operation refused"
+            ));
+        }
         let size = meta.len();
         let destination = self.destination.clone();
         match self.action {
@@ -308,6 +337,38 @@ mod tests {
         assert!(staging.persist_noclobber(&dest).is_err());
         assert_eq!(fs::read(dest).unwrap(), b"keep me");
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn queue_refuses_source_replaced_after_preparation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.txt");
+        let dest = tmp.path().join("dest.txt");
+        fs::write(&source, b"old contents").unwrap();
+        let original_plan = Plan::prepare(Action::Copy, &source, Some(&dest)).unwrap();
+
+        fs::remove_file(&source).unwrap();
+        fs::write(&source, b"replacement with different length").unwrap();
+
+        let mut queue = OperationQueue::default();
+        queue.submit(original_plan);
+        let results = queue.run_all();
+        assert!(results[0].1.is_err());
+        assert!(!dest.exists());
+        assert_eq!(fs::read(source).unwrap(), b"replacement with different length");
+    }
+
+    #[test]
+    fn queued_recycle_rejects_changed_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("disposable.txt");
+        fs::write(&source, b"before").unwrap();
+        let queued = Plan::prepare(Action::Recycle, &source, None).unwrap();
+        fs::write(&source, b"new content to protect").unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(queued);
+        assert!(queue.run_all()[0].1.is_err());
+        assert!(source.exists());
     }
 
     #[test]
