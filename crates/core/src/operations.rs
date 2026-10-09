@@ -2,6 +2,7 @@
 //! Move/rename are reversible if neither path has been changed after the action.
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -22,6 +23,52 @@ pub struct Receipt {
     pub destination: Option<PathBuf>,
     pub modified: Option<SystemTime>,
     pub size: u64,
+}
+
+/// Serial execution boundary between the user interface and filesystem changes.
+#[derive(Default)]
+pub struct OperationQueue { pending: VecDeque<Plan> }
+
+impl OperationQueue {
+    pub fn submit(&mut self, plan: Plan) { self.pending.push_back(plan); }
+    pub fn len(&self) -> usize { self.pending.len() }
+    pub fn is_empty(&self) -> bool { self.pending.is_empty() }
+    pub fn run_all(&mut self) -> Vec<(Plan, io::Result<Receipt>)> {
+        let mut results = Vec::new();
+        while let Some(plan) = self.pending.pop_front() {
+            let result = Plan::prepare(plan.action, &plan.source, plan.destination.as_deref())
+                .and_then(|validated| validated.execute());
+            results.push((plan, result));
+        }
+        results
+    }
+}
+
+fn occupied(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// MoveFileW refuses to overwrite an existing file on Windows.
+#[cfg(windows)]
+fn safe_rename(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileW(source: *const u16, destination: *const u16) -> i32;
+    }
+    let from = source.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let to = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    if unsafe { MoveFileW(from.as_ptr(), to.as_ptr()) } == 0 {
+        Err(io::Error::last_os_error())
+    } else { Ok(()) }
+}
+#[cfg(not(windows))]
+fn safe_rename(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "No-overwrite moves are implemented for Windows only"))
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -54,7 +101,7 @@ impl Plan {
                 let parent = fs::canonicalize(destination.parent().ok_or_else(|| invalid("Missing parent"))?)?;
                 if !parent.is_dir() { return Err(invalid("Destination parent is not a directory")); }
                 let normalized = parent.join(name);
-                if fs::symlink_metadata(&normalized).is_ok() { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
+                if occupied(&normalized)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
                 if source.is_dir() && parent.starts_with(&source) {
                     return Err(invalid("Cannot move or copy a folder inside itself"));
                 }
@@ -87,9 +134,9 @@ impl Plan {
             }
             Action::Move | Action::Rename => {
                 let dest = destination.as_ref().unwrap();
-                if fs::symlink_metadata(dest).is_ok() { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
-                // Atomic on one volume; cross-volume moves are deliberately rejected.
-                fs::rename(&self.source, dest)?;
+                if occupied(dest)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
+                // MoveFileW never replaces occupied destinations and rejects cross-volume moves.
+                safe_rename(&self.source, dest)?;
             }
             Action::Recycle => {
                 trash::delete(&self.source).map_err(|err| io::Error::other(err.to_string()))?;
@@ -111,14 +158,14 @@ impl Receipt {
             return Err(invalid("Undo is available only for moves and renames"));
         }
         let dest = self.destination.as_ref().ok_or_else(|| invalid("Missing destination"))?;
-        if self.source.exists() {
+        if occupied(&self.source)? {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Original path was occupied"));
         }
         let meta = fs::metadata(dest)?;
         if meta.len() != self.size || meta.modified().ok() != self.modified {
             return Err(invalid("File has changed since move; undo refused"));
         }
-        fs::rename(dest, &self.source)
+        safe_rename(dest, &self.source)
     }
 }
 
@@ -142,12 +189,20 @@ impl DropZone {
     pub fn copy_to(&mut self, target: &Path) -> Vec<(PathBuf, io::Result<Receipt>)> {
         let mut results = Vec::new();
         let sources = std::mem::take(&mut self.sources);
-        for source in sources {
+        let mut queue = OperationQueue::default();
+        for source in &sources {
             let destination = target.join(source.file_name().unwrap_or_default());
-            let result = Plan::prepare(Action::Copy, &source, Some(&destination))
-                .and_then(|plan| plan.execute());
-            if result.is_err() { self.sources.push(source.clone()); }
-            results.push((source, result));
+            match Plan::prepare(Action::Copy, source, Some(&destination)) {
+                Ok(plan) => queue.submit(plan),
+                Err(error) => {
+                    self.sources.push(source.clone());
+                    results.push((source.clone(), Err(error)));
+                }
+            }
+        }
+        for (plan, result) in queue.run_all() {
+            if result.is_err() { self.sources.push(plan.source.clone()); }
+            results.push((plan.source, result));
         }
         results
     }
@@ -167,6 +222,7 @@ mod tests {
         assert_eq!(fs::read(&b).unwrap(), b"existing");
     }
     #[test]
+    #[cfg(windows)]
     fn move_and_undo() {
         let tmp = tempfile::tempdir().unwrap();
         let a = tmp.path().join("a");
