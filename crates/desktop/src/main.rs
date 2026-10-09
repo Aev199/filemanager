@@ -3,7 +3,7 @@ use filemanager_core::history::{HistoryWatch, Journal};
 use filemanager_core::operations::{Action, DropZone, OperationQueue, Plan};
 use filemanager_core::search::{self, SearchIndex};
 use filemanager_core::workspace::WorkspaceStore;
-use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, IntoElement, KeyBinding, Render, Subscription, Window, WindowOptions};
+use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,6 +88,7 @@ impl Explorer {
         self.status = match tab.navigate(path) {
             Ok(()) => {
                 self.selected = None;
+                self.selected_history_event = None;
                 "Folder opened".to_owned()
             }
             Err(e) => format!("Navigation failed: {e}"),
@@ -100,6 +101,7 @@ impl Explorer {
         else {
             self.browser.active_mut().focus_right = matches!(side, Side::Right);
             self.selected = Some(path);
+            self.selected_history_event = None;
             self.confirm_recycle = None;
             cx.notify();
         }
@@ -494,7 +496,8 @@ impl Explorer {
     }
 
     fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut box_ = div().w(px(260.)).h_full().flex().flex_col().gap_2()
+        let mut box_ = div().id("inspector-panel").w(px(260.)).h_full().min_h_0()
+            .overflow_y_scroll().flex().flex_col().gap_2()
             .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
             .child("PREVIEW & HISTORY");
         if let Some(path) = &self.selected {
@@ -520,9 +523,8 @@ impl Explorer {
             if let Some(journal) = &self.journal {
                 if let Ok(history) = journal.events(path, 8) {
                     box_ = box_.child(format!("Recorded events: {}", history.len()));
-                    box_ = box_.child(div().text_color(rgb(0xA9C0DA)).child(
-                        "To annotate a save: copy your comment in any app (Ctrl+C), then click its Paste comment button."
-                    ));
+                    box_ = box_.child(div().text_color(rgb(0xA9C0DA))
+                        .child("Select a save below, enter a comment, then press Save comment."));
                     for event in history {
                         let event_id = event.id;
                         box_ = box_.child(
@@ -532,17 +534,33 @@ impl Explorer {
                                 .child(format!("Observer: {}", event.recorded_by))
                                 .child(if event.comment.is_empty() { "(no comment)".to_owned() } else { event.comment })
                                 .child(
-                                    div().id(format!("paste-comment-{event_id}"))
+                                    div().id(format!("select-comment-{event_id}"))
                                         .mt_2().p_2().rounded_md().cursor_pointer()
-                                        .bg(rgb(0x333F50))
-                                        .child("Paste comment")
+                                        .bg(rgb(if self.selected_history_event == Some(event_id) {
+                                            0x344F69
+                                        } else { 0x333F50 }))
+                                        .child(if self.selected_history_event == Some(event_id) {
+                                            "Selected for annotation"
+                                        } else { "Select this save" })
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.paste_history_comment(event_id, cx)
+                                            this.selected_history_event = Some(event_id);
+                                            cx.notify();
                                         }))
                                 )
                         );
                     }
                 }
+            }
+            if self.selected_history_event.is_some() {
+                box_ = box_
+                    .child(div().mt_3().child("COMMENT"))
+                    .child(div().w_full().child(Input::new(&self.comment_input)))
+                    .child(
+                        div().id("save-history-comment").p_2()
+                            .rounded_md().cursor_pointer().bg(rgb(0x344F69))
+                            .child("Save comment")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_comment(cx)))
+                    );
             }
         } else {
             box_ = box_.child("Select a file");
@@ -551,6 +569,11 @@ impl Explorer {
             box_ = box_.child(format!("Monitoring: {}", root.display()));
         }
         box_.into_any_element()
+    }
+
+    fn key_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.search_input.focus_handle(cx));
+        cx.notify();
     }
 
     fn key_back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
@@ -639,16 +662,36 @@ impl Render for Explorer {
             .child(Self::control("Recycle", "recycle", cx.listener(|this, _, _, cx| this.recycle(cx))))
             .child(Self::control("Watch folder", "watch", cx.listener(|this, _, _, cx| this.watch(cx))))
             .child(Self::control("Refresh", "refresh", cx.listener(|_, _, _, cx| cx.notify())));
+        let searchbar = div().w_full().flex().items_center().gap_2().p_2()
+            .bg(rgb(0x1A2230))
+            .child(div().w(px(360.)).child(Input::new(&self.search_input)))
+            .child(Self::control("Find in current folder", "find-files",
+                cx.listener(|this, _, _, cx| {
+                    this.search_active = !this.search_query.trim().is_empty();
+                    this.update_search(cx);
+                })))
+            .child(Self::control("Close results", "clear-results",
+                cx.listener(|this, _, _, cx| {
+                    this.search_active = false;
+                    this.search_results.clear();
+                    cx.notify();
+                })));
+
         let mut body = div().flex_1().flex().overflow_hidden()
-            .child(self.sidebar(cx))
-            .child(self.pane(Side::Left, cx));
-        if self.browser.active().right.is_some() {
-            body = body.child(self.pane(Side::Right, cx));
+            .child(self.sidebar(cx));
+        if self.search_active {
+            body = body.child(self.search_results_panel(cx));
+        } else {
+            body = body.child(self.pane(Side::Left, cx));
+            if self.browser.active().right.is_some() {
+                body = body.child(self.pane(Side::Right, cx));
+            }
         }
         body = body.child(self.inspector(cx));
         div().size_full().flex().flex_col().bg(rgb(0x222C3A))
             .text_size(px(13.))
             .key_context("Filemanager")
+            .on_action(cx.listener(Self::key_find))
             .on_action(cx.listener(Self::key_back))
             .on_action(cx.listener(Self::key_up))
             .on_action(cx.listener(Self::key_tab))
@@ -656,7 +699,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::key_split))
             .on_action(cx.listener(Self::key_refresh))
             .on_action(cx.listener(Self::key_stage))
-            .child(tabs).child(toolbar).child(body)
+            .child(tabs).child(toolbar).child(searchbar).child(body)
             .child(div().p_2().bg(rgb(0x141C27)).text_color(rgb(0xB7C6D6))
                 .child(self.status.clone()))
     }
@@ -667,6 +710,7 @@ fn main() {
         gpui_component::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-t", NewTab, Some("Filemanager")),
+            KeyBinding::new("ctrl-f", Find, Some("Filemanager")),
             KeyBinding::new("ctrl-w", CloseTab, Some("Filemanager")),
             KeyBinding::new("alt-left", Back, Some("Filemanager")),
             KeyBinding::new("alt-up", Up, Some("Filemanager")),
