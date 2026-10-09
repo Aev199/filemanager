@@ -106,8 +106,24 @@ impl Journal {
         tx.execute("INSERT INTO observed(path,size,modified_ns) VALUES(?1,?2,?3)
                     ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ns=excluded.modified_ns",
             params![path, size, modified]).map_err(sqlite_error)?;
-        tx.execute("INSERT INTO events(path,kind,observed_ms,recorded_by) VALUES(?1,?2,?3,?4)",
-            params![path, kind, clock_ms(SystemTime::now()), observer()]).map_err(sqlite_error)?;
+        let event_time = clock_ms(SystemTime::now());
+        // One Ctrl+S can emit many rapid MODIFY signals. Merge such bursts
+        // into one "modified" row, but never overwrite a user annotation.
+        let recent: Option<(i64, String, i64, String)> = tx.query_row(
+            "SELECT id, kind, observed_ms, comment FROM events WHERE path=?1 ORDER BY id DESC LIMIT 1",
+            params![path], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional().map_err(sqlite_error)?;
+        let merge = recent.filter(|(_, previous_kind, time, comment)|
+            kind == "modified" && previous_kind == "modified" &&
+            event_time.saturating_sub(*time) < 2000 && comment.is_empty()
+        );
+        if let Some((id, _, _, _)) = merge {
+            tx.execute("UPDATE events SET observed_ms=?1 WHERE id=?2",
+                params![event_time, id]).map_err(sqlite_error)?;
+        } else {
+            tx.execute("INSERT INTO events(path,kind,observed_ms,recorded_by) VALUES(?1,?2,?3,?4)",
+                params![path, kind, event_time, observer()]).map_err(sqlite_error)?;
+        }
         tx.commit().map_err(sqlite_error)?;
         Ok(true)
     }
