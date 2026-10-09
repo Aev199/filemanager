@@ -46,6 +46,17 @@ fn observer() -> String {
 fn sqlite_error(e: rusqlite::Error) -> io::Error { io::Error::other(e) }
 
 fn ignored(path: &Path) -> bool {
+    // Ignore our complete staging subtrees, not just their *.fm-partial
+    // directory name. Otherwise folder copies would generate thousands of
+    // fake "saved by the user" events in SQLite.
+    for ancestor in path.ancestors() {
+        if let Some(name) = ancestor.file_name() {
+            let name = name.to_string_lossy().to_lowercase();
+            if name.starts_with(".filemanager-stage-") || name.starts_with(".filemanager-copy-") {
+                return true;
+            }
+        }
+    }
     let Some(name) = path.file_name().map(|x| x.to_string_lossy().to_lowercase()) else { return true; };
     name.starts_with("~$") || name.ends_with(".tmp") || name.ends_with(".part") || name.ends_with(".swp") || name.ends_with(".fm-partial")
 }
@@ -222,6 +233,18 @@ impl HistoryWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn internal_folder_staging_does_not_pollute_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage = temp.path().join(".filemanager-stage-abcd.fm-partial");
+        let nested = stage.join("sub").join("project.txt");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        fs::write(&nested, b"temporary copy").unwrap();
+        let journal = Journal::open(temp.path().join("meta.sqlite3")).unwrap();
+        assert!(!journal.observe(&nested).unwrap());
+        assert!(journal.events(&nested, 10).unwrap().is_empty());
+    }
+
     #[test]
     fn metadata_only_and_annotation() {
         let temp = tempfile::tempdir().unwrap();
