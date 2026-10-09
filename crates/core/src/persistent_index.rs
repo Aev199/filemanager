@@ -196,7 +196,7 @@ impl PersistentIndex {
         })?;
         let mut ordered: Vec<PathBuf> = changed.iter()
             .map(|path| normalize_extended_path(path))
-            .filter(|path| path.starts_with(root_path) && path != root_path)
+            .filter(|path| path.starts_with(root_path) && path.as_path() != root_path)
             .filter(|path| {
                 let relative = path.strip_prefix(root_path).ok();
                 relative.is_some_and(|relative| {
@@ -214,6 +214,7 @@ impl PersistentIndex {
                 ancestor.file_name().is_some_and(|name| {
                     let name = name.to_string_lossy().to_lowercase();
                     IGNORED.contains(&name.as_str())
+                        || name.starts_with("~$")
                         || name.starts_with(".filemanager-stage-")
                         || name.starts_with(".filemanager-copy-")
                         || name.ends_with(".fm-partial")
@@ -503,6 +504,19 @@ mod tests {
         let absolute = fs::canonicalize(&path).unwrap();
         index.reconcile_paths(&root, &[absolute], 100).unwrap();
         assert_eq!(index.query(&root, "мод", 10).unwrap(), vec![path]);
+    }
+
+    #[test]
+    fn office_lock_files_are_not_added_by_incremental_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        fs::create_dir(&root).unwrap();
+        let index = PersistentIndex::open(temp.path().join("idx.sqlite3")).unwrap();
+        index.refresh(&root, 100).unwrap();
+        let lock_file = root.join("~$project.xlsx");
+        fs::write(&lock_file, b"temporary lock").unwrap();
+        index.reconcile_paths(&root, &[lock_file], 100).unwrap();
+        assert!(index.query(&root, "project", 10).unwrap().is_empty());
     }
 
     #[test]
