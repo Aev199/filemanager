@@ -86,6 +86,8 @@ pub struct Receipt {
     pub destination: Option<PathBuf>,
     pub modified: Option<SystemTime>,
     pub size: u64,
+    /// Metadata of the published target; checked again before undo.
+    completed_stamp: Option<SourceStamp>,
 }
 
 /// Serial execution boundary between the user interface and filesystem changes.
@@ -94,6 +96,13 @@ pub struct OperationQueue { pending: VecDeque<Plan> }
 
 impl OperationQueue {
     pub fn submit(&mut self, plan: Plan) { self.pending.push_back(plan); }
+    /// Undo follows the same explicit execution boundary as moves and renames.
+    pub fn undo_completed(&self, receipt: &Receipt) -> io::Result<()> {
+        if !self.pending.is_empty() {
+            return Err(io::Error::other("Finish the pending queue before undo"));
+        }
+        receipt.undo()
+    }
     pub fn len(&self) -> usize { self.pending.len() }
     pub fn is_empty(&self) -> bool { self.pending.is_empty() }
     pub fn run_all(&mut self) -> Vec<(Plan, io::Result<Receipt>)> {
@@ -230,6 +239,7 @@ impl Plan {
                     return Ok(Receipt {
                         action: self.action, source: self.source.clone(),
                         destination, modified, size,
+                        completed_stamp: fs::symlink_metadata(dest).ok().as_ref().map(SourceStamp::read),
                     });
                 }
                 if !meta.is_file() { return Err(invalid("Unsupported source type")); }
@@ -289,14 +299,15 @@ impl Plan {
         Ok(Receipt {
             action: self.action, source: self.source.clone(), destination,
             modified: last_metadata.as_ref().and_then(|m| m.modified().ok()),
-            size: last_metadata.map_or(size, |m| m.len()),
+            size: last_metadata.as_ref().map_or(size, |m| m.len()),
+            completed_stamp: last_metadata.as_ref().map(SourceStamp::read),
         })
     }
 }
 
 impl Receipt {
     /// Undo only reversible renames and moves and only for an unchanged target.
-    pub fn undo(&self) -> io::Result<()> {
+    fn undo(&self) -> io::Result<()> {
         if self.action != Action::Move && self.action != Action::Rename {
             return Err(invalid("Undo is available only for moves and renames"));
         }
@@ -304,9 +315,10 @@ impl Receipt {
         if occupied(&self.source)? {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Original path was occupied"));
         }
-        let meta = fs::metadata(dest)?;
-        if meta.len() != self.size || meta.modified().ok() != self.modified {
-            return Err(invalid("File has changed since move; undo refused"));
+        crate::folder_copy::reject_link(dest)?;
+        let meta = fs::symlink_metadata(dest)?;
+        if self.completed_stamp.as_ref() != Some(&SourceStamp::read(&meta)) {
+            return Err(invalid("Destination changed or was replaced; undo refused"));
         }
         safe_rename(dest, &self.source)
     }
@@ -395,7 +407,7 @@ mod tests {
         fs::write(&a, b"content").unwrap();
         let receipt = Plan::prepare(Action::Move, &a, Some(&b)).unwrap().execute().unwrap();
         assert!(b.exists());
-        receipt.undo().unwrap();
+        OperationQueue::default().undo_completed(&receipt).unwrap();
         assert!(a.exists());
         assert!(!b.exists());
     }
@@ -464,6 +476,22 @@ mod tests {
         assert!(staging.persist_noclobber(&dest).is_err());
         assert_eq!(fs::read(dest).unwrap(), b"keep me");
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn undo_refuses_target_modified_after_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("first.txt");
+        let target = temp.path().join("second.txt");
+        fs::write(&source, b"before").unwrap();
+        let receipt = Plan::prepare(Action::Rename, &source, Some(&target))
+            .unwrap().execute().unwrap();
+        fs::write(&target, b"modified content with different length").unwrap();
+        let queue = OperationQueue::default();
+        assert!(queue.undo_completed(&receipt).is_err());
+        assert!(!source.exists());
+        assert!(target.exists());
     }
 
     #[test]
