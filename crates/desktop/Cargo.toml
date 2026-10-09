@@ -14,3 +14,4 @@ filemanager-core = { path = "../core" }
 gpui = { package = "gpui-ce", version = "=0.2.2" }
 gpui_platform = { package = "gpui_ce_platform", version = "=0.1.0" }
 open = "5"
+gpui-component = { package = "gpui_ce_components", version = "=0.2.0" }
