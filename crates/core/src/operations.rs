@@ -201,9 +201,10 @@ impl Plan {
                 let dest = destination.as_ref().unwrap();
                 if meta.is_dir() {
                     crate::folder_copy::copy_folder(&self.source, dest, control)?;
+                    let modified = fs::metadata(dest)?.modified().ok();
                     return Ok(Receipt {
                         action: self.action, source: self.source.clone(),
-                        destination, modified: fs::metadata(dest)?.modified().ok(), size,
+                        destination, modified, size,
                     });
                 }
                 if !meta.is_file() { return Err(invalid("Unsupported source type")); }
