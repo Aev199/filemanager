@@ -569,6 +569,25 @@ mod tests {
     }
 
     #[test]
+    fn journal_failure_never_starts_file_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("a.txt");
+        let destination = temp.path().join("b.txt");
+        fs::write(&source, b"must stay untouched").unwrap();
+        let db = temp.path().join("audit.sqlite");
+        let journal = crate::operation_journal::OperationJournal::open(&db).unwrap();
+        // Simulate corrupt SQLite storage before the operation begins.
+        fs::remove_file(&db).unwrap();
+        fs::write(&db, b"not a sqlite database").unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Copy, &source, Some(&destination)).unwrap());
+        let outcome = queue.run_all_audited(&CopyControl::default(), &journal);
+        assert!(outcome[0].1.is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"must stay untouched");
+        assert!(!destination.exists());
+    }
+
+    #[test]
     fn audited_queue_records_copy_and_writes_no_previous_versions() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.txt");
