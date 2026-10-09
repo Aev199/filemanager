@@ -53,12 +53,12 @@ impl IndexWatch {
                         // existing file's bytes does not change its search key.
                         // Keep create/remove/rename/metadata events.
                         if matches!(
-                            event.kind,
+                            &event.kind,
                             EventKind::Access(_) | EventKind::Modify(ModifyKind::Data(_))
                         ) { return; }
                         // Backends may only report one side of a rename.
                         // Audit the root instead of keeping a ghost old path.
-                        if matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                        if matches!(&event.kind, EventKind::Modify(ModifyKind::Name(_)))
                             && event.paths.len() != 2
                         {
                             callback_state.full_scan_needed.store(true, Ordering::Release);
