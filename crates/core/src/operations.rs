@@ -241,6 +241,19 @@ mod tests {
         fs::create_dir(tmp.path().join("d").join("sub")).unwrap();
         assert!(Plan::prepare(Action::Move, &tmp.path().join("d"), Some(&tmp.path().join("d").join("sub").join("nested"))).is_err());
     }
+    #[cfg(unix)]
+    #[test]
+    fn symlink_source_is_rejected_before_canonicalization() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("original");
+        let link = tmp.path().join("link");
+        fs::write(&original, b"preserve").unwrap();
+        symlink(&original, &link).unwrap();
+        assert!(Plan::prepare(Action::Recycle, &link, None).is_err());
+        assert_eq!(fs::read(&original).unwrap(), b"preserve");
+    }
+
     #[test]
     fn drop_zone_does_not_erase_on_copy_error() {
         let tmp = tempfile::tempdir().unwrap();
