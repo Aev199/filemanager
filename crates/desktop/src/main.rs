@@ -152,6 +152,29 @@ impl Explorer {
         }).detach();
     }
 
+    fn paste_history_comment(&mut self, event_id: i64, cx: &mut Context<Self>) {
+        let content = cx.read_from_clipboard().and_then(|item| item.text());
+        let Some(content) = content.filter(|text| !text.trim().is_empty()) else {
+            self.status = "Copy a comment to the Windows clipboard first".into();
+            cx.notify();
+            return;
+        };
+        if content.chars().count() > 5000 {
+            self.status = "Comment is too long (maximum 5000 characters)".into();
+            cx.notify();
+            return;
+        }
+        self.status = match self.journal.as_ref() {
+            Some(journal) => match journal.set_comment(event_id, content.trim()) {
+                Ok(true) => format!("Comment saved for history event #{event_id}"),
+                Ok(false) => format!("History event #{event_id} no longer exists"),
+                Err(error) => format!("Cannot save comment: {error}"),
+            },
+            None => "History database unavailable".into(),
+        };
+        cx.notify();
+    }
+
     fn save_workspace(&mut self, cx: &mut Context<Self>) {
         self.status = match self.workspaces.as_ref() {
             Some(store) => match store.save("Default", &self.browser, self.miller_mode) {
@@ -282,13 +305,26 @@ impl Explorer {
             .child(columns).into_any_element()
     }
 
-    fn inspector(&self) -> AnyElement {
+    fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut box_ = div().w(px(260.)).h_full().flex().flex_col().gap_2()
             .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
             .child("PREVIEW & HISTORY");
         if let Some(path) = &self.selected {
+            let copied_path = path.clone();
             box_ = box_.child(browser::display_name(path))
-                .child(path.display().to_string());
+                .child(path.display().to_string())
+                .child(
+                    div().id("copy-full-path").p_2().rounded_md()
+                        .bg(rgb(0x333F50)).cursor_pointer()
+                        .child("Copy full path")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copied_path.to_string_lossy().into_owned()
+                            ));
+                            this.status = "File path copied to clipboard".into();
+                            cx.notify();
+                        }))
+                );
             if let Ok(p) = search::preview(path, 1024) {
                 box_ = box_.child(format!("{} preview:", p.kind))
                     .child(div().id("preview-scroll").max_h(px(170.)).overflow_y_scroll().child(p.description));
@@ -296,13 +332,26 @@ impl Explorer {
             if let Some(journal) = &self.journal {
                 if let Ok(history) = journal.events(path, 8) {
                     box_ = box_.child(format!("Recorded events: {}", history.len()));
+                    box_ = box_.child(div().text_color(rgb(0xA9C0DA)).child(
+                        "To annotate a save: copy your comment in any app (Ctrl+C), then click its Paste comment button."
+                    ));
                     for event in history {
+                        let event_id = event.id;
                         box_ = box_.child(
                             div().border_t_1().border_color(rgb(0x303E50)).pt_2()
                                 .child(format!("#{} · {} · {}", event.id, event.kind, event.display_time()))
                                 .child(format!("Author: {}", event.author.as_deref().unwrap_or("not verified")))
                                 .child(format!("Observer: {}", event.recorded_by))
                                 .child(if event.comment.is_empty() { "(no comment)".to_owned() } else { event.comment })
+                                .child(
+                                    div().id(format!("paste-comment-{event_id}"))
+                                        .mt_2().p_2().rounded_md().cursor_pointer()
+                                        .bg(rgb(0x333F50))
+                                        .child("Paste comment")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.paste_history_comment(event_id, cx)
+                                        }))
+                                )
                         );
                     }
                 }
@@ -408,7 +457,7 @@ impl Render for Explorer {
         if self.browser.active().right.is_some() {
             body = body.child(self.pane(Side::Right, cx));
         }
-        body = body.child(self.inspector());
+        body = body.child(self.inspector(cx));
         div().size_full().flex().flex_col().bg(rgb(0x222C3A))
             .text_size(px(13.))
             .key_context("Filemanager")
