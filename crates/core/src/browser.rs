@@ -145,6 +145,51 @@ pub struct Listing {
     pub truncated: bool,
 }
 
+/// Complete, sorted and bounded snapshot suitable for a virtualized GPUI list.
+///
+/// This function can block on slow/network filesystems: always run it on
+/// a background worker, NEVER inside Render. A single unreadable entry does
+/// not make the entire directory disappear.
+pub fn scan_directory(dir: &Path, max_entries: usize) -> io::Result<Listing> {
+    if max_entries == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "max_entries must be positive"));
+    }
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for item in fs::read_dir(dir)? {
+        // ReadDir errors for individual entries need not hide everything
+        // already collected. The snapshot is explicitly marked incomplete.
+        let item = match item {
+            Ok(item) => item,
+            Err(_) => { truncated = true; continue; }
+        };
+        if entries.len() == max_entries {
+            truncated = true;
+            break;
+        }
+        let metadata = match fs::symlink_metadata(item.path()) {
+            Ok(metadata) => metadata,
+            Err(_) => { truncated = true; continue; }
+        };
+        entries.push(Entry {
+            name: item.file_name().to_string_lossy().into_owned(),
+            path: item.path(),
+            is_directory: metadata.is_dir(),
+            is_symlink: metadata.file_type().is_symlink(),
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+        });
+    }
+    entries.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path)),
+    });
+    Ok(Listing { entries, truncated })
+}
+
 pub fn display_name(path: &Path) -> String {
     path.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
 }
@@ -191,6 +236,38 @@ mod tests {
         browser.active_mut().toggle_split();
         browser.active_mut().navigate(tmp.path()).unwrap();
         assert_eq!(browser.active().left.path, fs::canonicalize(&sub).unwrap());
+    }
+
+    #[test]
+    fn directory_snapshot_is_full_sorted_and_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("zz_folder")).unwrap();
+        for i in (0..612).rev() {
+            fs::write(temp.path().join(format!("project_{i:04}.txt")), b"hello").unwrap();
+        }
+        let snapshot = scan_directory(temp.path(), 1000).unwrap();
+        assert_eq!(snapshot.entries.len(), 613);
+        assert!(!snapshot.truncated);
+        assert!(snapshot.entries[0].is_directory);
+        assert_eq!(snapshot.entries[1].name, "project_0000.txt");
+        assert_eq!(snapshot.entries[612].name, "project_0611.txt");
+
+        let bounded = scan_directory(temp.path(), 30).unwrap();
+        assert_eq!(bounded.entries.len(), 30);
+        assert!(bounded.truncated);
+        assert!(scan_directory(temp.path(), 0).is_err());
+    }
+
+    #[test]
+    fn snapshot_allows_cyrillic_names_and_stable_ordering() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("Скважина.txt"), b"").unwrap();
+        fs::write(temp.path().join("Анализ.txt"), b"").unwrap();
+        let first = scan_directory(temp.path(), 20).unwrap();
+        let second = scan_directory(temp.path(), 20).unwrap();
+        assert_eq!(first.entries.iter().map(|e| &e.name).collect::<Vec<_>>(),
+                   second.entries.iter().map(|e| &e.name).collect::<Vec<_>>());
+        assert_eq!(first.entries[0].name, "Анализ.txt");
     }
 
     #[test]
