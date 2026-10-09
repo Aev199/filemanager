@@ -114,6 +114,12 @@ impl PersistentIndex {
         let root = root_key(root)?;
         let mut paths = Vec::new();
         let mut incomplete = false;
+        let index_files = [
+            self.database.clone(),
+            self.database.with_extension("sqlite3-wal"),
+            self.database.with_extension("sqlite3-shm"),
+            self.database.with_extension("sqlite3-journal"),
+        ];
         for next in WalkDir::new(&root).follow_links(false).into_iter().filter_entry(allowed) {
             let entry = match next {
                 Ok(entry) => entry,
@@ -129,11 +135,7 @@ impl PersistentIndex {
             };
             // Do not index the index's own files if the monitored root
             // happens to contain LOCALAPPDATA/Filemanager.
-            let database_path = self.database.as_os_str();
-            if entry.path().as_os_str() == database_path
-                || entry.path().as_os_str() == self.database.with_extension("sqlite3-wal").as_os_str()
-                || entry.path().as_os_str() == self.database.with_extension("sqlite3-shm").as_os_str()
-            {
+            if index_files.iter().any(|file| entry.path() == file) {
                 continue;
             }
             let Some(name) = entry.file_name().to_str() else {
