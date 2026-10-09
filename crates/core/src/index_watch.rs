@@ -1,7 +1,9 @@
 //! Incremental watcher for the on-disk name index. All SQLite writes run on
 //! a single background thread. No file contents or revisions are retained.
 use crate::persistent_index::PersistentIndex;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    event::ModifyKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -44,6 +46,13 @@ impl IndexWatch {
             move |received: notify::Result<notify::Event>| {
                 match received {
                     Ok(event) => {
+                        // Backends may only report one side of a rename.
+                        // Audit the root instead of keeping a ghost old path.
+                        if matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                            && event.paths.len() != 2
+                        {
+                            callback_state.full_scan_needed.store(true, Ordering::Release);
+                        }
                         if event.paths.is_empty() {
                             callback_state.full_scan_needed.store(true, Ordering::Release);
                         }
@@ -157,6 +166,7 @@ fn process_events(
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut first_event: Option<Instant> = None;
     let mut last_audit = Instant::now();
+    let mut next_retry: Option<Instant> = None;
     // Reconcile the gap between an initial index scan and watcher startup.
     state.full_scan_needed.store(true, Ordering::Release);
     while !state.stop.load(Ordering::Acquire) {
@@ -170,9 +180,18 @@ fn process_events(
             Err(RecvTimeoutError::Disconnected) => break,
         };
 
-        let full = state.full_scan_needed.swap(false, Ordering::AcqRel)
+        let needs_full = state.full_scan_needed.load(Ordering::Acquire)
             || last_audit.elapsed() >= PERIODIC_AUDIT
             || paths.len() > MAX_BATCH;
+        let retry_due = next_retry.is_none_or(|when| Instant::now() >= when);
+        let full = needs_full && retry_due;
+        if needs_full && !retry_due {
+            // Avoid repeatedly scanning a locked or disconnected network
+            // folder. Stale is still visible in the UI during backoff.
+            state.stale.store(true, Ordering::Release);
+            continue;
+        }
+        if full { state.full_scan_needed.store(false, Ordering::Release); }
         let reached_window = first_event.is_some_and(|time| {
             time.elapsed() >= MAX_DELAY
         });
@@ -192,11 +211,14 @@ fn process_events(
             Ok(()) => {
                 state.revision.fetch_add(1, Ordering::AcqRel);
                 state.stale.store(false, Ordering::Release);
+                next_retry = None;
             }
             Err(_) => {
-                // Keep last committed index and flag that results may be stale.
-                // Retry via a full scan on a later watcher event or audit.
+                // Keep the last committed index. A failed partial update
+                // requires a later full audit before declaring the index good.
                 state.stale.store(true, Ordering::Release);
+                state.full_scan_needed.store(true, Ordering::Release);
+                next_retry = Some(Instant::now() + Duration::from_secs(30));
             }
         }
     }
