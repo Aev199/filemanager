@@ -1,6 +1,7 @@
 //! Incremental watcher for the on-disk name index. All SQLite writes run on
 //! a single background thread. No file contents or revisions are retained.
 use crate::persistent_index::PersistentIndex;
+use crate::path_utils::normalize_extended_path;
 use notify::{
     event::ModifyKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -39,7 +40,7 @@ impl IndexWatch {
         let (sender, receiver) = mpsc::sync_channel::<PathBuf>(QUEUE_CAPACITY);
         let state = Arc::new(WatchState::default());
         let callback_state = Arc::clone(&state);
-        let watched_root = root.to_path_buf();
+        let watched_root = normalize_extended_path(root);
         let ignored_db = db_path.to_path_buf();
 
         let mut watcher = notify::recommended_watcher(
@@ -57,6 +58,7 @@ impl IndexWatch {
                             callback_state.full_scan_needed.store(true, Ordering::Release);
                         }
                         for path in event.paths {
+                            let path = normalize_extended_path(&path);
                             if should_ignore(&path, &ignored_db) { continue; }
                             if !path.starts_with(&watched_root) { continue; }
                             if path == watched_root {
@@ -84,7 +86,7 @@ impl IndexWatch {
         watcher.watch(root, RecursiveMode::Recursive)?;
 
         let worker_state = Arc::clone(&state);
-        let worker_root = root.to_path_buf();
+        let worker_root = normalize_extended_path(root);
         let db = db_path.to_path_buf();
         std::thread::spawn(move || {
             process_events(worker_root, db, max_entries, receiver, worker_state);
