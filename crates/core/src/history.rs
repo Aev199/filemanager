@@ -152,6 +152,18 @@ impl Journal {
         Ok(affected != 0)
     }
 
+    /// Change only the human comment; never accidentally clear the author.
+    pub fn set_comment(&self, event_id: i64, comment: &str) -> io::Result<bool> {
+        if event_id <= 0 || comment.chars().count() > 5000 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid event or comment too long"));
+        }
+        let affected = self.connect()?.execute(
+            "UPDATE events SET comment=?1 WHERE id=?2",
+            params![comment, event_id],
+        ).map_err(sqlite_error)?;
+        Ok(affected == 1)
+    }
+
     pub fn events(&self, path: &Path, limit: usize) -> io::Result<Vec<Event>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
@@ -227,6 +239,10 @@ mod tests {
         assert_eq!(events[0].kind, "modified");
         journal.annotate(events[0].id, Some("Operator"), "Reviewed model").unwrap();
         assert_eq!(journal.events(&path, 1).unwrap()[0].comment, "Reviewed model");
+        journal.set_comment(events[0].id, "Final annotation").unwrap();
+        let annotated = journal.events(&path, 1).unwrap();
+        assert_eq!(annotated[0].author.as_deref(), Some("Operator"));
+        assert_eq!(annotated[0].comment, "Final annotation");
         assert!(!String::from_utf8_lossy(&fs::read(db).unwrap()).contains(content));
         fs::remove_file(&path).unwrap();
         assert!(journal.mark_missing(&path).unwrap());
