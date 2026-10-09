@@ -24,7 +24,7 @@ struct Explorer {
     journal: Option<Arc<Journal>>,
     watcher: Option<HistoryWatch>,
     watched_root: Option<PathBuf>,
-    confirm_recycle: Option<PathBuf>,
+    confirm_recycle: Option<(PathBuf, Plan)>,
     status: String,
     search_input: Entity<InputState>,
     comment_input: Entity<InputState>,
@@ -183,23 +183,39 @@ impl Explorer {
     }
 
     fn recycle(&mut self, cx: &mut Context<Self>) {
+        if self.copy_in_progress {
+            self.status = "Wait for the current copy to finish before recycling".into();
+            cx.notify();
+            return;
+        }
         let Some(path) = self.selected.clone() else {
             self.status = "Select a file".into();
             cx.notify();
             return;
         };
-        if self.confirm_recycle.as_ref() != Some(&path) {
-            self.confirm_recycle = Some(path);
-            self.status = "Click Recycle again to confirm".into();
-            cx.notify();
-            return;
-        }
-        self.confirm_recycle = None;
+
+        // The first click validates and freezes the intended source. The
+        // second click submits that SAME plan, not a newly-prepared command
+        // which might point to a different file.
+        let plan = match self.confirm_recycle.take() {
+            Some((pending, plan)) if pending == path => plan,
+            _ => {
+                match Plan::prepare(Action::Recycle, &path, None) {
+                    Ok(plan) => {
+                        self.confirm_recycle = Some((path, plan));
+                        self.status = "Click Recycle again to confirm this selected file".into();
+                    }
+                    Err(error) => self.status = format!("Cannot prepare recycling: {error}"),
+                }
+                cx.notify();
+                return;
+            }
+        };
         self.selected = None;
+        self.selected_history_event = None;
         self.status = "Sending to Windows Recycle Bin...".into();
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
-            let plan = Plan::prepare(Action::Recycle, &path, None)?;
             queue.submit(plan);
             queue.run_all().remove(0).1
         });
@@ -208,7 +224,7 @@ impl Explorer {
             let _ = weak.update(cx, |this, cx| {
                 this.status = match result {
                     Ok(_) => "Moved to Recycle Bin".into(),
-                    Err(e) => format!("Recycle failed: {e}"),
+                    Err(error) => format!("Recycle refused: {error}"),
                 };
                 cx.notify();
             });
