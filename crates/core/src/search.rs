@@ -24,9 +24,16 @@ impl SearchIndex {
         }
         let mut result = Self { root: root.to_owned(), ..Default::default() };
         for entry in WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
-            !e.file_name().to_str().is_some_and(|s| [".git", ".svn", "node_modules", "target"].contains(&s))
+            !e.file_name().to_str().is_some_and(|s| {
+                [".git", ".svn", "node_modules", "target"].contains(&s)
+            })
         }) {
-            let entry = entry.map_err(io::Error::other)?;
+            // A permission-denied subfolder must not discard every result
+            // found so far. Keep the rest of the index usable.
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => { result.truncated = true; continue; }
+            };
             if entry.depth() == 0 || entry.file_type().is_symlink() { continue; }
             if result.files.len() >= max_entries {
                 result.truncated = true;
@@ -57,13 +64,15 @@ pub fn subsequence_score(candidate: &str, needle: &str) -> Option<i32> {
     if needle.is_empty() { return None; }
     let mut positions = candidate.char_indices();
     let mut score = 0i32;
-    let mut previous = None;
+    let mut previous: Option<(usize, usize)> = None;
     for desired in needle.chars() {
         let (position, _) = positions.find(|(_, c)| *c == desired)?;
         score += 10;
-        if previous.is_some_and(|last| position == last + desired.len_utf8()) { score += 7; }
+        // Use the byte width of the PREVIOUS matched character. Russian
+        // and other multi-byte UTF-8 filenames otherwise score incorrectly.
+        if previous.is_some_and(|(at, bytes)| position == at + bytes) { score += 7; }
         if position == 0 { score += 4; }
-        previous = Some(position);
+        previous = Some((position, desired.len_utf8()));
     }
     Some(score - (candidate.chars().count() as i32 / 5))
 }
@@ -103,6 +112,9 @@ mod tests {
     fn fuzzy_and_bounded_preview() {
         assert!(subsequence_score("foundation_model.xlsx", "fmdl").is_some());
         assert!(subsequence_score("report.txt", "zzz").is_none());
+        assert!(subsequence_score("Расчётная_модель.xlsx", "расмод").is_some());
+        assert!(subsequence_score("Фундамент.txt", "фун").is_some());
+        assert!(subsequence_score("модель.txt", "ьлем").is_none());
         let temp = tempfile::tempdir().unwrap();
         let a = temp.path().join("foundation_model.txt");
         fs::write(&a, "original document").unwrap();
