@@ -210,6 +210,37 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn occupied_folder_is_never_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let target = temp.path().join("target");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(src.join("file.txt"), b"source").unwrap();
+        fs::write(target.join("file.txt"), b"keep existing").unwrap();
+
+        let control = CopyControl::default();
+        assert!(copy_folder(&src, &target, &control).is_err());
+        assert_eq!(fs::read(target.join("file.txt")).unwrap(), b"keep existing");
+        assert_eq!(fs::read(src.join("file.txt")).unwrap(), b"source");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn copying_folder_into_its_own_subfolder_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(src.join("sub")).unwrap();
+        let target = src.join("sub").join("nested-copy");
+        let control = CopyControl::default();
+        assert!(copy_folder(&src, &target, &control).is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
     fn cancelled_copy_never_publishes_destination() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("src");
