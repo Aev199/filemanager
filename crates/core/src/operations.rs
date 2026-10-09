@@ -195,7 +195,7 @@ impl Plan {
                     return Err(invalid("A new folder must be created directly inside the selected parent"));
                 }
                 if occupied(&normalized)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
-                if source.is_dir() && parent.starts_with(&source) {
+                if action != Action::CreateFolder && source.is_dir() && parent.starts_with(&source) {
                     return Err(invalid("Cannot move or copy a folder inside itself"));
                 }
                 Some(normalized)
