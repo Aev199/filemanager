@@ -312,6 +312,7 @@ impl Explorer {
         };
         self.operation_busy = true;
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.operation_busy = false;
             self.status = "Operation refused: SQLite audit journal unavailable".into();
             cx.notify();
             return;
@@ -384,6 +385,7 @@ impl Explorer {
         self.operation_busy = true;
         self.status = "Renaming...".into();
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.operation_busy = false;
             self.status = "Operation refused: SQLite audit journal unavailable".into();
             cx.notify();
             return;
@@ -505,6 +507,7 @@ impl Explorer {
         self.operation_busy = true;
         self.status = "Sending to Windows Recycle Bin...".into();
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.operation_busy = false;
             self.status = "Operation refused: SQLite audit journal unavailable".into();
             cx.notify();
             return;
