@@ -160,14 +160,15 @@ fn process_events(
     // Reconcile the gap between an initial index scan and watcher startup.
     state.full_scan_needed.store(true, Ordering::Release);
     while !state.stop.load(Ordering::Acquire) {
-        match receiver.recv_timeout(DEBOUNCE) {
+        let timed_out = match receiver.recv_timeout(DEBOUNCE) {
             Ok(path) => {
                 if first_event.is_none() { first_event = Some(Instant::now()); }
                 paths.push(path);
+                false
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => true,
             Err(RecvTimeoutError::Disconnected) => break,
-        }
+        };
 
         let full = state.full_scan_needed.swap(false, Ordering::AcqRel)
             || last_audit.elapsed() >= PERIODIC_AUDIT
@@ -175,7 +176,7 @@ fn process_events(
         let reached_window = first_event.is_some_and(|time| {
             time.elapsed() >= MAX_DELAY
         });
-        let quiet = first_event.is_some() && receiver.try_recv().is_err();
+        let quiet = first_event.is_some() && timed_out;
         // In busy folders, always flush after MAX_DELAY. In quiet folders,
         // flush on the first receive-timeout / quiet period.
         if !full && !reached_window && !quiet { continue; }
