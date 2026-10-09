@@ -246,7 +246,7 @@ impl Explorer {
                     for event in history {
                         box_ = box_.child(
                             div().border_t_1().border_color(rgb(0x303E50)).pt_2()
-                                .child(format!("#{} · {} · {}", event.id, event.kind, event.observed_ms))
+                                .child(format!("#{} · {} · {}", event.id, event.kind, event.display_time()))
                                 .child(format!("Observer: {}", event.recorded_by))
                                 .child(event.comment)
                         );
