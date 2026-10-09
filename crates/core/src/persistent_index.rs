@@ -135,7 +135,7 @@ impl PersistentIndex {
             };
             // Do not index the index's own files if the monitored root
             // happens to contain LOCALAPPDATA/Filemanager.
-            if index_files.iter().any(|file| entry.path() == file) {
+            if index_files.iter().any(|file| entry.path() == file.as_path()) {
                 continue;
             }
             let Some(name) = entry.file_name().to_str() else {
