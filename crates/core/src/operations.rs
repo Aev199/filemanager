@@ -146,7 +146,7 @@ pub(crate) fn safe_rename(_source: &Path, _destination: &Path) -> io::Result<()>
 pub fn validate_leaf_name(name: &str) -> io::Result<()> {
     if name.is_empty() || name.trim() != name || name == "." || name == ".."
         || name.encode_utf16().count() > 255 || name.ends_with('.')
-        || name.chars().any(|c| c.is_control() || "<>:\\"/\\|?*".contains(c))
+        || name.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
     {
         return Err(invalid("Invalid Windows file or folder name"));
     }
