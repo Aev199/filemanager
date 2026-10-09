@@ -84,6 +84,15 @@ impl Explorer {
         }
     }
 
+    fn close_search(&mut self) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_active = false;
+        self.search_busy = false;
+        self.search_index = None;
+        self.search_root = None;
+        self.search_results.clear();
+    }
+
     fn go_to(&mut self, path: PathBuf, side: Side, cx: &mut Context<Self>) {
         let tab = self.browser.active_mut();
         tab.focus_right = matches!(side, Side::Right) && tab.right.is_some();
@@ -95,6 +104,7 @@ impl Explorer {
             }
             Err(e) => format!("Navigation failed: {e}"),
         };
+        self.close_search();
         cx.notify();
     }
 
@@ -115,6 +125,7 @@ impl Explorer {
             self.status = e.to_string();
         }
         self.selected = None;
+        self.close_search();
         cx.notify();
     }
 
@@ -301,8 +312,7 @@ impl Explorer {
             self.selected_history_event = None;
             self.status = format!("Selected search result: {}", path.display());
         }
-        self.search_active = false;
-        self.search_results.clear();
+        self.close_search();
         cx.notify();
     }
 
@@ -596,11 +606,13 @@ impl Explorer {
 
     fn key_back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
         self.browser.active_mut().active_mut().back();
+        self.close_search();
         self.selected = None;
         cx.notify();
     }
     fn key_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         let _ = self.browser.active_mut().active_mut().up();
+        self.close_search();
         self.selected = None;
         cx.notify();
     }
@@ -630,6 +642,7 @@ impl Render for Explorer {
                     .text_color(rgb(0xE9EFF7)).cursor_pointer().child(tab.title.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.browser.active_tab = i;
+                        this.close_search();
                         this.selected = None;
                         cx.notify();
                     }))
@@ -644,13 +657,22 @@ impl Render for Explorer {
                 cx.notify();
             })))
             .child(Self::control("Back", "back", cx.listener(|this, _, _, cx| {
-                this.browser.active_mut().active_mut().back(); this.selected = None; cx.notify();
+                this.browser.active_mut().active_mut().back();
+                this.close_search();
+                this.selected = None;
+                cx.notify();
             })))
             .child(Self::control("Forward", "forward", cx.listener(|this, _, _, cx| {
-                this.browser.active_mut().active_mut().forward(); this.selected = None; cx.notify();
+                this.browser.active_mut().active_mut().forward();
+                this.close_search();
+                this.selected = None;
+                cx.notify();
             })))
             .child(Self::control("Up", "up", cx.listener(|this, _, _, cx| {
-                let _ = this.browser.active_mut().active_mut().up(); this.selected = None; cx.notify();
+                let _ = this.browser.active_mut().active_mut().up();
+                this.close_search();
+                this.selected = None;
+                cx.notify();
             })))
             .child(Self::control("Split", "split", cx.listener(|this, _, _, cx| {
                 this.browser.active_mut().toggle_split(); cx.notify();
@@ -690,8 +712,7 @@ impl Render for Explorer {
                 })))
             .child(Self::control("Close results", "clear-results",
                 cx.listener(|this, _, _, cx| {
-                    this.search_active = false;
-                    this.search_results.clear();
+                    this.close_search();
                     cx.notify();
                 })));
 
