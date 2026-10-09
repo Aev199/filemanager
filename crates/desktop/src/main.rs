@@ -5,11 +5,12 @@ use filemanager_core::search;
 use filemanager_core::persistent_index::PersistentIndex;
 use filemanager_core::index_watch::IndexWatch;
 use filemanager_core::workspace::WorkspaceStore;
-use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
+use gpui::{actions, div, uniform_list, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::Root;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find]);
@@ -50,7 +51,11 @@ struct Explorer {
     creating_folder: bool,
     renaming: bool,
     last_move: Option<Receipt>,
-    listing_limit: usize,
+    directory_cache: HashMap<PathBuf, Arc<browser::Listing>>,
+    directory_loading: HashMap<PathBuf, u64>,
+    directory_errors: HashMap<PathBuf, String>,
+    directory_cache_order: VecDeque<PathBuf>,
+    directory_request: u64,
     miller_mode: bool,
     workspaces: Option<WorkspaceStore>,
     journal: Option<Arc<Journal>>,
@@ -115,7 +120,11 @@ impl Explorer {
             renaming: false,
             creating_folder: false,
             last_move: None,
-            listing_limit: 200,
+            directory_cache: HashMap::new(),
+            directory_loading: HashMap::new(),
+            directory_errors: HashMap::new(),
+            directory_cache_order: VecDeque::new(),
+            directory_request: 0,
             miller_mode,
             workspaces,
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
@@ -799,69 +808,164 @@ impl Explorer {
             .into_any_element()
     }
 
-    fn column(&self, folder: PathBuf, side: Side, cx: &mut Context<Self>) -> AnyElement {
-        let mut rows = div().id(format!("scroll-{}", folder.display()))
-            .flex_1().flex().flex_col().overflow_y_scroll();
-        match browser::list_directory(&folder, self.listing_limit) {
-            Ok(listing) => {
-                for (i, entry) in listing.entries.into_iter().enumerate() {
-                    let path = entry.path;
-                    let label = if entry.is_directory { format!("▸ {}", entry.name) }
-                                else { format!("  {}", entry.name) };
-                    let active = self.selected.as_ref() == Some(&path);
-                    rows = rows.child(
-                        div().id(format!("row-{}-{i}", folder.display())).w_full().p_2()
-                            .bg(rgb(if active { 0x344F69 } else { 0x222C3A }))
-                            .text_color(rgb(0xDFEAF4)).cursor_pointer().child(label)
-                            .on_drag(FileDragInfo { path: path.clone() },
-                                |info: &FileDragInfo, position, _, cx| {
-                                    cx.new(|_| FileDragPreview {
-                                        name: browser::display_name(&info.path),
-                                        position,
-                                    })
-                                })
-                            .on_mouse_down(MouseButton::Right,
-                                cx.listener({
-                                    let context_path = path.clone();
-                                    move |this, event: &MouseDownEvent, _, cx| {
-                                        this.selected = Some(context_path.clone());
-                                        this.selected_history_event = None;
-                                        this.context_menu = Some(event.position);
-                                        cx.notify();
-                                    }
-                                }))
-                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                                if event.standard_click() {
-                                    this.context_menu = None;
-                                    this.select_or_open(path.clone(), side, cx);
-                                }
-                            }))
-                    );
+    /// Only currently visible columns are requested. Directory enumeration
+    /// runs on a background thread; re-rendering never re-reads the disk.
+    fn visible_directories(&self) -> Vec<PathBuf> {
+        let tab = self.browser.active();
+        let mut folders = Vec::new();
+        for pane in [Some(&tab.left), tab.right.as_ref()].into_iter().flatten() {
+            let columns = if self.miller_mode {
+                pane.columns(3)
+            } else {
+                vec![pane.path.clone()]
+            };
+            for path in columns {
+                if !folders.contains(&path) { folders.push(path); }
+            }
+        }
+        folders
+    }
+
+    fn load_directory(&mut self, folder: PathBuf, force: bool, cx: &mut Context<Self>) {
+        if !force && (self.directory_cache.contains_key(&folder)
+            || self.directory_loading.contains_key(&folder)
+            || self.directory_errors.contains_key(&folder)) {
+            return;
+        }
+        // A monotonically increasing request ID prevents a slower, outdated
+        // result from replacing a user-requested refresh.
+        self.directory_request = self.directory_request.wrapping_add(1);
+        let request = self.directory_request;
+        if force { self.directory_cache.remove(&folder); }
+        self.directory_errors.remove(&folder);
+        self.directory_loading.insert(folder.clone(), request);
+        let task_path = folder.clone();
+        let task = cx.background_spawn(async move {
+            browser::scan_directory(&task_path, 100_000)
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.directory_loading.get(&folder) != Some(&request) {
+                    return;
                 }
-                if listing.truncated {
-                    if self.listing_limit < 3000 {
-                        rows = rows.child(
-                            div().id(format!("load-more-{}", folder.display()))
-                                .p_3().rounded_md().cursor_pointer()
-                                .bg(rgb(0x344F69))
-                                .child(format!("Show more files (currently first {})", self.listing_limit))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.listing_limit = (this.listing_limit + 200).min(3000);
-                                    cx.notify();
-                                }))
-                        );
-                    } else {
-                        rows = rows.child("Showing first 3000 entries. Virtualized listing is planned.");
+                this.directory_loading.remove(&folder);
+                match result {
+                    Ok(listing) => {
+                        this.directory_cache_order.retain(|old| old != &folder);
+                        this.directory_cache_order.push_back(folder.clone());
+                        this.directory_cache.insert(folder.clone(), Arc::new(listing));
+                        // 8 slots bound the memory used by the file listing
+                        // cache even after navigating through many directories.
+                        while this.directory_cache_order.len() > 8 {
+                            if let Some(old) = this.directory_cache_order.pop_front() {
+                                this.directory_cache.remove(&old);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        this.directory_errors.insert(folder.clone(), error.to_string());
                     }
                 }
-            }
-            Err(e) => rows = rows.child(e.to_string()),
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn load_visible_directories(&mut self, cx: &mut Context<Self>) {
+        for folder in self.visible_directories() {
+            self.load_directory(folder, false, cx);
         }
-        div().w(px(if self.miller_mode { 235. } else { 750. })).h_full().flex().flex_col()
+    }
+
+    fn refresh_visible_directories(&mut self, cx: &mut Context<Self>) {
+        for folder in self.visible_directories() {
+            self.load_directory(folder, true, cx);
+        }
+        self.status = "Refreshing visible folders in the background".into();
+        cx.notify();
+    }
+
+    fn directory_row(&self, entry: &browser::Entry, side: Side, cx: &mut Context<Self>) -> gpui::Div {
+        let path = entry.path.clone();
+        let label = if entry.is_directory {
+            format!("▸ {}", entry.name)
+        } else {
+            format!("  {}", entry.name)
+        };
+        let active = self.selected.as_ref() == Some(&path);
+        div().id(format!("row-{}", path.display()))
+            .w_full().h(px(31.)).px_3().flex().items_center()
+            .bg(rgb(if active { 0x344F69 } else { 0x222C3A }))
+            .text_color(rgb(0xDFEAF4)).cursor_pointer()
+            .child(label)
+            .on_drag(FileDragInfo { path: path.clone() },
+                |info: &FileDragInfo, position, _, cx| {
+                    cx.new(|_| FileDragPreview {
+                        name: browser::display_name(&info.path), position,
+                    })
+                })
+            .on_mouse_down(MouseButton::Right,
+                cx.listener({
+                    let context_path = path.clone();
+                    move |this, event: &MouseDownEvent, _, cx| {
+                        this.selected = Some(context_path.clone());
+                        this.selected_history_event = None;
+                        this.context_menu = Some(event.position);
+                        cx.notify();
+                    }
+                }))
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                if event.standard_click() {
+                    this.context_menu = None;
+                    this.select_or_open(path.clone(), side, cx);
+                }
+            }))
+    }
+
+    fn column(&self, folder: PathBuf, side: Side, cx: &mut Context<Self>) -> AnyElement {
+        let mut column = div()
+            .w(px(if self.miller_mode { 235. } else { 750. }))
+            .h_full().min_h_0().flex().flex_col()
             .border_r_1().border_color(rgb(0x364252))
-            .child(div().p_3().bg(rgb(0x293544)).text_color(rgb(0xF5F7F9))
-                .child(browser::display_name(&folder)))
-            .child(rows).into_any_element()
+            .child(div().p_3().bg(rgb(0x293544))
+                .text_color(rgb(0xF5F7F9))
+                .child(browser::display_name(&folder)));
+
+        if let Some(listing) = self.directory_cache.get(&folder) {
+            let listing = Arc::clone(listing);
+            let count = listing.entries.len();
+            column = column.child(
+                div().px_3().py_1().text_color(rgb(0xA9C0DA))
+                    .child(format!("{} items{}", count,
+                        if listing.truncated { " · directory limit / unreadable items" }
+                        else { "" }))
+            );
+            // GPUI only constructs on-screen rows. Scrolling no longer calls
+            // read_dir or rebuilds tens of thousands of GPUI elements.
+            let id = format!("virtual-{}", folder.display());
+            column = column.child(
+                div().flex_1().min_h_0()
+                    .child(
+                        uniform_list(
+                            id, count,
+                            cx.processor(move |this, range, _window, cx| {
+                                range.map(|index| {
+                                    this.directory_row(&listing.entries[index], side, cx)
+                                }).collect::<Vec<_>>()
+                            }),
+                        ).h_full()
+                    )
+            );
+        } else if let Some(error) = self.directory_errors.get(&folder) {
+            column = column.child(div().p_3().text_color(rgb(0xE4A5A5))
+                .child(format!("Could not read directory: {error}. Press F5 to retry.")));
+        } else {
+            column = column.child(div().p_3().text_color(rgb(0xA9C0DA))
+                .child("Loading directory…"));
+        }
+
+        column.into_any_element()
     }
 
     fn pane(&self, side: Side, cx: &mut Context<Self>) -> AnyElement {
@@ -1058,11 +1162,14 @@ impl Explorer {
         cx.notify();
     }
     fn key_stage(&mut self, _: &Stage, _: &mut Window, cx: &mut Context<Self>) { self.stage(cx); }
-    fn key_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) { cx.notify(); }
+    fn key_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_visible_directories(cx);
+    }
 }
 
 impl Render for Explorer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.load_visible_directories(cx);
         let mut tabs = div().flex().gap_2().p_2().bg(rgb(0x141C27));
         for (i, tab) in self.browser.tabs.iter().enumerate() {
             let active = i == self.browser.active_tab;
@@ -1139,7 +1246,9 @@ impl Render for Explorer {
             })))
             .child(Self::control("Recycle", "recycle", cx.listener(|this, _, _, cx| this.recycle(cx))))
             .child(Self::control("Watch folder", "watch", cx.listener(|this, _, _, cx| this.watch(cx))))
-            .child(Self::control("Refresh", "refresh", cx.listener(|_, _, _, cx| cx.notify())));
+            .child(Self::control("Refresh", "refresh", cx.listener(|this, _, _, cx| {
+                this.refresh_visible_directories(cx);
+            })));
         let searchbar = div().w_full().flex().items_center().gap_2().p_2()
             .bg(rgb(0x1A2230))
             .child(div().w(px(360.)).child(Input::new(&self.search_input)))
