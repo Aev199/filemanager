@@ -145,11 +145,14 @@ impl Plan {
                 {
                     return Err(io::Error::other("Source changed while copying; destination was not published"));
                 }
-                fs::set_permissions(staging.path(), opened_meta.permissions())?;
                 if let Ok(timestamp) = opened_meta.modified() {
-                    filetime::set_file_mtime(staging.path(), filetime::FileTime::from_system_time(timestamp))?;
+                    filetime::set_file_handle_times(
+                        staging.as_file(), None,
+                        Some(filetime::FileTime::from_system_time(timestamp)),
+                    )?;
                 }
                 staging.as_file_mut().sync_all()?;
+                staging.as_file().set_permissions(opened_meta.permissions())?;
                 staging.persist_noclobber(dest).map_err(|e| e.error)?;
             }
             Action::Move | Action::Rename => {
@@ -299,9 +302,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("owned.txt");
         fs::write(&dest, b"keep me").unwrap();
-        let staging = Builder::new().prefix(".filemanager-copy-")
+        let mut staging = Builder::new().prefix(".filemanager-copy-")
             .suffix(".fm-partial").tempfile_in(tmp.path()).unwrap();
-        fs::write(staging.path(), b"new text").unwrap();
+        staging.as_file_mut().write_all(b"new text").unwrap();
         assert!(staging.persist_noclobber(&dest).is_err());
         assert_eq!(fs::read(dest).unwrap(), b"keep me");
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
