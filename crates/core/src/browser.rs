@@ -157,7 +157,7 @@ pub fn list_directory(dir: &Path, limit: usize) -> io::Result<Listing> {
     for item in fs::read_dir(dir)? {
         let item = item?;
         if entries.len() == limit { truncated = true; break; }
-        let metadata = item.symlink_metadata()?;
+        let metadata = fs::symlink_metadata(item.path())?;
         entries.push(Entry {
             name: item.file_name().to_string_lossy().into_owned(),
             path: item.path(),
