@@ -4,6 +4,7 @@ use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue
 use filemanager_core::search;
 use filemanager_core::persistent_index::PersistentIndex;
 use filemanager_core::index_watch::IndexWatch;
+use filemanager_core::operation_journal::OperationJournal;
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, uniform_list, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -59,6 +60,7 @@ struct Explorer {
     miller_mode: bool,
     workspaces: Option<WorkspaceStore>,
     journal: Option<Arc<Journal>>,
+    operation_journal: Option<Arc<OperationJournal>>,
     watcher: Option<HistoryWatch>,
     watched_root: Option<PathBuf>,
     confirm_recycle: Option<(PathBuf, Plan)>,
@@ -102,6 +104,19 @@ impl Explorer {
                 this.update_search(cx);
             }
         });
+        let operation_journal = OperationJournal::open(OperationJournal::default_path())
+            .ok().map(Arc::new);
+        let operation_status = match operation_journal.as_ref() {
+            Some(journal) => match journal.unresolved(100) {
+                Ok(pending) if !pending.is_empty() => format!(
+                    "WARNING: {} unfinished file operations. Verify affected paths; nothing was retried.",
+                    pending.len()
+                ),
+                Ok(_) => "Filemanager · metadata-only history · verified file-op queue".into(),
+                Err(error) => format!("Operation diagnostics unavailable: {error}"),
+            },
+            None => "Operation journal unavailable; file changes disabled".into(),
+        };
         let workspaces = WorkspaceStore::open(WorkspaceStore::default_path()).ok();
         let (browser, miller_mode) = workspaces.as_ref()
             .and_then(|store| store.load("Default").ok().flatten())
@@ -130,8 +145,9 @@ impl Explorer {
             miller_mode,
             workspaces,
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
+            operation_journal,
             watcher: None, watched_root: None, confirm_recycle: None,
-            status: "Filemanager · metadata-only history".into(),
+            status: operation_status,
             search_input, address_input, comment_input, author_input, search_query: String::new(),
             search_results: Vec::new(), search_root: None,
             index_watch: None, index_watch_root: None,
@@ -213,6 +229,11 @@ impl Explorer {
             cx.notify();
             return;
         }
+        let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.status = "Copy refused: operation journal unavailable".into();
+            cx.notify();
+            return;
+        };
         let target = self.browser.active().active().path.clone();
         let mut zone = std::mem::take(&mut self.zone);
         self.copy_in_progress = true;
@@ -220,7 +241,7 @@ impl Explorer {
         self.copy_control = Some(Arc::clone(&control));
         self.status = "Copying staged files or folders...".into();
         let task = cx.background_spawn(async move {
-            let results = zone.copy_to_with_control(&target, &control);
+            let results = zone.copy_to_audited(&target, &control, &audit);
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
             let errors = results.len() - ok;
             let first_error = results.iter().find_map(|(path, result)| {
@@ -290,10 +311,15 @@ impl Explorer {
             }
         };
         self.operation_busy = true;
+        let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.status = "Operation refused: SQLite audit journal unavailable".into();
+            cx.notify();
+            return;
+        };
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
             queue.submit(plan);
-            queue.run_all().remove(0).1
+            queue.run_all_audited(&CopyControl::default(), &audit).remove(0).1
         });
         cx.spawn(async move |weak, cx| {
             let result = task.await;
@@ -357,10 +383,15 @@ impl Explorer {
         };
         self.operation_busy = true;
         self.status = "Renaming...".into();
+        let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.status = "Operation refused: SQLite audit journal unavailable".into();
+            cx.notify();
+            return;
+        };
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
             queue.submit(plan);
-            queue.run_all().remove(0).1
+            queue.run_all_audited(&CopyControl::default(), &audit).remove(0).1
         });
         cx.spawn(async move |weak, cx| {
             let result = task.await;
@@ -395,10 +426,16 @@ impl Explorer {
             cx.notify();
             return;
         };
+        let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.last_move = Some(receipt);
+            self.status = "Undo refused: operation journal unavailable".into();
+            cx.notify();
+            return;
+        };
         self.operation_busy = true;
         let task = cx.background_spawn(async move {
             let queue = OperationQueue::default();
-            let result = queue.undo_completed(&receipt);
+            let result = queue.undo_completed_audited(&receipt, &audit);
             (receipt, result)
         });
         cx.spawn(async move |weak, cx| {
@@ -467,10 +504,15 @@ impl Explorer {
         self.selected_history_event = None;
         self.operation_busy = true;
         self.status = "Sending to Windows Recycle Bin...".into();
+        let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.status = "Operation refused: SQLite audit journal unavailable".into();
+            cx.notify();
+            return;
+        };
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
             queue.submit(plan);
-            queue.run_all().remove(0).1
+            queue.run_all_audited(&CopyControl::default(), &audit).remove(0).1
         });
         cx.spawn(async move |weak, cx| {
             let result = task.await;
