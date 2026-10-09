@@ -1190,7 +1190,10 @@ impl Explorer {
 
 impl Render for Explorer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.load_visible_directories(cx);
+        // Do not compete with SQLite search for I/O while displaying results.
+        if !self.search_active {
+            self.load_visible_directories(cx);
+        }
         let mut tabs = div().flex().gap_2().p_2().bg(rgb(0x141C27));
         for (i, tab) in self.browser.tabs.iter().enumerate() {
             let active = i == self.browser.active_tab;
