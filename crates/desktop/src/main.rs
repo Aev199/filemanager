@@ -296,6 +296,7 @@ impl Explorer {
                 }
             }
             self.selected = Some(path.clone());
+            self.selected_history_event = None;
             self.status = format!("Selected search result: {}", path.display());
         }
         self.search_active = false;
@@ -527,6 +528,7 @@ impl Explorer {
                         .child("Select a save below, enter a comment, then press Save comment."));
                     for event in history {
                         let event_id = event.id;
+                        let saved_comment = event.comment.clone();
                         box_ = box_.child(
                             div().border_t_1().border_color(rgb(0x303E50)).pt_2()
                                 .child(format!("#{} · {} · {}", event.id, event.kind, event.display_time()))
@@ -542,8 +544,11 @@ impl Explorer {
                                         .child(if self.selected_history_event == Some(event_id) {
                                             "Selected for annotation"
                                         } else { "Select this save" })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             this.selected_history_event = Some(event_id);
+                                            this.comment_input.update(cx, |input, cx| {
+                                                input.set_value(saved_comment.clone(), window, cx);
+                                            });
                                             cx.notify();
                                         }))
                                 )
