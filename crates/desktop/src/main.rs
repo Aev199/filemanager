@@ -4,7 +4,7 @@ use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue
 use filemanager_core::search;
 use filemanager_core::persistent_index::PersistentIndex;
 use filemanager_core::index_watch::IndexWatch;
-use filemanager_core::operation_journal::OperationJournal;
+use filemanager_core::operation_journal::{InterruptedAction, OperationJournal};
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, uniform_list, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -61,6 +61,8 @@ struct Explorer {
     workspaces: Option<WorkspaceStore>,
     journal: Option<Arc<Journal>>,
     operation_journal: Option<Arc<OperationJournal>>,
+    operation_review: bool,
+    operation_alerts: Vec<InterruptedAction>,
     watcher: Option<HistoryWatch>,
     watched_root: Option<PathBuf>,
     confirm_recycle: Option<(PathBuf, Plan)>,
@@ -146,6 +148,8 @@ impl Explorer {
             workspaces,
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
             operation_journal,
+            operation_review: false,
+            operation_alerts: Vec::new(),
             watcher: None, watched_root: None, confirm_recycle: None,
             status: operation_status,
             search_input, address_input, comment_input, author_input, search_query: String::new(),
@@ -867,6 +871,8 @@ impl Explorer {
                     }))
             )
             .child("Choose destination, then Copy here")
+            .child(Self::control("Operation review", "operation-review-button",
+                cx.listener(|this, _, _, cx| this.toggle_operation_review(cx))))
             .into_any_element()
     }
 
@@ -1097,7 +1103,53 @@ impl Explorer {
             .into_any_element()
     }
 
+    fn toggle_operation_review(&mut self, cx: &mut Context<Self>) {
+        self.operation_review = !self.operation_review;
+        if self.operation_review {
+            self.operation_alerts.clear();
+            match &self.operation_journal {
+                Some(journal) => match journal.unresolved(30) {
+                    Ok(jobs) => {
+                        let total = jobs.len();
+                        self.operation_alerts = jobs;
+                        self.status = format!(
+                            "{total} queued/running/interrupted records; inspect disk before retrying"
+                        );
+                    }
+                    Err(error) => self.status = format!("Cannot inspect operation journal: {error}"),
+                },
+                None => self.status = "Operation journal unavailable; file changes disabled".into(),
+            };
+        }
+        cx.notify();
+    }
+
     fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.operation_review {
+            let mut view = div().id("operation-review").w(px(320.)).h_full()
+                .min_h_0().overflow_y_scroll().flex().flex_col().gap_2()
+                .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
+                .child("UNFINISHED FILE OPERATIONS")
+                .child("Do not retry blindly. Verify source and destination in Windows Explorer.")
+                .child("This list only reports SQLite statuses and does not modify any files.");
+            if self.operation_alerts.is_empty() {
+                view = view.child("No unfinished records were found.");
+            }
+            for entry in &self.operation_alerts {
+                view = view.child(
+                    div().p_2().bg(rgb(0x263343)).rounded_md()
+                        .child(format!("#{}  {} — {}", entry.id, entry.action, entry.status))
+                        .child(format!("From: {}", entry.source.display()))
+                        .child(format!(
+                            "To: {}",
+                            entry.destination.as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| "(Recycle Bin)".into()),
+                        ))
+                );
+            }
+            return view.into_any_element();
+        }
         let mut box_ = div().id("inspector-panel").w(px(260.)).h_full().min_h_0()
             .overflow_y_scroll().flex().flex_col().gap_2()
             .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
