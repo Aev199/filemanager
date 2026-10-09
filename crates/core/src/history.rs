@@ -156,18 +156,18 @@ impl Journal {
     /// Optional initial snapshot of metadata, limited to avoid a full-disk scan.
     pub fn establish_baseline(&self, root: &Path, max_files: usize) -> io::Result<usize> {
         if !root.is_dir() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "Not a folder")); }
-        let mut count = 0;
+        let mut files = Vec::new();
         for entry in WalkDir::new(root).follow_links(false).into_iter() {
             let entry = entry.map_err(io::Error::other)?;
             if entry.file_type().is_file() {
-                count += 1;
-                if count > max_files {
+                if files.len() == max_files {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, "Too many files to index; choose a smaller folder"));
                 }
-                self.observe(entry.path())?;
+                files.push(entry.into_path());
             }
         }
-        Ok(count)
+        for file in &files { self.observe(file)?; }
+        Ok(files.len())
     }
 }
 
