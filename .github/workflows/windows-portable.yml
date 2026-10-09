@@ -32,6 +32,9 @@ jobs:
       - name: Unit tests (core only)
         run: cargo test -p filemanager-core --all-targets
 
+      - name: Check Rust CLI utility
+        run: cargo check -p filemanager-cli
+
       - name: Build native GPUI application
         run: cargo build -p filemanager-desktop --release --target x86_64-pc-windows-msvc
 
