@@ -1,6 +1,6 @@
 //! Console companion for testing without GPUI and adding version comments.
 use filemanager_core::history::{HistoryWatch, Journal};
-use filemanager_core::operations::{Action, Plan};
+use filemanager_core::operations::{Action, OperationQueue, Plan};
 use filemanager_core::search::{preview, SearchIndex};
 use std::env;
 use std::io::{self, Write};
@@ -86,7 +86,9 @@ fn run() -> io::Result<()> {
                 _ => Action::Rename,
             };
             let plan = Plan::prepare(action, &source, Some(&destination))?;
-            let receipt = plan.execute()?;
+            let mut queue = OperationQueue::default();
+            queue.submit(plan);
+            let receipt = queue.run_all().remove(0).1?;
             println!("{:?}: {} -> {}", receipt.action, receipt.source.display(),
                 receipt.destination.as_deref().map(|p| p.display().to_string()).unwrap_or_default());
         }
@@ -95,7 +97,10 @@ fn run() -> io::Result<()> {
             if argument(&mut args, "--confirm")? != "--confirm" {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "Use --confirm to recycle"));
             }
-            Plan::prepare(Action::Recycle, &source, None)?.execute()?;
+            let plan = Plan::prepare(Action::Recycle, &source, None)?;
+            let mut queue = OperationQueue::default();
+            queue.submit(plan);
+            queue.run_all().remove(0).1?;
             println!("Moved to the system Recycle Bin.");
         }
         _ => {
