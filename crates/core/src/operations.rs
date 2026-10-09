@@ -1,7 +1,8 @@
 //! Filesystem actions are explicit and never overwrite an existing destination.
 //! Move/rename are reversible if neither path has been changed after the action.
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self};
 use std::io::{self, Write};
+use tempfile::Builder;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -120,17 +121,36 @@ impl Plan {
             Action::Copy => {
                 if !meta.is_file() { return Err(invalid("Folder copies are not enabled yet")); }
                 let dest = destination.as_ref().unwrap();
-                // create_new prevents silent overwrite even if another process creates dest.
-                let mut input = File::open(&self.source)?;
-                let mut output = OpenOptions::new().write(true).create_new(true).open(dest)?;
-                let result = io::copy(&mut input, &mut output)
-                    .and_then(|_| output.flush())
-                    .and_then(|_| output.sync_all());
-                drop(output);
-                if let Err(e) = result {
-                    let _ = fs::remove_file(dest); // Only file created by us.
-                    return Err(e);
+
+                // Never write partially copied bytes at the final destination.
+                // A same-directory temporary file is auto-removed on ordinary
+                // failure; persist_noclobber atomically publishes without replace.
+                let parent = dest.parent().ok_or_else(|| invalid("Missing destination folder"))?;
+                let mut input = fs::File::open(&self.source)?;
+                let opened_meta = input.metadata()?;
+                if !opened_meta.is_file() { return Err(invalid("Source is not a regular file")); }
+                let mut staging = Builder::new()
+                    .prefix(".filemanager-copy-")
+                    .suffix(".fm-partial")
+                    .tempfile_in(parent)?;
+
+                let bytes = io::copy(&mut input, staging.as_file_mut())?;
+                staging.as_file_mut().flush()?;
+                if bytes != opened_meta.len() {
+                    return Err(io::Error::other("Source length changed while copying; destination was not published"));
                 }
+                let end_meta = fs::metadata(&self.source)?;
+                if end_meta.len() != opened_meta.len()
+                    || end_meta.modified().ok() != opened_meta.modified().ok()
+                {
+                    return Err(io::Error::other("Source changed while copying; destination was not published"));
+                }
+                fs::set_permissions(staging.path(), opened_meta.permissions())?;
+                if let Ok(timestamp) = opened_meta.modified() {
+                    filetime::set_file_mtime(staging.path(), filetime::FileTime::from_system_time(timestamp))?;
+                }
+                staging.as_file_mut().sync_all()?;
+                staging.persist_noclobber(dest).map_err(|e| e.error)?;
             }
             Action::Move | Action::Rename => {
                 let dest = destination.as_ref().unwrap();
@@ -252,6 +272,39 @@ mod tests {
         symlink(&original, &link).unwrap();
         assert!(Plan::prepare(Action::Recycle, &link, None).is_err());
         assert_eq!(fs::read(&original).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn copy_creates_complete_file_with_original_modified_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("original.bin");
+        let dest = tmp.path().join("copied.bin");
+        fs::write(&source, b"full original contents").unwrap();
+        let time = fs::metadata(&source).unwrap().modified().unwrap();
+        let receipt = Plan::prepare(Action::Copy, &source, Some(&dest))
+            .unwrap().execute().unwrap();
+        assert_eq!(receipt.action, Action::Copy);
+        assert_eq!(fs::read(&dest).unwrap(), b"full original contents");
+        assert_eq!(fs::metadata(&dest).unwrap().modified().unwrap(), time);
+        let left = fs::read_dir(tmp.path()).unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(left.len(), 2, "No temporary copies should be left behind");
+    }
+
+    #[test]
+    fn copy_collision_at_publish_time_leaves_existing_destination_intact() {
+        // The real copy is atomically published by persist_noclobber; this
+        // test verifies that the same primitive refuses to replace a file.
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("owned.txt");
+        fs::write(&dest, b"keep me").unwrap();
+        let staging = Builder::new().prefix(".filemanager-copy-")
+            .suffix(".fm-partial").tempfile_in(tmp.path()).unwrap();
+        fs::write(staging.path(), b"new text").unwrap();
+        assert!(staging.persist_noclobber(&dest).is_err());
+        assert_eq!(fs::read(dest).unwrap(), b"keep me");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     #[test]
