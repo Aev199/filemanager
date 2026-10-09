@@ -9,3 +9,5 @@ pub mod workspace;
 pub mod folder_copy;
 
 pub mod persistent_index;
+
+pub mod index_watch;
