@@ -5,3 +5,5 @@ pub mod operations;
 pub mod search;
 
 pub mod workspace;
+
+pub mod folder_copy;
