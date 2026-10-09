@@ -219,7 +219,7 @@ impl Explorer {
             Side::Left => &tab.left,
             Side::Right => tab.right.as_ref().unwrap_or(&tab.left),
         };
-        let mut columns = div().flex_1().flex().overflow_x_scroll();
+        let mut columns = div().id(format!("columns-{}", if matches!(side, Side::Left) { "left" } else { "right" })).flex_1().flex().overflow_x_scroll();
         for folder in pane.columns(3) {
             columns = columns.child(self.column(folder, side, cx));
         }
@@ -238,7 +238,7 @@ impl Explorer {
                 .child(path.display().to_string());
             if let Ok(p) = search::preview(path, 1024) {
                 box_ = box_.child(format!("{} preview:", p.kind))
-                    .child(div().max_h(px(170.)).overflow_y_scroll().child(p.description));
+                    .child(div().id("preview-scroll").max_h(px(170.)).overflow_y_scroll().child(p.description));
             }
             if let Some(journal) = &self.journal {
                 if let Ok(history) = journal.events(path, 8) {
