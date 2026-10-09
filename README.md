@@ -140,6 +140,8 @@ cargo run -p filemanager-desktop
 ```powershell
 cargo run -p filemanager-cli -- history "C:\WORK\model.xlsx"
 cargo run -p filemanager-cli -- comment 3 "Инженер" "Уточнена жёсткость свай"
+cargo run -p filemanager-cli -- index "C:\WORK"
+cargo run -p filemanager-cli -- index-status "C:\WORK"
 cargo run -p filemanager-cli -- search "C:\WORK" "fundam"
 cargo run -p filemanager-cli -- preview "C:\WORK\note.txt"
 cargo run -p filemanager-cli -- watch "C:\WORK"
