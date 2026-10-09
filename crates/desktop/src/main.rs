@@ -1,13 +1,14 @@
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::history::{HistoryWatch, Journal};
 use filemanager_core::operations::{Action, DropZone, OperationQueue, Plan};
-use filemanager_core::search;
+use filemanager_core::search::{self, SearchIndex};
 use filemanager_core::workspace::WorkspaceStore;
-use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, IntoElement, KeyBinding, Render, Window, WindowOptions};
+use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, IntoElement, KeyBinding, Render, Subscription, Window, WindowOptions};
+use gpui_component::input::{Input, InputEvent, InputState};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage]);
+actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find]);
 
 #[derive(Clone, Copy)]
 enum Side { Left, Right }
@@ -25,15 +26,35 @@ struct Explorer {
     watched_root: Option<PathBuf>,
     confirm_recycle: Option<PathBuf>,
     status: String,
+    search_input: Entity<InputState>,
+    comment_input: Entity<InputState>,
+    search_query: String,
+    search_results: Vec<PathBuf>,
+    search_index: Option<Arc<SearchIndex>>,
+    search_root: Option<PathBuf>,
+    search_active: bool,
+    search_busy: bool,
+    search_generation: u64,
+    selected_history_event: Option<i64>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Explorer {
-    fn new() -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let home = std::env::var_os("USERPROFILE")
             .or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search filenames in this folder…"));
+        let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on a save…"));
+        let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.search_query = input.read(cx).value().to_string();
+                this.search_active = !this.search_query.trim().is_empty();
+                this.update_search(cx);
+            }
+        });
         let workspaces = WorkspaceStore::open(WorkspaceStore::default_path()).ok();
         let (browser, miller_mode) = workspaces.as_ref()
             .and_then(|store| store.load("Default").ok().flatten())
@@ -53,6 +74,11 @@ impl Explorer {
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
             watcher: None, watched_root: None, confirm_recycle: None,
             status: "Filemanager · metadata-only history".into(),
+            search_input, comment_input, search_query: String::new(),
+            search_results: Vec::new(), search_index: None, search_root: None,
+            search_active: false, search_busy: false, search_generation: 0,
+            selected_history_event: None,
+            _subscriptions: vec![search_subscription],
         }
     }
 
@@ -513,6 +539,7 @@ impl Render for Explorer {
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
+        gpui_component::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-t", NewTab, Some("Filemanager")),
             KeyBinding::new("ctrl-w", CloseTab, Some("Filemanager")),
@@ -522,7 +549,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-s", Stage, Some("Filemanager")),
             KeyBinding::new("f5", Refresh, Some("Filemanager")),
         ]);
-        cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Explorer::new()))
+        cx.open_window(WindowOptions::default(), |window, cx| cx.new(|cx| Explorer::new(window, cx)))
             .expect("GPUI window failed");
         cx.activate(true);
     });
