@@ -47,7 +47,7 @@ fn sqlite_error(e: rusqlite::Error) -> io::Error { io::Error::other(e) }
 
 fn ignored(path: &Path) -> bool {
     let Some(name) = path.file_name().map(|x| x.to_string_lossy().to_lowercase()) else { return true; };
-    name.starts_with("~$") || name.ends_with(".tmp") || name.ends_with(".part") || name.ends_with(".swp")
+    name.starts_with("~$") || name.ends_with(".tmp") || name.ends_with(".part") || name.ends_with(".swp") || name.ends_with(".fm-partial")
 }
 
 impl Journal {
@@ -109,15 +109,15 @@ impl Journal {
         let event_time = clock_ms(SystemTime::now());
         // One Ctrl+S can emit many rapid MODIFY signals. Merge such bursts
         // into one "modified" row, but never overwrite a user annotation.
-        let recent: Option<(i64, String, i64, String)> = tx.query_row(
-            "SELECT id, kind, observed_ms, comment FROM events WHERE path=?1 ORDER BY id DESC LIMIT 1",
-            params![path], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        let recent: Option<(i64, String, i64, String, Option<String>)> = tx.query_row(
+            "SELECT id, kind, observed_ms, comment, author FROM events WHERE path=?1 ORDER BY id DESC LIMIT 1",
+            params![path], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).optional().map_err(sqlite_error)?;
-        let merge = recent.filter(|(_, previous_kind, time, comment)|
+        let merge = recent.filter(|(_, previous_kind, time, comment, author)|
             kind == "modified" && previous_kind == "modified" &&
-            event_time.saturating_sub(*time) < 2000 && comment.is_empty()
+            event_time.saturating_sub(*time) < 2000 && comment.is_empty() && author.is_none()
         );
-        if let Some((id, _, _, _)) = merge {
+        if let Some((id, _, _, _, _)) = merge {
             tx.execute("UPDATE events SET observed_ms=?1 WHERE id=?2",
                 params![event_time, id]).map_err(sqlite_error)?;
         } else {
