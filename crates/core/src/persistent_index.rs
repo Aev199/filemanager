@@ -127,6 +127,15 @@ impl PersistentIndex {
                 incomplete = true;
                 continue;
             };
+            // Do not index the index's own files if the monitored root
+            // happens to contain LOCALAPPDATA/Filemanager.
+            let database_path = self.database.as_os_str();
+            if entry.path().as_os_str() == database_path
+                || entry.path().as_os_str() == self.database.with_extension("sqlite3-wal").as_os_str()
+                || entry.path().as_os_str() == self.database.with_extension("sqlite3-shm").as_os_str()
+            {
+                continue;
+            }
             let Some(name) = entry.file_name().to_str() else {
                 incomplete = true;
                 continue;
@@ -267,6 +276,36 @@ mod tests {
         assert!(index.info(&two).unwrap().is_none());
         assert!(one.join("alpha.txt").exists());
         assert!(two.join("beta.txt").exists());
+    }
+
+    #[test]
+    fn skips_the_index_database_itself() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        fs::create_dir(&root).unwrap();
+        let db = root.join("file-index.sqlite3");
+        let index = PersistentIndex::open(&db).unwrap();
+        fs::write(root.join("ordinary.txt"), b"keep").unwrap();
+        let summary = index.refresh(&root, 100).unwrap();
+        assert_eq!(summary.entries, 1);
+        assert!(index.query(&root, "file-index", 10).unwrap().is_empty());
+        assert_eq!(index.query(&root, "ordinary", 10).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_symlinked_subtrees() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+        let index = PersistentIndex::open(temp.path().join("index.sqlite3")).unwrap();
+        index.refresh(&root, 100).unwrap();
+        assert!(index.query(&root, "secret", 10).unwrap().is_empty());
     }
 
     #[test]
