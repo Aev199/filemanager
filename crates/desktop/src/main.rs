@@ -487,7 +487,11 @@ impl Explorer {
         }
 
         let root = self.browser.active().active().path.clone();
-        if self.search_busy && self.search_root.as_ref() == Some(&root) && !force_refresh {
+        if self.search_busy && self.search_root.as_ref() == Some(&root) {
+            if force_refresh {
+                self.status = "Index task already running; wait for it to finish.".into();
+                cx.notify();
+            }
             // The running task will query the newest text when it completes.
             return;
         }
