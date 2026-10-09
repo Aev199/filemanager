@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action { Copy, Move, Rename, Recycle }
+pub enum Action { Copy, Move, Rename, Recycle, CreateFolder }
 
 /// Cooperative cancellation and byte progress shared with the UI worker.
 #[derive(Default, Debug)]
@@ -141,6 +141,27 @@ pub(crate) fn safe_rename(_source: &Path, _destination: &Path) -> io::Result<()>
     Err(io::Error::new(io::ErrorKind::Unsupported, "No-overwrite moves are implemented for Windows only"))
 }
 
+/// Reject characters and device names invalid on Windows. The UI and
+/// CLI must not be able to turn a filename into an arbitrary relative path.
+pub fn validate_leaf_name(name: &str) -> io::Result<()> {
+    if name.is_empty() || name.trim() != name || name == "." || name == ".."
+        || name.encode_utf16().count() > 255 || name.ends_with('.')
+        || name.chars().any(|c| c.is_control() || "<>:\\"/\\|?*".contains(c))
+    {
+        return Err(invalid("Invalid Windows file or folder name"));
+    }
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    if reserved.contains(&stem.as_str()) ||
+        (stem.len() == 4 &&
+            (stem.starts_with("COM") || stem.starts_with("LPT")) &&
+            stem.as_bytes()[3].is_ascii_digit())
+    {
+        return Err(invalid("Reserved Windows device name"));
+    }
+    Ok(())
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
@@ -150,7 +171,9 @@ impl Plan {
         // Only existing local paths can be operated on.
         crate::folder_copy::reject_link(source)?;
         let source = fs::canonicalize(source)?;
-        if source.parent().is_none() { return Err(invalid("Cannot operate on a filesystem root")); }
+        if source.parent().is_none() && action != Action::CreateFolder {
+            return Err(invalid("Cannot operate on a filesystem root"));
+        }
         if fs::symlink_metadata(&source)?.file_type().is_symlink() {
             return Err(invalid("Symbolic links must be handled separately"));
         }
@@ -163,12 +186,14 @@ impl Plan {
                 let destination = destination.ok_or_else(|| invalid("Missing destination"))?;
                 // Canonicalize parent, not destination: it does not exist yet.
                 let name = destination.file_name().ok_or_else(|| invalid("Missing destination name"))?;
-                if name.to_string_lossy().trim().is_empty() || name == "." || name == ".." {
-                    return Err(invalid("Invalid destination name"));
-                }
+                let name_text = name.to_str().ok_or_else(|| invalid("Destination name is not UTF-8"))?;
+                validate_leaf_name(name_text)?;
                 let parent = fs::canonicalize(destination.parent().ok_or_else(|| invalid("Missing parent"))?)?;
                 if !parent.is_dir() { return Err(invalid("Destination parent is not a directory")); }
                 let normalized = parent.join(name);
+                if action == Action::CreateFolder && (!source.is_dir() || source != parent) {
+                    return Err(invalid("A new folder must be created directly inside the selected parent"));
+                }
                 if occupied(&normalized)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
                 if source.is_dir() && parent.starts_with(&source) {
                     return Err(invalid("Cannot move or copy a folder inside itself"));
@@ -253,6 +278,12 @@ impl Plan {
             Action::Recycle => {
                 trash::delete(&self.source).map_err(|err| io::Error::other(err.to_string()))?;
             }
+            Action::CreateFolder => {
+                let dest = destination.as_ref().ok_or_else(|| invalid("Missing new folder path"))?;
+                // create_dir never replaces an existing path; safe if a
+                // competing process claims the name after preflight.
+                fs::create_dir(dest)?;
+            }
         }
         let last_metadata = if let Some(ref dest) = destination { fs::metadata(dest).ok() } else { None };
         Ok(Receipt {
@@ -329,6 +360,22 @@ impl DropZone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_directory_is_queued_and_never_overwrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let new_folder = temp.path().join("Проект_01");
+        let plan = Plan::prepare(Action::CreateFolder, temp.path(), Some(&new_folder)).unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(plan);
+        assert!(queue.run_all()[0].1.is_ok());
+        assert!(new_folder.is_dir());
+        assert!(Plan::prepare(Action::CreateFolder, temp.path(), Some(&new_folder)).is_err());
+        assert!(validate_leaf_name("CON.txt").is_err());
+        assert!(validate_leaf_name("bad/name").is_err());
+        assert!(validate_leaf_name("bad\\\\name").is_err());
+        assert!(validate_leaf_name("Новая папка").is_ok());
+    }
+
     #[test]
     fn copy_never_overwrites_existing_file() {
         let tmp = tempfile::tempdir().unwrap();
