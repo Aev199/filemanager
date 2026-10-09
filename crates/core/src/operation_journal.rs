@@ -85,6 +85,22 @@ impl OperationJournal {
         Ok(conn.last_insert_rowid())
     }
 
+    pub fn queue_undo(&self, receipt: &crate::operations::Receipt) -> io::Result<i64> {
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO operation_jobs(action,source,destination,created_ms,updated_ms,status)
+             VALUES(?1,?2,?3,?4,?4,'queued')",
+            params![
+                format!("undo_{}", action_name(receipt.action)),
+                receipt.destination.as_ref().map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                receipt.source.to_string_lossy().as_ref(),
+                clock_ms(),
+            ],
+        ).map_err(sql_error)?;
+        Ok(conn.last_insert_rowid())
+    }
+
     pub fn start(&self, id: i64) -> io::Result<()> {
         let conn = self.connection()?;
         let changed = conn.execute(
@@ -128,17 +144,17 @@ impl OperationJournal {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT id,action,source,destination,status FROM operation_jobs
-             WHERE status='interrupted' ORDER BY id DESC LIMIT ?1"
+             WHERE status IN ('queued','running','interrupted') ORDER BY id DESC LIMIT ?1"
         ).map_err(sql_error)?;
-        stmt.query_map(params![max.min(100) as i64], |row| {
+        let mapped = stmt.query_map(params![max.min(100) as i64], |row| {
             Ok(InterruptedAction {
                 id: row.get(0)?, action: row.get(1)?,
                 source: PathBuf::from(row.get::<_, String>(2)?),
                 destination: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
                 status: row.get(4)?,
             })
-        }).map_err(sql_error)?
-        .collect::<Result<Vec<_>,_>>().map_err(sql_error)
+        }).map_err(sql_error)?;
+        mapped.collect::<Result<Vec<_>,_>>().map_err(sql_error)
     }
 
     /// Removing a diagnostic record does not touch source/target files.
