@@ -211,7 +211,8 @@ impl PersistentIndex {
             if candidate.ancestors().take_while(|p| *p != root_path).any(|ancestor| {
                 ancestor.file_name().is_some_and(|name| {
                     let name = name.to_string_lossy().to_lowercase();
-                    name.starts_with(".filemanager-stage-")
+                    IGNORED.contains(&name.as_str())
+                        || name.starts_with(".filemanager-stage-")
                         || name.starts_with(".filemanager-copy-")
                         || name.ends_with(".fm-partial")
                 })
@@ -288,7 +289,7 @@ impl PersistentIndex {
                 "DELETE FROM index_entries
                  WHERE root=?1 AND
                   (path=?2 OR (substr(path,1,length(?2))=?2
-                   AND substr(path,length(?2)+1,1) IN ('/','\\')))",
+                   AND substr(path,length(?2)+1,1) IN ('/',char(92))))",
                 params![root, scope],
             ).map_err(sql_error)?;
             let mut insert = tx.prepare(
@@ -485,6 +486,38 @@ mod tests {
         index.reconcile_paths(&root, &[nested], 100).unwrap();
         assert!(index.query(&root, "report", 10).unwrap().is_empty());
         assert!(index.query(&root, "новмод", 10).unwrap().contains(&renamed));
+    }
+
+    #[test]
+    fn directory_deletion_matches_path_boundaries_not_name_prefixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let a = root.join("dir");
+        let b = root.join("dir-backup");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("old.txt"), b"a").unwrap();
+        fs::write(b.join("keep.txt"), b"b").unwrap();
+        let db = PersistentIndex::open(temp.path().join("idx.sqlite3")).unwrap();
+        db.refresh(&root, 100).unwrap();
+        fs::remove_dir_all(&a).unwrap();
+        db.reconcile_paths(&root, &[a], 100).unwrap();
+        assert!(db.query(&root, "old", 10).unwrap().is_empty());
+        assert_eq!(db.query(&root, "keep", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn internal_subtree_notifications_do_not_create_index_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let git = root.join(".git");
+        fs::create_dir_all(&git).unwrap();
+        let idx = PersistentIndex::open(temp.path().join("idx.sqlite3")).unwrap();
+        idx.refresh(&root, 100).unwrap();
+        let ignored = git.join("secret.txt");
+        fs::write(&ignored, b"secret").unwrap();
+        idx.reconcile_paths(&root, &[ignored], 100).unwrap();
+        assert!(idx.query(&root, "secret", 10).unwrap().is_empty());
     }
 
     #[test]
