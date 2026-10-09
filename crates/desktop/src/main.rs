@@ -1,12 +1,12 @@
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::history::{HistoryWatch, Journal};
-use filemanager_core::operations::{Action, DropZone, Plan};
+use filemanager_core::operations::{Action, DropZone, OperationQueue, Plan};
 use filemanager_core::search;
 use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, IntoElement, KeyBinding, Render, Window, WindowOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-actions!(filemanager, [Back, Up, NewTab, Split, Refresh, Stage]);
+actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage]);
 
 #[derive(Clone, Copy)]
 enum Side { Left, Right }
@@ -15,6 +15,7 @@ struct Explorer {
     browser: Browser,
     selected: Option<PathBuf>,
     zone: DropZone,
+    miller_mode: bool,
     journal: Option<Arc<Journal>>,
     watcher: Option<HistoryWatch>,
     watched_root: Option<PathBuf>,
@@ -33,6 +34,7 @@ impl Explorer {
             browser: Browser::new(home).or_else(|_| Browser::new(".")).expect("No starting directory"),
             selected: None,
             zone: DropZone::default(),
+            miller_mode: true,
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
             watcher: None, watched_root: None, confirm_recycle: None,
             status: "Filemanager · metadata-only history".into(),
@@ -122,7 +124,10 @@ impl Explorer {
         self.selected = None;
         self.status = "Sending to Windows Recycle Bin...".into();
         let task = cx.background_spawn(async move {
-            Plan::prepare(Action::Recycle, &path, None).and_then(|p| p.execute())
+            let mut queue = OperationQueue::default();
+            let plan = Plan::prepare(Action::Recycle, &path, None)?;
+            queue.submit(plan);
+            queue.run_all().remove(0).1
         });
         cx.spawn(async move |weak, cx| {
             let result = task.await;
@@ -137,6 +142,13 @@ impl Explorer {
     }
 
     fn watch(&mut self, cx: &mut Context<Self>) {
+        if self.watcher.is_some() {
+            self.watcher = None;
+            self.watched_root = None;
+            self.status = "Monitoring stopped".into();
+            cx.notify();
+            return;
+        }
         let root = self.browser.active().active().path.clone();
         if let Some(journal) = &self.journal {
             match HistoryWatch::start(&root, journal.clone()) {
@@ -206,7 +218,7 @@ impl Explorer {
             }
             Err(e) => rows = rows.child(e.to_string()),
         }
-        div().w(px(235.)).h_full().flex().flex_col()
+        div().w(px(if self.miller_mode { 235. } else { 750. })).h_full().flex().flex_col()
             .border_r_1().border_color(rgb(0x364252))
             .child(div().p_3().bg(rgb(0x293544)).text_color(rgb(0xF5F7F9))
                 .child(browser::display_name(&folder)))
@@ -220,7 +232,8 @@ impl Explorer {
             Side::Right => tab.right.as_ref().unwrap_or(&tab.left),
         };
         let mut columns = div().id(format!("columns-{}", if matches!(side, Side::Left) { "left" } else { "right" })).flex_1().flex().overflow_x_scroll();
-        for folder in pane.columns(3) {
+        let folders = if self.miller_mode { pane.columns(3) } else { vec![pane.path.clone()] };
+        for folder in folders {
             columns = columns.child(self.column(folder, side, cx));
         }
         div().flex_1().h_full().flex().flex_col().overflow_hidden()
@@ -273,6 +286,12 @@ impl Explorer {
         cx.notify();
     }
     fn key_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) { self.add_tab(cx); }
+    fn key_close(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
+        let active = self.browser.active_tab;
+        self.browser.close_tab(active);
+        self.selected = None;
+        cx.notify();
+    }
     fn key_split(&mut self, _: &Split, _: &mut Window, cx: &mut Context<Self>) {
         self.browser.active_mut().toggle_split();
         cx.notify();
@@ -299,14 +318,31 @@ impl Render for Explorer {
         }
         tabs = tabs.child(Self::control("+", "add-tab", cx.listener(|this, _, _, cx| this.add_tab(cx))));
         let toolbar = div().flex().gap_2().p_2().bg(rgb(0x273241))
+            .child(Self::control("Close tab", "close-tab", cx.listener(|this, _, _, cx| {
+                let index = this.browser.active_tab;
+                this.browser.close_tab(index);
+                this.selected = None;
+                cx.notify();
+            })))
             .child(Self::control("Back", "back", cx.listener(|this, _, _, cx| {
                 this.browser.active_mut().active_mut().back(); this.selected = None; cx.notify();
+            })))
+            .child(Self::control("Forward", "forward", cx.listener(|this, _, _, cx| {
+                this.browser.active_mut().active_mut().forward(); this.selected = None; cx.notify();
             })))
             .child(Self::control("Up", "up", cx.listener(|this, _, _, cx| {
                 let _ = this.browser.active_mut().active_mut().up(); this.selected = None; cx.notify();
             })))
             .child(Self::control("Split", "split", cx.listener(|this, _, _, cx| {
                 this.browser.active_mut().toggle_split(); cx.notify();
+            })))
+            .child(Self::control("Mode", "miller-mode", cx.listener(|this, _, _, cx| {
+                this.miller_mode = !this.miller_mode; cx.notify();
+            })))
+            .child(Self::control("Focus", "focus", cx.listener(|this, _, _, cx| {
+                let tab = this.browser.active_mut();
+                if tab.right.is_some() { tab.focus_right = !tab.focus_right; }
+                cx.notify();
             })))
             .child(Self::control("Stage", "stage", cx.listener(|this, _, _, cx| this.stage(cx))))
             .child(Self::control("Copy here", "paste", cx.listener(|this, _, _, cx| this.paste(cx))))
@@ -332,6 +368,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::key_back))
             .on_action(cx.listener(Self::key_up))
             .on_action(cx.listener(Self::key_tab))
+            .on_action(cx.listener(Self::key_close))
             .on_action(cx.listener(Self::key_split))
             .on_action(cx.listener(Self::key_refresh))
             .on_action(cx.listener(Self::key_stage))
@@ -345,6 +382,7 @@ fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         cx.bind_keys([
             KeyBinding::new("ctrl-t", NewTab, Some("Filemanager")),
+            KeyBinding::new("ctrl-w", CloseTab, Some("Filemanager")),
             KeyBinding::new("alt-left", Back, Some("Filemanager")),
             KeyBinding::new("alt-up", Up, Some("Filemanager")),
             KeyBinding::new("ctrl-backslash", Split, Some("Filemanager")),
