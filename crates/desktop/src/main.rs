@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find]);
+actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find, AddressBar, NextTab, RenameSelected, NewFolder]);
 
 #[derive(Clone, Copy)]
 enum Side { Left, Right }
@@ -64,6 +64,7 @@ struct Explorer {
     confirm_recycle: Option<(PathBuf, Plan)>,
     status: String,
     search_input: Entity<InputState>,
+    address_input: Entity<InputState>,
     comment_input: Entity<InputState>,
     author_input: Entity<InputState>,
     search_query: String,
@@ -89,6 +90,7 @@ impl Explorer {
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search filenames in this folder…"));
+        let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path · Ctrl+L…"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on a save…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Actual author (optional)…"));
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New file or folder name…"));
@@ -130,7 +132,7 @@ impl Explorer {
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
             watcher: None, watched_root: None, confirm_recycle: None,
             status: "Filemanager · metadata-only history".into(),
-            search_input, comment_input, author_input, search_query: String::new(),
+            search_input, address_input, comment_input, author_input, search_query: String::new(),
             search_results: Vec::new(), search_root: None,
             index_watch: None, index_watch_root: None,
             index_watch_generation: 0, index_seen_revision: 0,
@@ -1154,6 +1156,69 @@ impl Explorer {
         box_.into_any_element()
     }
 
+    fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.browser.active().active().path.display().to_string();
+        self.address_input.update(cx, |input, cx| {
+            input.set_value(path, window, cx);
+        });
+        window.focus(&self.address_input.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn open_address(&mut self, cx: &mut Context<Self>) {
+        let path = self.address_input.read(cx).value().to_string();
+        let entered = path.trim().trim_matches('"');
+        if entered.is_empty() {
+            self.status = "Enter an existing folder path".into();
+            cx.notify();
+            return;
+        }
+        let candidate = PathBuf::from(entered);
+        if !candidate.is_absolute() {
+            self.status = "Only absolute paths are accepted (for example C:\\Work)".into();
+            cx.notify();
+            return;
+        }
+        let tab = self.browser.active_mut();
+        // Navigating in the currently focused pane retains the other pane
+        // and its independent history, as in a conventional file manager.
+        self.status = match tab.navigate(&candidate) {
+            Ok(()) => {
+                self.selected = None;
+                self.selected_history_event = None;
+                self.confirm_recycle = None;
+                format!("Opened {}", candidate.display())
+            }
+            Err(err) => format!("Could not open folder: {err}"),
+        };
+        self.close_search();
+        cx.notify();
+    }
+
+    fn key_address(&mut self, _: &AddressBar, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_address(window, cx);
+    }
+
+    fn key_next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.browser.tabs.len() > 1 {
+            self.browser.active_tab = (self.browser.active_tab + 1) % self.browser.tabs.len();
+            self.selected = None;
+            self.confirm_recycle = None;
+            self.close_search();
+            cx.notify();
+        }
+    }
+
+    fn key_rename(&mut self, _: &RenameSelected, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_rename(window, cx);
+    }
+
+    fn key_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.creating_folder = true;
+        window.focus(&self.folder_input.focus_handle(cx));
+        cx.notify();
+    }
+
     fn key_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.search_input.focus_handle(cx));
         cx.notify();
@@ -1275,7 +1340,10 @@ impl Render for Explorer {
             })));
         let searchbar = div().w_full().flex().items_center().gap_2().p_2()
             .bg(rgb(0x1A2230))
-            .child(div().w(px(360.)).child(Input::new(&self.search_input)))
+            .child(div().w(px(340.)).child(Input::new(&self.address_input)))
+            .child(Self::control("Go", "open-address",
+                cx.listener(|this, _, _, cx| this.open_address(cx))))
+            .child(div().w(px(300.)).child(Input::new(&self.search_input)))
             .child(Self::control("Find in current folder", "find-files",
                 cx.listener(|this, _, _, cx| {
                     this.search_active = !this.search_query.trim().is_empty();
@@ -1313,6 +1381,10 @@ impl Render for Explorer {
         let mut root = div().relative().size_full().flex().flex_col().bg(rgb(0x222C3A))
             .text_size(px(13.))
             .key_context("Filemanager")
+            .on_action(cx.listener(Self::key_address))
+            .on_action(cx.listener(Self::key_next_tab))
+            .on_action(cx.listener(Self::key_rename))
+            .on_action(cx.listener(Self::key_new_folder))
             .on_action(cx.listener(Self::key_find))
             .on_action(cx.listener(Self::key_back))
             .on_action(cx.listener(Self::key_up))
@@ -1337,6 +1409,10 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("ctrl-t", NewTab, Some("Filemanager")),
             KeyBinding::new("ctrl-f", Find, Some("Filemanager")),
+            KeyBinding::new("ctrl-l", AddressBar, Some("Filemanager")),
+            KeyBinding::new("ctrl-tab", NextTab, Some("Filemanager")),
+            KeyBinding::new("f2", RenameSelected, Some("Filemanager")),
+            KeyBinding::new("ctrl-shift-n", NewFolder, Some("Filemanager")),
             KeyBinding::new("ctrl-w", CloseTab, Some("Filemanager")),
             KeyBinding::new("alt-left", Back, Some("Filemanager")),
             KeyBinding::new("alt-up", Up, Some("Filemanager")),
