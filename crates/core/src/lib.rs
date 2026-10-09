@@ -11,3 +11,5 @@ pub mod folder_copy;
 pub mod persistent_index;
 
 pub mod index_watch;
+
+pub mod path_utils;
