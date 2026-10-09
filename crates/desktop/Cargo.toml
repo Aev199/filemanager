@@ -1,0 +1,13 @@
+[package]
+name = "filemanager-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+filemanager-core = { path = "../core" }
+gpui = "0.2.2"
+gpui_platform = "0.1.0"
+open = "5"
+
+[target.'cfg(windows)'.build-dependencies]
