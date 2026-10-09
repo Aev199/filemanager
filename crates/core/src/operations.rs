@@ -79,7 +79,7 @@ impl SourceStamp {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Receipt {
     pub action: Action,
     pub source: PathBuf,
@@ -103,6 +103,28 @@ impl OperationQueue {
         }
         receipt.undo()
     }
+    pub fn undo_completed_audited(
+        &self,
+        receipt: &Receipt,
+        journal: &crate::operation_journal::OperationJournal,
+    ) -> io::Result<()> {
+        if !self.pending.is_empty() {
+            return Err(io::Error::other("Finish the pending queue before undo"));
+        }
+        let id = journal.queue_undo(receipt)?;
+        journal.start(id)?;
+        let result = receipt.undo();
+        // Do not turn a successful filesystem Undo into an operation failure
+        // if only the final SQLite status update fails.
+        let logged_result = result.as_ref().map(|_| receipt.clone())
+            .map_err(|error| io::Error::new(error.kind(), error.to_string()));
+        if let Err(error) = journal.finish(id, &logged_result) {
+            eprintln!("Filemanager: could not persist Undo result: {error}");
+        }
+        result
+    }
+
+
     pub fn len(&self) -> usize { self.pending.len() }
     pub fn is_empty(&self) -> bool { self.pending.is_empty() }
     pub fn run_all(&mut self) -> Vec<(Plan, io::Result<Receipt>)> {
