@@ -224,7 +224,7 @@ impl Explorer {
             let first_error = results.iter().find_map(|(path, result)| {
                 result.as_ref().err().map(|error| format!("{}: {error}", path.display()))
             });
-            (zone, ok, errors, first_error)
+            (zone, target, ok, errors, first_error)
         });
         // UI heartbeat reads atomic byte progress without touching source
         // files and without blocking the rendering thread.
@@ -245,7 +245,7 @@ impl Explorer {
             }
         }).detach();
         cx.spawn(async move |weak, cx| {
-            let (zone, ok, errors, first_error) = task.await;
+            let (zone, target, ok, errors, first_error) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 // Do not discard items staged while the earlier copy ran.
                 for pending in zone.items() {
@@ -255,6 +255,7 @@ impl Explorer {
                 }
                 this.copy_in_progress = false;
                 this.copy_control = None;
+                this.load_directory(target, true, cx);
                 this.status = match first_error {
                     Some(details) => format!("{ok} copied, {errors} failed. First error: {details}"),
                     None => format!("{ok} files copied successfully"),
@@ -299,6 +300,9 @@ impl Explorer {
                 match result {
                     Ok(receipt) => {
                         this.creating_folder = false;
+                        if let Some(ref dest) = receipt.destination {
+                            this.refresh_parent_of(dest, cx);
+                        }
                         this.selected = receipt.destination;
                         this.status = "Folder created safely".into();
                     }
@@ -362,6 +366,10 @@ impl Explorer {
                 this.operation_busy = false;
                 match result {
                     Ok(receipt) => {
+                        this.refresh_parent_of(&receipt.source, cx);
+                        if let Some(ref dest) = receipt.destination {
+                            this.refresh_parent_of(dest, cx);
+                        }
                         this.selected = receipt.destination.clone();
                         this.last_move = Some(receipt);
                         this.renaming = false;
@@ -397,6 +405,10 @@ impl Explorer {
                 this.operation_busy = false;
                 match result {
                     Ok(()) => {
+                        this.refresh_parent_of(&receipt.source, cx);
+                        if let Some(ref dest) = receipt.destination {
+                            this.refresh_parent_of(dest, cx);
+                        }
                         this.selected = Some(receipt.source);
                         this.status = "Undo successful".into();
                     }
@@ -463,7 +475,10 @@ impl Explorer {
             let _ = weak.update(cx, |this, cx| {
                 this.operation_busy = false;
                 this.status = match result {
-                    Ok(_) => "Moved to Recycle Bin".into(),
+                    Ok(receipt) => {
+                        this.refresh_parent_of(&receipt.source, cx);
+                        "Moved to Recycle Bin".into()
+                    },
                     Err(error) => format!("Recycle refused: {error}"),
                 };
                 cx.notify();
@@ -870,6 +885,12 @@ impl Explorer {
                 cx.notify();
             });
         }).detach();
+    }
+
+    fn refresh_parent_of(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if let Some(parent) = path.parent() {
+            self.load_directory(parent.to_path_buf(), true, cx);
+        }
     }
 
     fn load_visible_directories(&mut self, cx: &mut Context<Self>) {
