@@ -1,7 +1,8 @@
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::history::{HistoryWatch, Journal};
 use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
-use filemanager_core::search::{self, SearchIndex};
+use filemanager_core::search;
+use filemanager_core::persistent_index::PersistentIndex;
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -61,7 +62,6 @@ struct Explorer {
     author_input: Entity<InputState>,
     search_query: String,
     search_results: Vec<PathBuf>,
-    search_index: Option<Arc<SearchIndex>>,
     search_root: Option<PathBuf>,
     search_active: bool,
     search_busy: bool,
@@ -116,7 +116,7 @@ impl Explorer {
             watcher: None, watched_root: None, confirm_recycle: None,
             status: "Filemanager · metadata-only history".into(),
             search_input, comment_input, author_input, search_query: String::new(),
-            search_results: Vec::new(), search_index: None, search_root: None,
+            search_results: Vec::new(), search_root: None,
             search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
             _subscriptions: vec![search_subscription],
@@ -127,7 +127,6 @@ impl Explorer {
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_active = false;
         self.search_busy = false;
-        self.search_index = None;
         self.search_root = None;
         self.search_results.clear();
     }
@@ -471,58 +470,77 @@ impl Explorer {
         cx.notify();
     }
 
-    /// Filename search is indexed away from the UI thread. Each request has
-    /// a generation, so old scans can never replace results for a new folder.
+    /// Search uses a durable SQLite index, not a full filesystem scan on
+    /// every keystroke. Building a missing index and each query run off the UI.
     fn update_search(&mut self, cx: &mut Context<Self>) {
+        self.run_search(false, cx);
+    }
+
+    fn run_search(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
         if !self.search_active {
+            self.search_generation = self.search_generation.wrapping_add(1);
+            self.search_busy = false;
             self.search_results.clear();
-            self.status = "Search cleared".into();
             cx.notify();
             return;
         }
-        let root = self.browser.active().active().path.clone();
-        if self.search_root.as_ref() == Some(&root) {
-            if let Some(index) = &self.search_index {
-                self.search_results = index.query(&self.search_query, 120);
-                self.status = format!("{} results in {}", self.search_results.len(), root.display());
-                cx.notify();
-                return;
-            }
-            if self.search_busy { return; }
-        }
 
+        let root = self.browser.active().active().path.clone();
+        if self.search_busy && self.search_root.as_ref() == Some(&root) && !force_refresh {
+            // The running task will query the newest text when it completes.
+            return;
+        }
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
         self.search_root = Some(root.clone());
-        self.search_index = None;
         self.search_results.clear();
         self.search_busy = true;
-        self.status = format!("Indexing filenames in {}...", root.display());
+        self.status = if force_refresh {
+            "Refreshing saved SQLite filename index...".into()
+        } else {
+            "Searching indexed filenames...".into()
+        };
         cx.notify();
 
+        let query = self.search_query.clone();
+        let root_for_callback = root.clone();
+        let query_for_callback = query.clone();
         let task = cx.background_spawn(async move {
-            SearchIndex::build(&root, 30_000)
+            let index = PersistentIndex::open(PersistentIndex::default_path())?;
+            let info = match (force_refresh, index.info(&root)?) {
+                (false, Some(existing)) => existing,
+                _ => index.refresh(&root, 100_000)?,
+            };
+            let matches = index.query(&root, &query, 120)?;
+            Ok::<_, std::io::Error>((info, matches))
         });
+
         cx.spawn(async move |weak, cx| {
             let result = task.await;
             let _ = weak.update(cx, |this, cx| {
-                if this.search_generation != generation { return; }
+                if this.search_generation != generation || !this.search_active
+                    || this.search_root.as_ref() != Some(&root_for_callback) {
+                    return;
+                }
                 this.search_busy = false;
+                if this.search_query != query_for_callback {
+                    // Text changed while we were scanning. Query the now-ready
+                    // SQLite index for the latest input instead of showing old hits.
+                    this.update_search(cx);
+                    return;
+                }
                 match result {
-                    Ok(index) => {
-                        let total = index.count();
-                        let capped = index.truncated;
-                        this.search_results = index.query(&this.search_query, 120);
-                        this.search_index = Some(Arc::new(index));
+                    Ok((info, matches)) => {
+                        this.search_results = matches;
                         this.status = format!(
-                            "{} results · {} indexed paths{}",
-                            this.search_results.len(), total,
-                            if capped { " (partial index: limit or inaccessible folders)" } else { "" }
+                            "{} results · {} saved names{}",
+                            this.search_results.len(), info.entries,
+                            if info.incomplete { " (incomplete: access restrictions)" } else { "" },
                         );
                     }
                     Err(error) => {
-                        this.search_index = None;
-                        this.status = format!("Search indexing failed: {error}");
+                        this.search_results.clear();
+                        this.status = format!("Index/search error: {error}");
                     }
                 }
                 cx.notify();
@@ -1046,6 +1064,11 @@ impl Render for Explorer {
                 cx.listener(|this, _, _, cx| {
                     this.search_active = !this.search_query.trim().is_empty();
                     this.update_search(cx);
+                })))
+            .child(Self::control("Refresh index", "refresh-file-index",
+                cx.listener(|this, _, _, cx| {
+                    this.search_active = true;
+                    this.run_search(true, cx);
                 })))
             .child(Self::control("Close results", "clear-results",
                 cx.listener(|this, _, _, cx| {
