@@ -26,6 +26,7 @@ fn usage() {
   fmctl copy SOURCE DESTINATION
   fmctl move SOURCE DESTINATION
   fmctl rename SOURCE DESTINATION
+  fmctl mkdir PARENT_FOLDER NEW_NAME
   fmctl trash FILE --confirm
 
 Comments are annotations on a logged event, not a copy of its file.
@@ -91,6 +92,17 @@ fn run() -> io::Result<()> {
             let receipt = queue.run_all().remove(0).1?;
             println!("{:?}: {} -> {}", receipt.action, receipt.source.display(),
                 receipt.destination.as_deref().map(|p| p.display().to_string()).unwrap_or_default());
+        }
+        "mkdir" => {
+            let parent = path(&mut args, "parent folder")?;
+            let name = argument(&mut args, "new folder name")?;
+            filemanager_core::operations::validate_leaf_name(&name)?;
+            let destination = parent.join(&name);
+            let plan = Plan::prepare(Action::CreateFolder, &parent, Some(&destination))?;
+            let mut queue = OperationQueue::default();
+            queue.submit(plan);
+            queue.run_all().remove(0).1?;
+            println!("Created {}", destination.display());
         }
         "trash" => {
             let source = path(&mut args, "file")?;
