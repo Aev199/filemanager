@@ -189,6 +189,10 @@ fn process_events(
             // Avoid repeatedly scanning a locked or disconnected network
             // folder. Stale is still visible in the UI during backoff.
             state.stale.store(true, Ordering::Release);
+            // The eventual full scan supersedes queued individual changes.
+            // Do not keep an unbounded vector of events during backoff.
+            paths.clear();
+            first_event = None;
             continue;
         }
         if full { state.full_scan_needed.store(false, Ordering::Release); }
