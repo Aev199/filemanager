@@ -173,6 +173,152 @@ impl PersistentIndex {
         Ok(info)
     }
 
+    /// Apply filesystem-notification paths without rebuilding the whole index.
+    /// Each change first removes stale records under that path, then re-reads
+    /// the current file or subtree. The SQLite commit is atomic.
+    ///
+    /// Watch events may report either side of a rename. Paths outside the
+    /// chosen root, Windows reparse points and internal staging areas are
+    /// never indexed. If a subtree scan overflows the limit, rollback keeps
+    /// the previous snapshot intact.
+    pub fn reconcile_paths(
+        &self,
+        root: &Path,
+        changed: &[PathBuf],
+        max_entries: usize,
+    ) -> io::Result<IndexInfo> {
+        if max_entries == 0 { return Err(invalid("Index limit must be positive")); }
+        let root = root_key(root)?;
+        let root_path = Path::new(&root);
+        let previous = self.info(root_path)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Index root was not initialized")
+        })?;
+        let mut ordered: Vec<PathBuf> = changed.iter()
+            .filter(|path| path.starts_with(root_path) && *path != root_path)
+            .filter(|path| {
+                let relative = path.strip_prefix(root_path).ok();
+                relative.is_some_and(|relative| {
+                    !relative.components().any(|c| matches!(c, std::path::Component::ParentDir))
+                })
+            })
+            .cloned().collect();
+        ordered.sort();
+        ordered.dedup();
+        // Events for a directory and its children are one subtree update.
+        let mut scopes: Vec<PathBuf> = Vec::new();
+        for candidate in ordered {
+            if scopes.iter().any(|parent| candidate.starts_with(parent)) { continue; }
+            if candidate.ancestors().take_while(|p| *p != root_path).any(|ancestor| {
+                ancestor.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy().to_lowercase();
+                    name.starts_with(".filemanager-stage-")
+                        || name.starts_with(".filemanager-copy-")
+                        || name.ends_with(".fm-partial")
+                })
+            }) { continue; }
+            scopes.push(candidate);
+        }
+        if scopes.is_empty() { return Ok(previous); }
+
+        // Read disk before starting the DB transaction. Metadata lookup errors
+        // other than deletion must fail safely, not silently remove valid rows.
+        let mut replacement: Vec<Vec<(String, String)>> = Vec::with_capacity(scopes.len());
+        let mut incomplete = previous.incomplete;
+        let mut total_new = 0usize;
+        let index_files = [
+            self.database.clone(),
+            self.database.with_extension("sqlite3-wal"),
+            self.database.with_extension("sqlite3-shm"),
+            self.database.with_extension("sqlite3-journal"),
+        ];
+        for path in &scopes {
+            let mut items = Vec::new();
+            let exists = match fs::symlink_metadata(path) {
+                Ok(_) => true,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+                Err(err) => return Err(err),
+            };
+            if exists {
+                // Check EVERY existing ancestor; a junction in a parent must
+                // not make the index leave the monitored root.
+                let mut valid = true;
+                for ancestor in path.ancestors().take_while(|part| *part != root_path) {
+                    if let Ok(metadata) = fs::symlink_metadata(ancestor) {
+                        if metadata.file_type().is_symlink() { valid = false; break; }
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::fs::MetadataExt;
+                            if metadata.file_attributes() & 0x400 != 0 {
+                                valid = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if valid {
+                    for entry in WalkDir::new(path).follow_links(false).into_iter().filter_entry(allowed) {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(_) => { incomplete = true; continue; },
+                        };
+                        if index_files.iter().any(|file| entry.path() == file.as_path()) { continue; }
+                        if !allowed(&entry) { continue; }
+                        let (Some(path), Some(name)) = (entry.path().to_str(), entry.file_name().to_str()) else {
+                            incomplete = true;
+                            continue;
+                        };
+                        items.push((path.to_owned(), name.to_lowercase()));
+                        total_new += 1;
+                        if total_new > max_entries {
+                            return Err(invalid("Change exceeds index limit; old snapshot retained"));
+                        }
+                    }
+                }
+            }
+            replacement.push(items);
+        }
+
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(sql_error)?;
+        for (scope, replacement) in scopes.iter().zip(replacement) {
+            let scope = scope.to_str().ok_or_else(|| invalid("Non-Unicode path"))?;
+            // Boundary-aware subtree removal. Windows '\' and Unix '/' both
+            // count as separators; this is not a SQL LIKE wildcard query.
+            tx.execute(
+                "DELETE FROM index_entries
+                 WHERE root=?1 AND
+                  (path=?2 OR (substr(path,1,length(?2))=?2
+                   AND substr(path,length(?2)+1,1) IN ('/','\\')))",
+                params![root, scope],
+            ).map_err(sql_error)?;
+            let mut insert = tx.prepare(
+                "INSERT INTO index_entries(root,path,folded_name)
+                 VALUES(?1,?2,?3) ON CONFLICT(root,path)
+                 DO UPDATE SET folded_name=excluded.folded_name"
+            ).map_err(sql_error)?;
+            for (path, name) in replacement {
+                insert.execute(params![root, path, name]).map_err(sql_error)?;
+            }
+        }
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM index_entries WHERE root=?1",
+            params![root], |row| row.get(0),
+        ).map_err(sql_error)?;
+        if count > max_entries as i64 {
+            return Err(invalid("Index limit reached; change rolled back"));
+        }
+        let updated = IndexInfo {
+            entries: count as usize, incomplete, indexed_at_ms: time_ms(),
+        };
+        tx.execute(
+            "UPDATE index_roots SET count=?2, incomplete=?3, indexed_at_ms=?4
+             WHERE root=?1",
+            params![root, count, incomplete, updated.indexed_at_ms],
+        ).map_err(sql_error)?;
+        tx.commit().map_err(sql_error)?;
+        Ok(updated)
+    }
+
     /// Queries the durable index without rescanning any folders. Results are
     /// ranked using the same Unicode-aware fuzzy matcher as the temporary index.
     pub fn query(&self, root: &Path, needle: &str, limit: usize) -> io::Result<Vec<PathBuf>> {
@@ -308,6 +454,69 @@ mod tests {
         let index = PersistentIndex::open(temp.path().join("index.sqlite3")).unwrap();
         index.refresh(&root, 100).unwrap();
         assert!(index.query(&root, "secret", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn incremental_create_rename_delete_and_subfolder_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        fs::create_dir(&root).unwrap();
+        let index = PersistentIndex::open(temp.path().join("idx.sqlite3")).unwrap();
+        index.refresh(&root, 100).unwrap();
+
+        let original = root.join("Фундамент.txt");
+        fs::write(&original, b"content not stored").unwrap();
+        index.reconcile_paths(&root, &[original.clone()], 100).unwrap();
+        assert_eq!(index.query(&root, "фунд", 10).unwrap().len(), 1);
+
+        let renamed = root.join("Новая_модель.txt");
+        fs::rename(&original, &renamed).unwrap();
+        index.reconcile_paths(&root, &[original, renamed.clone()], 100).unwrap();
+        assert!(index.query(&root, "фунд", 10).unwrap().is_empty());
+        assert_eq!(index.query(&root, "новмод", 10).unwrap().len(), 1);
+
+        let nested = root.join("Nested");
+        fs::create_dir(&nested).unwrap();
+        let inside = nested.join("report.txt");
+        fs::write(&inside, b"no contents in DB").unwrap();
+        index.reconcile_paths(&root, &[nested.clone(), inside], 100).unwrap();
+        assert_eq!(index.query(&root, "report", 10).unwrap().len(), 1);
+        fs::remove_dir_all(&nested).unwrap();
+        index.reconcile_paths(&root, &[nested], 100).unwrap();
+        assert!(index.query(&root, "report", 10).unwrap().is_empty());
+        assert!(index.query(&root, "новмод", 10).unwrap().contains(&renamed));
+    }
+
+    #[test]
+    fn incremental_events_cannot_touch_another_index_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("alpha"), b"a").unwrap();
+        fs::write(b.join("beta"), b"b").unwrap();
+        let db = PersistentIndex::open(temp.path().join("index.sqlite3")).unwrap();
+        db.refresh(&a, 100).unwrap();
+        db.refresh(&b, 100).unwrap();
+        fs::remove_file(b.join("beta")).unwrap();
+        db.reconcile_paths(&a, &[b.join("beta")], 100).unwrap();
+        assert_eq!(db.query(&b, "beta", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn incremental_limit_rolls_back_before_rewriting_existing_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("one.txt"), b"one").unwrap();
+        let db = PersistentIndex::open(temp.path().join("index.sqlite3")).unwrap();
+        db.refresh(&root, 1).unwrap();
+        let sub = root.join("new");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("two.txt"), b"two").unwrap();
+        assert!(db.reconcile_paths(&root, &[sub], 1).is_err());
+        assert_eq!(db.query(&root, "one", 10).unwrap().len(), 1);
     }
 
     #[test]
