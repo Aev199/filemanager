@@ -1,6 +1,7 @@
 //! Durable filename index. Only paths and names enter SQLite: no file bytes,
 //! document content, old file versions or hashes of contents are persisted.
 use crate::search::subsequence_score;
+use crate::path_utils::normalize_extended_path;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::io;
@@ -16,7 +17,7 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 fn root_key(root: &Path) -> io::Result<String> {
-    let canonical = fs::canonicalize(root)?;
+    let canonical = normalize_extended_path(&fs::canonicalize(root)?);
     if !canonical.is_dir() { return Err(invalid("Index root must be a folder")); }
     canonical.into_os_string().into_string()
         .map_err(|_| invalid("Non-Unicode index roots are not supported"))
@@ -194,14 +195,15 @@ impl PersistentIndex {
             io::Error::new(io::ErrorKind::NotFound, "Index root was not initialized")
         })?;
         let mut ordered: Vec<PathBuf> = changed.iter()
-            .filter(|path| path.starts_with(root_path) && *path != root_path)
+            .map(|path| normalize_extended_path(path))
+            .filter(|path| path.starts_with(root_path) && path != root_path)
             .filter(|path| {
                 let relative = path.strip_prefix(root_path).ok();
                 relative.is_some_and(|relative| {
                     !relative.components().any(|c| matches!(c, std::path::Component::ParentDir))
                 })
             })
-            .cloned().collect();
+            .collect();
         ordered.sort();
         ordered.dedup();
         // Events for a directory and its children are one subtree update.
@@ -486,6 +488,21 @@ mod tests {
         index.reconcile_paths(&root, &[nested], 100).unwrap();
         assert!(index.query(&root, "report", 10).unwrap().is_empty());
         assert!(index.query(&root, "новмод", 10).unwrap().contains(&renamed));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn watcher_paths_with_extended_prefix_match_index_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("work");
+        fs::create_dir(&root).unwrap();
+        let index = PersistentIndex::open(tmp.path().join("idx.sqlite3")).unwrap();
+        index.refresh(&root, 100).unwrap();
+        let path = root.join("модель.txt");
+        fs::write(&path, b"content").unwrap();
+        let absolute = fs::canonicalize(&path).unwrap();
+        index.reconcile_paths(&root, &[absolute], 100).unwrap();
+        assert_eq!(index.query(&root, "мод", 10).unwrap(), vec![path]);
     }
 
     #[test]
