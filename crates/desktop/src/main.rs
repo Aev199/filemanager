@@ -1,9 +1,9 @@
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::history::{HistoryWatch, Journal};
-use filemanager_core::operations::{Action, DropZone, OperationQueue, Plan};
+use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
 use filemanager_core::search::{self, SearchIndex};
 use filemanager_core::workspace::WorkspaceStore;
-use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, Render, Subscription, Window, WindowOptions};
+use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +18,11 @@ struct Explorer {
     selected: Option<PathBuf>,
     zone: DropZone,
     copy_in_progress: bool,
+    copy_control: Option<Arc<CopyControl>>,
+    context_menu: Option<Point<Pixels>>,
+    rename_input: Entity<InputState>,
+    renaming: bool,
+    last_move: Option<Receipt>,
     listing_limit: usize,
     miller_mode: bool,
     workspaces: Option<WorkspaceStore>,
@@ -50,6 +55,7 @@ impl Explorer {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search filenames in this folder…"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on a save…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Actual author (optional)…"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New file or folder name…"));
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search_query = input.read(cx).value().to_string();
@@ -70,6 +76,11 @@ impl Explorer {
             selected: None,
             zone: DropZone::default(),
             copy_in_progress: false,
+            copy_control: None,
+            context_menu: None,
+            rename_input,
+            renaming: false,
+            last_move: None,
             listing_limit: 200,
             miller_mode,
             workspaces,
@@ -153,9 +164,11 @@ impl Explorer {
         let target = self.browser.active().active().path.clone();
         let mut zone = std::mem::take(&mut self.zone);
         self.copy_in_progress = true;
-        self.status = "Copying staged files...".into();
+        let control = Arc::new(CopyControl::default());
+        self.copy_control = Some(Arc::clone(&control));
+        self.status = "Copying staged files or folders...".into();
         let task = cx.background_spawn(async move {
-            let results = zone.copy_to(&target);
+            let results = zone.copy_to_with_control(&target, &control);
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
             let errors = results.len() - ok;
             let first_error = results.iter().find_map(|(path, result)| {
@@ -173,6 +186,7 @@ impl Explorer {
                     }
                 }
                 this.copy_in_progress = false;
+                this.copy_control = None;
                 this.status = match first_error {
                     Some(details) => format!("{ok} copied, {errors} failed. First error: {details}"),
                     None => format!("{ok} files copied successfully"),
@@ -180,6 +194,16 @@ impl Explorer {
                 cx.notify();
             });
         }).detach();
+    }
+
+    fn cancel_copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(control) = &self.copy_control {
+            control.cancel();
+            self.status = "Cancellation requested. Unfinished files will not be published.".into();
+        } else {
+            self.status = "No copy is running".into();
+        }
+        cx.notify();
     }
 
     fn recycle(&mut self, cx: &mut Context<Self>) {
@@ -709,6 +733,9 @@ impl Render for Explorer {
             })))
             .child(Self::control("Stage", "stage", cx.listener(|this, _, _, cx| this.stage(cx))))
             .child(Self::control("Copy here", "paste", cx.listener(|this, _, _, cx| this.paste(cx))))
+            .child(Self::control("Cancel copy", "cancel-copy", cx.listener(|this, _, _, cx| {
+                this.cancel_copy(cx);
+            })))
             .child(Self::control("Open", "open", cx.listener(|this, _, _, cx| {
                 if let Some(path) = &this.selected {
                     if let Err(e) = open::that(path) { this.status = e.to_string(); }
