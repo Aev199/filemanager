@@ -3,6 +3,7 @@ use filemanager_core::history::{HistoryWatch, Journal};
 use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
 use filemanager_core::search;
 use filemanager_core::persistent_index::PersistentIndex;
+use filemanager_core::index_watch::IndexWatch;
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -63,6 +64,11 @@ struct Explorer {
     search_query: String,
     search_results: Vec<PathBuf>,
     search_root: Option<PathBuf>,
+    index_watch: Option<IndexWatch>,
+    index_watch_root: Option<PathBuf>,
+    index_watch_generation: u64,
+    index_seen_revision: u64,
+    index_watch_stale: bool,
     search_active: bool,
     search_busy: bool,
     search_generation: u64,
@@ -117,6 +123,9 @@ impl Explorer {
             status: "Filemanager · metadata-only history".into(),
             search_input, comment_input, author_input, search_query: String::new(),
             search_results: Vec::new(), search_root: None,
+            index_watch: None, index_watch_root: None,
+            index_watch_generation: 0, index_seen_revision: 0,
+            index_watch_stale: false,
             search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
             _subscriptions: vec![search_subscription],
@@ -124,6 +133,11 @@ impl Explorer {
     }
 
     fn close_search(&mut self) {
+        self.index_watch_generation = self.index_watch_generation.wrapping_add(1);
+        self.index_watch = None;
+        self.index_watch_root = None;
+        self.index_seen_revision = 0;
+        self.index_watch_stale = false;
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_active = false;
         self.search_busy = false;
@@ -471,6 +485,62 @@ impl Explorer {
         cx.notify();
     }
 
+    fn ensure_index_watcher(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if self.index_watch_root.as_ref() == Some(&root) && self.index_watch.is_some() {
+            return;
+        }
+        self.index_watch = None;
+        self.index_watch_root = None;
+        self.index_watch_generation = self.index_watch_generation.wrapping_add(1);
+        self.index_seen_revision = 0;
+        self.index_watch_stale = false;
+        match IndexWatch::start(&root, &PersistentIndex::default_path(), 100_000) {
+            Ok(watch) => {
+                self.index_watch = Some(watch);
+                self.index_watch_root = Some(root);
+                let generation = self.index_watch_generation;
+                cx.spawn(async move |weak, cx| {
+                    loop {
+                        cx.background_spawn(async {
+                            std::thread::sleep(Duration::from_millis(700));
+                        }).await;
+                        let running = weak.update(cx, |this, cx| {
+                            if this.index_watch_generation != generation {
+                                return false;
+                            }
+                            let Some(watch) = this.index_watch.as_ref() else {
+                                return false;
+                            };
+                            let revision = watch.revision();
+                            let stale = watch.is_stale();
+                            if stale != this.index_watch_stale {
+                                this.index_watch_stale = stale;
+                                if stale {
+                                    this.status = "Search index may be stale; use Refresh index if the warning persists".into();
+                                }
+                                cx.notify();
+                            }
+                            if revision > this.index_seen_revision && !this.search_busy {
+                                this.index_seen_revision = revision;
+                                if this.search_active {
+                                    this.run_search(false, cx);
+                                }
+                            }
+                            true
+                        }).unwrap_or(false);
+                        if !running { break; }
+                    }
+                }).detach();
+            }
+            Err(error) => {
+                self.status = format!(
+                    "Filename index saved; automatic monitoring unavailable: {error}. Use Refresh index."
+                );
+                cx.notify();
+            }
+        }
+    }
+
     /// Search uses a durable SQLite index, not a full filesystem scan on
     /// every keystroke. Building a missing index and each query run off the UI.
     fn update_search(&mut self, cx: &mut Context<Self>) {
@@ -542,6 +612,7 @@ impl Explorer {
                             this.search_results.len(), info.entries,
                             if info.incomplete { " (incomplete: access restrictions)" } else { "" },
                         );
+                        this.ensure_index_watcher(root_for_callback.clone(), cx);
                     }
                     Err(error) => {
                         this.search_results.clear();
