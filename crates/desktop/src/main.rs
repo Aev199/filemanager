@@ -48,7 +48,7 @@ impl Explorer {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search filenames in this folder…"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on a save…"));
-        let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event, _, cx| {
+        let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search_query = input.read(cx).value().to_string();
                 this.search_active = !this.search_query.trim().is_empty();
@@ -271,7 +271,7 @@ impl Explorer {
                         this.status = format!(
                             "{} results · {} indexed paths{}",
                             this.search_results.len(), total,
-                            if capped { " (limit reached)" } else { "" }
+                            if capped { " (partial index: limit or inaccessible folders)" } else { "" }
                         );
                     }
                     Err(error) => {
