@@ -255,6 +255,38 @@ mod tests {
     }
 
     #[test]
+    fn collision_between_preparation_and_execution_is_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("source.txt");
+        let dst = tmp.path().join("destination.txt");
+        fs::write(&src, b"original contents").unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Copy, &src, Some(&dst)).unwrap());
+        // An external program creates the destination after our preflight.
+        fs::write(&dst, b"another user's file").unwrap();
+        let result = queue.run_all();
+        assert!(result[0].1.is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"another user's file");
+        assert_eq!(fs::read(&src).unwrap(), b"original contents");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_move_never_replaces_destination_created_after_preflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("a.txt");
+        let dst = tmp.path().join("b.txt");
+        fs::write(&src, b"original").unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Move, &src, Some(&dst)).unwrap());
+        fs::write(&dst, b"existing").unwrap();
+        let result = queue.run_all();
+        assert!(result[0].1.is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"existing");
+        assert_eq!(fs::read(&src).unwrap(), b"original");
+    }
+
+    #[test]
     fn drop_zone_does_not_erase_on_copy_error() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("a");
