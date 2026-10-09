@@ -16,6 +16,7 @@ struct Explorer {
     browser: Browser,
     selected: Option<PathBuf>,
     zone: DropZone,
+    copy_in_progress: bool,
     miller_mode: bool,
     workspaces: Option<WorkspaceStore>,
     journal: Option<Arc<Journal>>,
@@ -44,6 +45,7 @@ impl Explorer {
             browser,
             selected: None,
             zone: DropZone::default(),
+            copy_in_progress: false,
             miller_mode,
             workspaces,
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
@@ -95,6 +97,11 @@ impl Explorer {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
+        if self.copy_in_progress {
+            self.status = "A copy is already running. Wait for it to finish.".into();
+            cx.notify();
+            return;
+        }
         if self.zone.items().is_empty() {
             self.status = "Drop Zone is empty".into();
             cx.notify();
@@ -102,18 +109,31 @@ impl Explorer {
         }
         let target = self.browser.active().active().path.clone();
         let mut zone = std::mem::take(&mut self.zone);
-        self.status = "Copying files...".into();
+        self.copy_in_progress = true;
+        self.status = "Copying staged files...".into();
         let task = cx.background_spawn(async move {
             let results = zone.copy_to(&target);
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
             let errors = results.len() - ok;
-            (zone, ok, errors)
+            let first_error = results.iter().find_map(|(path, result)| {
+                result.as_ref().err().map(|error| format!("{}: {error}", path.display()))
+            });
+            (zone, ok, errors, first_error)
         });
         cx.spawn(async move |weak, cx| {
-            let (zone, ok, errors) = task.await;
+            let (zone, ok, errors, first_error) = task.await;
             let _ = weak.update(cx, |this, cx| {
-                this.zone = zone;
-                this.status = format!("{ok} copied, {errors} failed (no overwrite)");
+                // Do not discard items staged while the earlier copy ran.
+                for pending in zone.items() {
+                    if let Err(error) = this.zone.add(pending) {
+                        this.status = format!("Cannot restore staged item: {error}");
+                    }
+                }
+                this.copy_in_progress = false;
+                this.status = match first_error {
+                    Some(details) => format!("{ok} copied, {errors} failed. First error: {details}"),
+                    None => format!("{ok} files copied successfully"),
+                };
                 cx.notify();
             });
         }).detach();
