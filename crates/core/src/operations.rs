@@ -109,6 +109,38 @@ impl OperationQueue {
         self.run_all_with_control(&CopyControl::default())
     }
 
+    /// Audited execution records intent in SQLite before touching the file.
+    /// If logging cannot start, the operation is *not performed*. On crash,
+    /// running jobs are marked uncertain and are never automatically retried.
+    pub fn run_all_audited(
+        &mut self,
+        control: &CopyControl,
+        journal: &crate::operation_journal::OperationJournal,
+    ) -> Vec<(Plan, io::Result<Receipt>)> {
+        let mut results = Vec::new();
+        while let Some(plan) = self.pending.pop_front() {
+            let result = match journal.queue(&plan) {
+                Ok(id) => match journal.start(id) {
+                    Ok(()) => {
+                        let result = control.check()
+                            .and_then(|_| plan.execute_with_control(control));
+                        if let Err(error) = journal.finish(id, &result) {
+                            // A success has already changed disk; never
+                            // requeue it as a failure. The unfinished
+                            // journal record will be flagged on restart.
+                            eprintln!("Filemanager: operation audit write failed: {error}");
+                        }
+                        result
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            results.push((plan, result));
+        }
+        results
+    }
+
     pub fn run_all_with_control(
         &mut self, control: &CopyControl
     ) -> Vec<(Plan, io::Result<Receipt>)> {
@@ -345,8 +377,24 @@ impl DropZone {
         self.copy_to_with_control(target, &CopyControl::default())
     }
 
+    pub fn copy_to_audited(
+        &mut self,
+        target: &Path,
+        control: &CopyControl,
+        journal: &crate::operation_journal::OperationJournal,
+    ) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        self.copy_with_optional_journal(target, control, Some(journal))
+    }
+
     pub fn copy_to_with_control(
         &mut self, target: &Path, control: &CopyControl
+    ) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        self.copy_with_optional_journal(target, control, None)
+    }
+
+    fn copy_with_optional_journal(
+        &mut self, target: &Path, control: &CopyControl,
+        journal: Option<&crate::operation_journal::OperationJournal>,
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
         let mut results = Vec::new();
         let sources = std::mem::take(&mut self.sources);
@@ -361,7 +409,11 @@ impl DropZone {
                 }
             }
         }
-        for (plan, result) in queue.run_all_with_control(control) {
+        let finished = match journal {
+            Some(journal) => queue.run_all_audited(control, journal),
+            None => queue.run_all_with_control(control),
+        };
+        for (plan, result) in finished {
             if result.is_err() { self.sources.push(plan.source.clone()); }
             results.push((plan.source, result));
         }
@@ -492,6 +544,22 @@ mod tests {
         assert!(queue.undo_completed(&receipt).is_err());
         assert!(!source.exists());
         assert!(target.exists());
+    }
+
+    #[test]
+    fn audited_queue_records_copy_and_writes_no_previous_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        let dest = temp.path().join("copy.txt");
+        fs::write(&source, b"recorded bytes").unwrap();
+        let journal_path = temp.path().join("audit.sqlite");
+        let journal = crate::operation_journal::OperationJournal::open(&journal_path).unwrap();
+        let plan = Plan::prepare(Action::Copy, &source, Some(&dest)).unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(plan);
+        assert!(queue.run_all_audited(&CopyControl::default(), &journal)[0].1.is_ok());
+        assert_eq!(fs::read(&dest).unwrap(), b"recorded bytes");
+        assert_eq!(journal.mark_interrupted().unwrap(), 0);
     }
 
     #[test]
