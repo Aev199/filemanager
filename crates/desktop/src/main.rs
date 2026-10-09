@@ -2,6 +2,7 @@ use filemanager_core::browser::{self, Browser};
 use filemanager_core::history::{HistoryWatch, Journal};
 use filemanager_core::operations::{Action, DropZone, OperationQueue, Plan};
 use filemanager_core::search;
+use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, IntoElement, KeyBinding, Render, Window, WindowOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ struct Explorer {
     selected: Option<PathBuf>,
     zone: DropZone,
     miller_mode: bool,
+    workspaces: Option<WorkspaceStore>,
     journal: Option<Arc<Journal>>,
     watcher: Option<HistoryWatch>,
     watched_root: Option<PathBuf>,
@@ -30,11 +32,20 @@ impl Explorer {
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let workspaces = WorkspaceStore::open(WorkspaceStore::default_path()).ok();
+        let (browser, miller_mode) = workspaces.as_ref()
+            .and_then(|store| store.load("Default").ok().flatten())
+            .unwrap_or_else(|| (
+                Browser::new(home).or_else(|_| Browser::new("."))
+                    .expect("No starting directory"),
+                true
+            ));
         Self {
-            browser: Browser::new(home).or_else(|_| Browser::new(".")).expect("No starting directory"),
+            browser,
             selected: None,
             zone: DropZone::default(),
-            miller_mode: true,
+            miller_mode,
+            workspaces,
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
             watcher: None, watched_root: None, confirm_recycle: None,
             status: "Filemanager · metadata-only history".into(),
@@ -139,6 +150,35 @@ impl Explorer {
                 cx.notify();
             });
         }).detach();
+    }
+
+    fn save_workspace(&mut self, cx: &mut Context<Self>) {
+        self.status = match self.workspaces.as_ref() {
+            Some(store) => match store.save("Default", &self.browser, self.miller_mode) {
+                Ok(()) => "Workspace saved: tabs, panes and viewing mode (no file data)".to_owned(),
+                Err(error) => format!("Cannot save workspace: {error}"),
+            },
+            None => "Workspace database unavailable".to_owned(),
+        };
+        cx.notify();
+    }
+
+    fn restore_workspace(&mut self, cx: &mut Context<Self>) {
+        self.status = match self.workspaces.as_ref() {
+            Some(store) => match store.load("Default") {
+                Ok(Some((browser, miller_mode))) => {
+                    self.browser = browser;
+                    self.miller_mode = miller_mode;
+                    self.selected = None;
+                    self.confirm_recycle = None;
+                    "Workspace restored".to_owned()
+                },
+                Ok(None) => "No saved workspace (or its folders no longer exist)".to_owned(),
+                Err(error) => format!("Cannot restore workspace: {error}"),
+            },
+            None => "Workspace database unavailable".to_owned(),
+        };
+        cx.notify();
     }
 
     fn watch(&mut self, cx: &mut Context<Self>) {
@@ -344,6 +384,12 @@ impl Render for Explorer {
                 let tab = this.browser.active_mut();
                 if tab.right.is_some() { tab.focus_right = !tab.focus_right; }
                 cx.notify();
+            })))
+            .child(Self::control("Save layout", "save-layout", cx.listener(|this, _, _, cx| {
+                this.save_workspace(cx);
+            })))
+            .child(Self::control("Restore layout", "restore-layout", cx.listener(|this, _, _, cx| {
+                this.restore_workspace(cx);
             })))
             .child(Self::control("Stage", "stage", cx.listener(|this, _, _, cx| this.stage(cx))))
             .child(Self::control("Copy here", "paste", cx.listener(|this, _, _, cx| this.paste(cx))))
