@@ -513,10 +513,17 @@ impl Explorer {
                             };
                             let revision = watch.revision();
                             let stale = watch.is_stale();
+                            let reason = if stale { watch.last_error() } else { None };
                             if stale != this.index_watch_stale {
                                 this.index_watch_stale = stale;
                                 if stale {
-                                    this.status = "Search index may be stale; use Refresh index if the warning persists".into();
+                                    this.status = match reason {
+                                        Some(reason) => format!(
+                                            "Index not up to date: {}. Retry or use Refresh index",
+                                            reason.chars().take(180).collect::<String>(),
+                                        ),
+                                        None => "Search index may be stale; use Refresh index".into(),
+                                    };
                                 }
                                 cx.notify();
                             }
