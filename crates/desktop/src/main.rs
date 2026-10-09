@@ -17,6 +17,7 @@ struct Explorer {
     selected: Option<PathBuf>,
     zone: DropZone,
     copy_in_progress: bool,
+    listing_limit: usize,
     miller_mode: bool,
     workspaces: Option<WorkspaceStore>,
     journal: Option<Arc<Journal>>,
@@ -46,6 +47,7 @@ impl Explorer {
             selected: None,
             zone: DropZone::default(),
             copy_in_progress: false,
+            listing_limit: 200,
             miller_mode,
             workspaces,
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
@@ -281,7 +283,7 @@ impl Explorer {
     fn column(&self, folder: PathBuf, side: Side, cx: &mut Context<Self>) -> AnyElement {
         let mut rows = div().id(format!("scroll-{}", folder.display()))
             .flex_1().flex().flex_col().overflow_y_scroll();
-        match browser::list_directory(&folder, 200) {
+        match browser::list_directory(&folder, self.listing_limit) {
             Ok(listing) => {
                 for (i, entry) in listing.entries.into_iter().enumerate() {
                     let path = entry.path;
@@ -297,7 +299,22 @@ impl Explorer {
                             }))
                     );
                 }
-                if listing.truncated { rows = rows.child("Showing first 200 entries"); }
+                if listing.truncated {
+                    if self.listing_limit < 3000 {
+                        rows = rows.child(
+                            div().id(format!("load-more-{}", folder.display()))
+                                .p_3().rounded_md().cursor_pointer()
+                                .bg(rgb(0x344F69))
+                                .child(format!("Show more files (currently first {})", self.listing_limit))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.listing_limit = (this.listing_limit + 200).min(3000);
+                                    cx.notify();
+                                }))
+                        );
+                    } else {
+                        rows = rows.child("Showing first 3000 entries. Virtualized listing is planned.");
+                    }
+                }
             }
             Err(e) => rows = rows.child(e.to_string()),
         }
