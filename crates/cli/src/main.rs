@@ -1,7 +1,8 @@
 //! Console companion for testing without GPUI and adding version comments.
 use filemanager_core::history::{HistoryWatch, Journal};
 use filemanager_core::operations::{Action, OperationQueue, Plan};
-use filemanager_core::search::{preview, SearchIndex};
+use filemanager_core::search::preview;
+use filemanager_core::persistent_index::PersistentIndex;
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -22,6 +23,8 @@ fn usage() {
   fmctl comment EVENT_ID AUTHOR COMMENT
   fmctl watch FOLDER
   fmctl search FOLDER TEXT
+  fmctl index FOLDER
+  fmctl index-status FOLDER
   fmctl preview FILE
   fmctl copy SOURCE DESTINATION
   fmctl move SOURCE DESTINATION
@@ -66,12 +69,34 @@ fn run() -> io::Result<()> {
             io::stdout().flush()?;
             loop { std::thread::sleep(Duration::from_secs(60)); }
         }
+        "index" => {
+            let root = path(&mut args, "folder")?;
+            let db = PersistentIndex::open(PersistentIndex::default_path())?;
+            let summary = db.refresh(&root, 100_000)?;
+            println!("Indexed {} paths{} (names/paths only).",
+                summary.entries, if summary.incomplete { "; some folders inaccessible" } else { "" });
+        }
+        "index-status" => {
+            let root = path(&mut args, "folder")?;
+            let db = PersistentIndex::open(PersistentIndex::default_path())?;
+            if let Some(summary) = db.info(&root)? {
+                println!("{} entries, last indexed at {} ms since epoch, incomplete={}",
+                    summary.entries, summary.indexed_at_ms, summary.incomplete);
+            } else {
+                println!("Not indexed. Run: fmctl index FOLDER");
+            }
+        }
         "search" => {
             let root = path(&mut args, "folder")?;
-            let text = argument(&mut args, "query")?;
-            let index = SearchIndex::build(&root, 50_000)?;
-            for result in index.query(&text, 50) { println!("{}", result.display()); }
-            if index.truncated { eprintln!("Warning: index limited to 50,000 entries"); }
+            let query = argument(&mut args, "query")?;
+            let db = PersistentIndex::open(PersistentIndex::default_path())?;
+            if db.info(&root)?.is_none() {
+                let summary = db.refresh(&root, 100_000)?;
+                println!("Indexed {} paths for future searches.", summary.entries);
+            }
+            for match_path in db.query(&root, &query, 50)? {
+                println!("{}", match_path.display());
+            }
         }
         "preview" => {
             let file = path(&mut args, "file")?;
