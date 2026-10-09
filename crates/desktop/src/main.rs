@@ -28,6 +28,7 @@ struct Explorer {
     status: String,
     search_input: Entity<InputState>,
     comment_input: Entity<InputState>,
+    author_input: Entity<InputState>,
     search_query: String,
     search_results: Vec<PathBuf>,
     search_index: Option<Arc<SearchIndex>>,
@@ -48,6 +49,7 @@ impl Explorer {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search filenames in this folder…"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on a save…"));
+        let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Actual author (optional)…"));
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search_query = input.read(cx).value().to_string();
@@ -74,7 +76,7 @@ impl Explorer {
             journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
             watcher: None, watched_root: None, confirm_recycle: None,
             status: "Filemanager · metadata-only history".into(),
-            search_input, comment_input, search_query: String::new(),
+            search_input, comment_input, author_input, search_query: String::new(),
             search_results: Vec::new(), search_index: None, search_root: None,
             search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
@@ -340,8 +342,13 @@ impl Explorer {
             return;
         };
         let comment = self.comment_input.read(cx).value().to_string();
+        let author = self.author_input.read(cx).value().to_string();
         self.status = match &self.journal {
-            Some(journal) => match journal.set_comment(event_id, comment.trim()) {
+            Some(journal) => match journal.annotate(
+                event_id,
+                if author.trim().is_empty() { None } else { Some(author.trim()) },
+                comment.trim()
+            ) {
                 Ok(true) => format!("Comment saved for event #{event_id}"),
                 Ok(false) => "History entry no longer exists".into(),
                 Err(error) => format!("Comment not saved: {error}"),
@@ -529,6 +536,7 @@ impl Explorer {
                     for event in history {
                         let event_id = event.id;
                         let saved_comment = event.comment.clone();
+                        let saved_author = event.author.clone().unwrap_or_default();
                         box_ = box_.child(
                             div().border_t_1().border_color(rgb(0x303E50)).pt_2()
                                 .child(format!("#{} · {} · {}", event.id, event.kind, event.display_time()))
@@ -549,6 +557,9 @@ impl Explorer {
                                             this.comment_input.update(cx, |input, cx| {
                                                 input.set_value(saved_comment.clone(), window, cx);
                                             });
+                                            this.author_input.update(cx, |input, cx| {
+                                                input.set_value(saved_author.clone(), window, cx);
+                                            });
                                             cx.notify();
                                         }))
                                 )
@@ -558,6 +569,8 @@ impl Explorer {
             }
             if self.selected_history_event.is_some() {
                 box_ = box_
+                    .child(div().mt_3().child("AUTHOR (optional)"))
+                    .child(div().w_full().child(Input::new(&self.author_input)))
                     .child(div().mt_3().child("COMMENT"))
                     .child(div().w_full().child(Input::new(&self.comment_input)))
                     .child(
