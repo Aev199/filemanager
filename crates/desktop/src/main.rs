@@ -364,7 +364,8 @@ impl Explorer {
         };
         self.operation_busy = true;
         let task = cx.background_spawn(async move {
-            let result = receipt.undo();
+            let queue = OperationQueue::default();
+            let result = queue.undo_completed(&receipt);
             (receipt, result)
         });
         cx.spawn(async move |weak, cx| {
