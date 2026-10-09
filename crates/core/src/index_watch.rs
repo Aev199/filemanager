@@ -8,7 +8,8 @@ use notify::{
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
+    mpsc::{self, Receiver, RecvTimeoutError, TrySendError},
+    Mutex,
     Arc,
 };
 use std::time::{Duration, Instant};
@@ -25,6 +26,7 @@ struct WatchState {
     stale: AtomicBool,
     stop: AtomicBool,
     full_scan_needed: AtomicBool,
+    last_error: Mutex<Option<String>>,
 }
 
 pub struct IndexWatch {
@@ -68,13 +70,20 @@ impl IndexWatch {
                             match sender.try_send(path) {
                                 Ok(()) => {}
                                 Err(TrySendError::Full(_)) => {
+                                    if let Ok(mut slot) = callback_state.last_error.lock() {
+                                        *slot = Some("Filesystem notification queue overflowed".into());
+                                    }
                                     callback_state.full_scan_needed.store(true, Ordering::Release);
+                                    callback_state.stale.store(true, Ordering::Release);
                                 }
                                 Err(TrySendError::Disconnected(_)) => {}
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        if let Ok(mut slot) = callback_state.last_error.lock() {
+                            *slot = Some(format!("Windows filesystem notifications: {error}"));
+                        }
                         // Windows watchers can lose events when buffers overflow.
                         // A full audit is safer than treating that as success.
                         callback_state.full_scan_needed.store(true, Ordering::Release);
@@ -102,6 +111,10 @@ impl IndexWatch {
     /// update failed. Users should explicitly refresh if it persists.
     pub fn is_stale(&self) -> bool {
         self.state.stale.load(Ordering::Acquire)
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.state.last_error.lock().ok().and_then(|value| value.clone())
     }
 }
 
@@ -217,9 +230,15 @@ fn process_events(
             Ok(()) => {
                 state.revision.fetch_add(1, Ordering::AcqRel);
                 state.stale.store(false, Ordering::Release);
+                if let Ok(mut slot) = state.last_error.lock() {
+                    *slot = None;
+                }
                 next_retry = None;
             }
-            Err(_) => {
+            Err(error) => {
+                if let Ok(mut slot) = state.last_error.lock() {
+                    *slot = Some(error.to_string());
+                }
                 // Keep the last committed index. A failed partial update
                 // requires a later full audit before declaring the index good.
                 state.stale.store(true, Ordering::Release);
