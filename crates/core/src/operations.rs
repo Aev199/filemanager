@@ -1,7 +1,8 @@
 //! Filesystem actions are explicit and never overwrite an existing destination.
 //! Move/rename are reversible if neither path has been changed after the action.
 use std::fs::{self};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tempfile::Builder;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,45 @@ use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action { Copy, Move, Rename, Recycle }
+
+/// Cooperative cancellation and byte progress shared with the UI worker.
+#[derive(Default, Debug)]
+pub struct CopyControl {
+    cancelled: AtomicBool,
+    copied_bytes: AtomicU64,
+    total_bytes: AtomicU64,
+}
+impl CopyControl {
+    pub fn cancel(&self) { self.cancelled.store(true, Ordering::Relaxed); }
+    pub fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Relaxed) }
+    pub fn bytes_copied(&self) -> u64 { self.copied_bytes.load(Ordering::Relaxed) }
+    pub fn total_bytes(&self) -> u64 { self.total_bytes.load(Ordering::Relaxed) }
+    pub(crate) fn set_total_bytes(&self, bytes: u64) {
+        self.total_bytes.store(bytes, Ordering::Relaxed);
+    }
+    pub(crate) fn check(&self) -> io::Result<()> {
+        if self.is_cancelled() {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"))
+        } else { Ok(()) }
+    }
+}
+
+pub(crate) fn copy_stream(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    control: &CopyControl,
+) -> io::Result<u64> {
+    let mut buffer = [0_u8; 256 * 1024];
+    let mut bytes = 0;
+    loop {
+        control.check()?;
+        let read = input.read(&mut buffer)?;
+        if read == 0 { return Ok(bytes); }
+        output.write_all(&buffer[..read])?;
+        bytes += read as u64;
+        control.copied_bytes.fetch_add(read as u64, Ordering::Relaxed);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Plan {
@@ -57,11 +97,17 @@ impl OperationQueue {
     pub fn len(&self) -> usize { self.pending.len() }
     pub fn is_empty(&self) -> bool { self.pending.is_empty() }
     pub fn run_all(&mut self) -> Vec<(Plan, io::Result<Receipt>)> {
+        self.run_all_with_control(&CopyControl::default())
+    }
+
+    pub fn run_all_with_control(
+        &mut self, control: &CopyControl
+    ) -> Vec<(Plan, io::Result<Receipt>)> {
         let mut results = Vec::new();
         while let Some(plan) = self.pending.pop_front() {
-            // IMPORTANT: do not re-prepare here! Doing so would silently
-            // approve a different file that appeared at the same path.
-            let result = plan.execute();
+            // Never re-prepare a changed source. Cancellation also rejects
+            // remaining queued items; the Drop Zone preserves failures.
+            let result = control.check().and_then(|_| plan.execute_with_control(control));
             results.push((plan, result));
         }
         results
@@ -78,7 +124,7 @@ fn occupied(path: &Path) -> io::Result<bool> {
 
 /// MoveFileW refuses to overwrite an existing file on Windows.
 #[cfg(windows)]
-fn safe_rename(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn safe_rename(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -91,7 +137,7 @@ fn safe_rename(source: &Path, destination: &Path) -> io::Result<()> {
     } else { Ok(()) }
 }
 #[cfg(not(windows))]
-fn safe_rename(_source: &Path, _destination: &Path) -> io::Result<()> {
+pub(crate) fn safe_rename(_source: &Path, _destination: &Path) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "No-overwrite moves are implemented for Windows only"))
 }
 
@@ -102,9 +148,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 impl Plan {
     pub fn prepare(action: Action, source: &Path, destination: Option<&Path>) -> io::Result<Self> {
         // Only existing local paths can be operated on.
-        if fs::symlink_metadata(source)?.file_type().is_symlink() {
-            return Err(invalid("Symbolic links must be handled separately"));
-        }
+        crate::folder_copy::reject_link(source)?;
         let source = fs::canonicalize(source)?;
         if source.parent().is_none() { return Err(invalid("Cannot operate on a filesystem root")); }
         if fs::symlink_metadata(&source)?.file_type().is_symlink() {
@@ -138,8 +182,14 @@ impl Plan {
 
     /// Call only after an explicit user click / confirmation; prepare() performs no changes.
     pub fn execute(&self) -> io::Result<Receipt> {
+        self.execute_with_control(&CopyControl::default())
+    }
+
+    pub fn execute_with_control(&self, control: &CopyControl) -> io::Result<Receipt> {
+        control.check()?;
         let meta = fs::symlink_metadata(&self.source)?;
-        if meta.file_type().is_symlink() || SourceStamp::read(&meta) != self.stamp {
+        crate::folder_copy::reject_link(&self.source)?;
+        if SourceStamp::read(&meta) != self.stamp {
             return Err(io::Error::other(
                 "Source was changed/replaced since preparation; operation refused"
             ));
@@ -148,8 +198,16 @@ impl Plan {
         let destination = self.destination.clone();
         match self.action {
             Action::Copy => {
-                if !meta.is_file() { return Err(invalid("Folder copies are not enabled yet")); }
                 let dest = destination.as_ref().unwrap();
+                if meta.is_dir() {
+                    crate::folder_copy::copy_folder(&self.source, dest, control)?;
+                    return Ok(Receipt {
+                        action: self.action, source: self.source.clone(),
+                        destination, modified: fs::metadata(dest)?.modified().ok(), size,
+                    });
+                }
+                if !meta.is_file() { return Err(invalid("Unsupported source type")); }
+                control.set_total_bytes(meta.len());
 
                 // Never write partially copied bytes at the final destination.
                 // A same-directory temporary file is auto-removed on ordinary
@@ -163,7 +221,7 @@ impl Plan {
                     .suffix(".fm-partial")
                     .tempfile_in(parent)?;
 
-                let bytes = io::copy(&mut input, staging.as_file_mut())?;
+                let bytes = copy_stream(&mut input, staging.as_file_mut(), control)?;
                 staging.as_file_mut().flush()?;
                 if bytes != opened_meta.len() {
                     return Err(io::Error::other("Source length changed while copying; destination was not published"));
@@ -182,6 +240,7 @@ impl Plan {
                 }
                 staging.as_file_mut().sync_all()?;
                 staging.as_file().set_permissions(opened_meta.permissions())?;
+                control.check()?;
                 staging.persist_noclobber(dest).map_err(|e| e.error)?;
             }
             Action::Move | Action::Rename => {
@@ -237,8 +296,14 @@ impl DropZone {
 
     pub fn clear(&mut self) { self.sources.clear(); }
 
-    /// Copies are intentionally file-only for now. Failed items remain in the zone.
+    /// Safe staged copies for files and directories. Failures stay in the zone.
     pub fn copy_to(&mut self, target: &Path) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        self.copy_to_with_control(target, &CopyControl::default())
+    }
+
+    pub fn copy_to_with_control(
+        &mut self, target: &Path, control: &CopyControl
+    ) -> Vec<(PathBuf, io::Result<Receipt>)> {
         let mut results = Vec::new();
         let sources = std::mem::take(&mut self.sources);
         let mut queue = OperationQueue::default();
@@ -252,7 +317,7 @@ impl DropZone {
                 }
             }
         }
-        for (plan, result) in queue.run_all() {
+        for (plan, result) in queue.run_all_with_control(control) {
             if result.is_err() { self.sources.push(plan.source.clone()); }
             results.push((plan.source, result));
         }
@@ -304,6 +369,20 @@ mod tests {
         symlink(&original, &link).unwrap();
         assert!(Plan::prepare(Action::Recycle, &link, None).is_err());
         assert_eq!(fs::read(&original).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn copying_can_be_cancelled_before_publishing() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("source.bin");
+        let dst = temp.path().join("destination.bin");
+        fs::write(&src, vec![42; 1024]).unwrap();
+        let plan = Plan::prepare(Action::Copy, &src, Some(&dst)).unwrap();
+        let control = CopyControl::default();
+        control.cancel();
+        assert!(plan.execute_with_control(&control).is_err());
+        assert!(!dst.exists());
+        assert!(src.exists());
     }
 
     #[test]
