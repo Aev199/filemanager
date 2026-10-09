@@ -1,0 +1,356 @@
+//! Filesystem actions are explicit and never overwrite an existing destination.
+//! Move/rename are reversible if neither path has been changed after the action.
+use std::fs::{self};
+use std::io::{self, Write};
+use tempfile::Builder;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action { Copy, Move, Rename, Recycle }
+
+#[derive(Clone, Debug)]
+pub struct Plan {
+    pub action: Action,
+    pub source: PathBuf,
+    pub destination: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub struct Receipt {
+    pub action: Action,
+    pub source: PathBuf,
+    pub destination: Option<PathBuf>,
+    pub modified: Option<SystemTime>,
+    pub size: u64,
+}
+
+/// Serial execution boundary between the user interface and filesystem changes.
+#[derive(Default)]
+pub struct OperationQueue { pending: VecDeque<Plan> }
+
+impl OperationQueue {
+    pub fn submit(&mut self, plan: Plan) { self.pending.push_back(plan); }
+    pub fn len(&self) -> usize { self.pending.len() }
+    pub fn is_empty(&self) -> bool { self.pending.is_empty() }
+    pub fn run_all(&mut self) -> Vec<(Plan, io::Result<Receipt>)> {
+        let mut results = Vec::new();
+        while let Some(plan) = self.pending.pop_front() {
+            let result = Plan::prepare(plan.action, &plan.source, plan.destination.as_deref())
+                .and_then(|validated| validated.execute());
+            results.push((plan, result));
+        }
+        results
+    }
+}
+
+fn occupied(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// MoveFileW refuses to overwrite an existing file on Windows.
+#[cfg(windows)]
+fn safe_rename(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileW(source: *const u16, destination: *const u16) -> i32;
+    }
+    let from = source.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let to = destination.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<_>>();
+    if unsafe { MoveFileW(from.as_ptr(), to.as_ptr()) } == 0 {
+        Err(io::Error::last_os_error())
+    } else { Ok(()) }
+}
+#[cfg(not(windows))]
+fn safe_rename(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "No-overwrite moves are implemented for Windows only"))
+}
+
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+impl Plan {
+    pub fn prepare(action: Action, source: &Path, destination: Option<&Path>) -> io::Result<Self> {
+        // Only existing local paths can be operated on.
+        if fs::symlink_metadata(source)?.file_type().is_symlink() {
+            return Err(invalid("Symbolic links must be handled separately"));
+        }
+        let source = fs::canonicalize(source)?;
+        if source.parent().is_none() { return Err(invalid("Cannot operate on a filesystem root")); }
+        if fs::symlink_metadata(&source)?.file_type().is_symlink() {
+            return Err(invalid("Symbolic links must be handled separately"));
+        }
+        let dest = match action {
+            Action::Recycle => {
+                if destination.is_some() { return Err(invalid("Recycle does not accept a destination")); }
+                None
+            }
+            _ => {
+                let destination = destination.ok_or_else(|| invalid("Missing destination"))?;
+                // Canonicalize parent, not destination: it does not exist yet.
+                let name = destination.file_name().ok_or_else(|| invalid("Missing destination name"))?;
+                if name.to_string_lossy().trim().is_empty() || name == "." || name == ".." {
+                    return Err(invalid("Invalid destination name"));
+                }
+                let parent = fs::canonicalize(destination.parent().ok_or_else(|| invalid("Missing parent"))?)?;
+                if !parent.is_dir() { return Err(invalid("Destination parent is not a directory")); }
+                let normalized = parent.join(name);
+                if occupied(&normalized)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
+                if source.is_dir() && parent.starts_with(&source) {
+                    return Err(invalid("Cannot move or copy a folder inside itself"));
+                }
+                Some(normalized)
+            }
+        };
+        Ok(Self { action, source, destination: dest })
+    }
+
+    /// Call only after an explicit user click / confirmation; prepare() performs no changes.
+    pub fn execute(&self) -> io::Result<Receipt> {
+        let meta = fs::metadata(&self.source)?;
+        let size = meta.len();
+        let destination = self.destination.clone();
+        match self.action {
+            Action::Copy => {
+                if !meta.is_file() { return Err(invalid("Folder copies are not enabled yet")); }
+                let dest = destination.as_ref().unwrap();
+
+                // Never write partially copied bytes at the final destination.
+                // A same-directory temporary file is auto-removed on ordinary
+                // failure; persist_noclobber atomically publishes without replace.
+                let parent = dest.parent().ok_or_else(|| invalid("Missing destination folder"))?;
+                let mut input = fs::File::open(&self.source)?;
+                let opened_meta = input.metadata()?;
+                if !opened_meta.is_file() { return Err(invalid("Source is not a regular file")); }
+                let mut staging = Builder::new()
+                    .prefix(".filemanager-copy-")
+                    .suffix(".fm-partial")
+                    .tempfile_in(parent)?;
+
+                let bytes = io::copy(&mut input, staging.as_file_mut())?;
+                staging.as_file_mut().flush()?;
+                if bytes != opened_meta.len() {
+                    return Err(io::Error::other("Source length changed while copying; destination was not published"));
+                }
+                let end_meta = fs::metadata(&self.source)?;
+                if end_meta.len() != opened_meta.len()
+                    || end_meta.modified().ok() != opened_meta.modified().ok()
+                {
+                    return Err(io::Error::other("Source changed while copying; destination was not published"));
+                }
+                if let Ok(timestamp) = opened_meta.modified() {
+                    filetime::set_file_handle_times(
+                        staging.as_file(), None,
+                        Some(filetime::FileTime::from_system_time(timestamp)),
+                    )?;
+                }
+                staging.as_file_mut().sync_all()?;
+                staging.as_file().set_permissions(opened_meta.permissions())?;
+                staging.persist_noclobber(dest).map_err(|e| e.error)?;
+            }
+            Action::Move | Action::Rename => {
+                let dest = destination.as_ref().unwrap();
+                if occupied(dest)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
+                // MoveFileW never replaces occupied destinations and rejects cross-volume moves.
+                safe_rename(&self.source, dest)?;
+            }
+            Action::Recycle => {
+                trash::delete(&self.source).map_err(|err| io::Error::other(err.to_string()))?;
+            }
+        }
+        let last_metadata = if let Some(ref dest) = destination { fs::metadata(dest).ok() } else { None };
+        Ok(Receipt {
+            action: self.action, source: self.source.clone(), destination,
+            modified: last_metadata.as_ref().and_then(|m| m.modified().ok()),
+            size: last_metadata.map_or(size, |m| m.len()),
+        })
+    }
+}
+
+impl Receipt {
+    /// Undo only reversible renames and moves and only for an unchanged target.
+    pub fn undo(&self) -> io::Result<()> {
+        if self.action != Action::Move && self.action != Action::Rename {
+            return Err(invalid("Undo is available only for moves and renames"));
+        }
+        let dest = self.destination.as_ref().ok_or_else(|| invalid("Missing destination"))?;
+        if occupied(&self.source)? {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Original path was occupied"));
+        }
+        let meta = fs::metadata(dest)?;
+        if meta.len() != self.size || meta.modified().ok() != self.modified {
+            return Err(invalid("File has changed since move; undo refused"));
+        }
+        safe_rename(dest, &self.source)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct DropZone {
+    sources: Vec<PathBuf>,
+}
+
+impl DropZone {
+    pub fn items(&self) -> &[PathBuf] { &self.sources }
+
+    pub fn add(&mut self, source: &Path) -> io::Result<()> {
+        let canonical = fs::canonicalize(source)?;
+        if !self.sources.contains(&canonical) { self.sources.push(canonical); }
+        Ok(())
+    }
+
+    pub fn clear(&mut self) { self.sources.clear(); }
+
+    /// Copies are intentionally file-only for now. Failed items remain in the zone.
+    pub fn copy_to(&mut self, target: &Path) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        let mut results = Vec::new();
+        let sources = std::mem::take(&mut self.sources);
+        let mut queue = OperationQueue::default();
+        for source in &sources {
+            let destination = target.join(source.file_name().unwrap_or_default());
+            match Plan::prepare(Action::Copy, source, Some(&destination)) {
+                Ok(plan) => queue.submit(plan),
+                Err(error) => {
+                    self.sources.push(source.clone());
+                    results.push((source.clone(), Err(error)));
+                }
+            }
+        }
+        for (plan, result) in queue.run_all() {
+            if result.is_err() { self.sources.push(plan.source.clone()); }
+            results.push((plan.source, result));
+        }
+        results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn copy_never_overwrites_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        fs::write(&a, b"source").unwrap();
+        fs::write(&b, b"existing").unwrap();
+        assert!(Plan::prepare(Action::Copy, &a, Some(&b)).is_err());
+        assert_eq!(fs::read(&b).unwrap(), b"existing");
+    }
+    #[test]
+    #[cfg(windows)]
+    fn move_and_undo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        fs::write(&a, b"content").unwrap();
+        let receipt = Plan::prepare(Action::Move, &a, Some(&b)).unwrap().execute().unwrap();
+        assert!(b.exists());
+        receipt.undo().unwrap();
+        assert!(a.exists());
+        assert!(!b.exists());
+    }
+    #[test]
+    fn cannot_move_directory_into_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("d")).unwrap();
+        fs::create_dir(tmp.path().join("d").join("sub")).unwrap();
+        assert!(Plan::prepare(Action::Move, &tmp.path().join("d"), Some(&tmp.path().join("d").join("sub").join("nested"))).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn symlink_source_is_rejected_before_canonicalization() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("original");
+        let link = tmp.path().join("link");
+        fs::write(&original, b"preserve").unwrap();
+        symlink(&original, &link).unwrap();
+        assert!(Plan::prepare(Action::Recycle, &link, None).is_err());
+        assert_eq!(fs::read(&original).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn copy_creates_complete_file_with_original_modified_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("original.bin");
+        let dest = tmp.path().join("copied.bin");
+        fs::write(&source, b"full original contents").unwrap();
+        let time = fs::metadata(&source).unwrap().modified().unwrap();
+        let receipt = Plan::prepare(Action::Copy, &source, Some(&dest))
+            .unwrap().execute().unwrap();
+        assert_eq!(receipt.action, Action::Copy);
+        assert_eq!(fs::read(&dest).unwrap(), b"full original contents");
+        assert_eq!(fs::metadata(&dest).unwrap().modified().unwrap(), time);
+        let left = fs::read_dir(tmp.path()).unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(left.len(), 2, "No temporary copies should be left behind");
+    }
+
+    #[test]
+    fn copy_collision_at_publish_time_leaves_existing_destination_intact() {
+        // The real copy is atomically published by persist_noclobber; this
+        // test verifies that the same primitive refuses to replace a file.
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("owned.txt");
+        fs::write(&dest, b"keep me").unwrap();
+        let mut staging = Builder::new().prefix(".filemanager-copy-")
+            .suffix(".fm-partial").tempfile_in(tmp.path()).unwrap();
+        staging.as_file_mut().write_all(b"new text").unwrap();
+        assert!(staging.persist_noclobber(&dest).is_err());
+        assert_eq!(fs::read(dest).unwrap(), b"keep me");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn collision_between_preparation_and_execution_is_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("source.txt");
+        let dst = tmp.path().join("destination.txt");
+        fs::write(&src, b"original contents").unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Copy, &src, Some(&dst)).unwrap());
+        // An external program creates the destination after our preflight.
+        fs::write(&dst, b"another user's file").unwrap();
+        let result = queue.run_all();
+        assert!(result[0].1.is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"another user's file");
+        assert_eq!(fs::read(&src).unwrap(), b"original contents");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_move_never_replaces_destination_created_after_preflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("a.txt");
+        let dst = tmp.path().join("b.txt");
+        fs::write(&src, b"original").unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Move, &src, Some(&dst)).unwrap());
+        fs::write(&dst, b"existing").unwrap();
+        let result = queue.run_all();
+        assert!(result[0].1.is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"existing");
+        assert_eq!(fs::read(&src).unwrap(), b"original");
+    }
+
+    #[test]
+    fn drop_zone_does_not_erase_on_copy_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("a");
+        fs::write(&path, b"a").unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&path).unwrap();
+        let results = zone.copy_to(tmp.path());
+        assert!(results[0].1.is_err());
+        assert_eq!(zone.items().len(), 1);
+    }
+}

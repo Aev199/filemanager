@@ -1,0 +1,12 @@
+[package]
+name = "filemanager-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "fmctl"
+path = "src/main.rs"
+
+[dependencies]
+filemanager-core = { path = "../core" }
