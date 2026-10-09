@@ -223,6 +223,131 @@ impl Explorer {
         cx.notify();
     }
 
+    /// Filename search is indexed away from the UI thread. Each request has
+    /// a generation, so old scans can never replace results for a new folder.
+    fn update_search(&mut self, cx: &mut Context<Self>) {
+        if !self.search_active {
+            self.search_results.clear();
+            self.status = "Search cleared".into();
+            cx.notify();
+            return;
+        }
+        let root = self.browser.active().active().path.clone();
+        if self.search_root.as_ref() == Some(&root) {
+            if let Some(index) = &self.search_index {
+                self.search_results = index.query(&self.search_query, 120);
+                self.status = format!("{} results in {}", self.search_results.len(), root.display());
+                cx.notify();
+                return;
+            }
+            if self.search_busy { return; }
+        }
+
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        self.search_root = Some(root.clone());
+        self.search_index = None;
+        self.search_results.clear();
+        self.search_busy = true;
+        self.status = format!("Indexing filenames in {}...", root.display());
+        cx.notify();
+
+        let task = cx.background_spawn(async move {
+            SearchIndex::build(&root, 30_000)
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.search_generation != generation { return; }
+                this.search_busy = false;
+                match result {
+                    Ok(index) => {
+                        let total = index.count();
+                        let capped = index.truncated;
+                        this.search_results = index.query(&this.search_query, 120);
+                        this.search_index = Some(Arc::new(index));
+                        this.status = format!(
+                            "{} results · {} indexed paths{}",
+                            this.search_results.len(), total,
+                            if capped { " (limit reached)" } else { "" }
+                        );
+                    }
+                    Err(error) => {
+                        this.search_index = None;
+                        this.status = format!("Search indexing failed: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn open_search_result(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if path.is_dir() {
+            self.go_to(path, Side::Left, cx);
+        } else {
+            if let Some(parent) = path.parent() {
+                if let Err(error) = self.browser.active_mut().navigate(parent) {
+                    self.status = format!("Cannot open result folder: {error}");
+                    cx.notify();
+                    return;
+                }
+            }
+            self.selected = Some(path.clone());
+            self.status = format!("Selected search result: {}", path.display());
+        }
+        self.search_active = false;
+        self.search_results.clear();
+        cx.notify();
+    }
+
+    fn search_results_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut rows = div().id("search-results").flex_1().min_w_0().min_h_0()
+            .flex().flex_col().overflow_y_scroll().p_3().gap_1()
+            .bg(rgb(0x222C3A))
+            .child(div().p_2().text_color(rgb(0xE9EFF7))
+                .child(format!("Filename search · {}", self.search_query)));
+        if self.search_busy {
+            rows = rows.child("Scanning the current folder in the background…");
+        }
+        if !self.search_busy && self.search_results.is_empty() {
+            rows = rows.child("No matches. Search only covers filenames in the current folder.");
+        }
+        for (index, path) in self.search_results.iter().enumerate() {
+            let selected_path = path.clone();
+            rows = rows.child(
+                div().id(format!("search-hit-{index}")).p_2().rounded_md()
+                    .cursor_pointer().bg(rgb(0x273544))
+                    .hover(|style| style.bg(rgb(0x344F69)))
+                    .text_color(rgb(0xDFEAF4))
+                    .child(path.strip_prefix(self.search_root.as_deref().unwrap_or(path))
+                        .unwrap_or(path).display().to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_search_result(selected_path.clone(), cx);
+                    }))
+            );
+        }
+        rows.into_any_element()
+    }
+
+    fn save_comment(&mut self, cx: &mut Context<Self>) {
+        let Some(event_id) = self.selected_history_event else {
+            self.status = "Select a history entry first".into();
+            cx.notify();
+            return;
+        };
+        let comment = self.comment_input.read(cx).value().to_string();
+        self.status = match &self.journal {
+            Some(journal) => match journal.set_comment(event_id, comment.trim()) {
+                Ok(true) => format!("Comment saved for event #{event_id}"),
+                Ok(false) => "History entry no longer exists".into(),
+                Err(error) => format!("Comment not saved: {error}"),
+            },
+            None => "History unavailable".into(),
+        };
+        cx.notify();
+    }
+
     fn save_workspace(&mut self, cx: &mut Context<Self>) {
         self.status = match self.workspaces.as_ref() {
             Some(store) => match store.save("Default", &self.browser, self.miller_mode) {
