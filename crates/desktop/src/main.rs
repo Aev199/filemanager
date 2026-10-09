@@ -13,6 +13,26 @@ actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find])
 #[derive(Clone, Copy)]
 enum Side { Left, Right }
 
+/// Internal drag-and-drop payload. Dropping only stages a path; no file
+/// operation takes place until the user explicitly clicks Copy here.
+#[derive(Clone)]
+struct FileDragInfo { path: PathBuf }
+
+struct FileDragPreview { name: String, position: Point<Pixels> }
+
+impl Render for FileDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .pl(self.position.x)
+            .pt(self.position.y)
+            .child(
+                div().px_3().py_2().rounded_md().bg(rgb(0x344F69))
+                    .text_color(rgb(0xE9EFF7))
+                    .child(self.name.clone())
+            )
+    }
+}
+
 struct Explorer {
     browser: Browser,
     selected: Option<PathBuf>,
@@ -486,8 +506,22 @@ impl Explorer {
             );
         }
         side.child(div().mt_4().child("DROP ZONE"))
-            .child(format!("{} selected", self.zone.items().len()))
-            .child("Stage items → choose destination → Copy here")
+            .child(
+                div().id("native-drop-zone").mt_2().p_3().rounded_md()
+                    .border_2().border_dashed().border_color(rgb(0x526680))
+                    .bg(rgb(0x273544))
+                    .text_color(rgb(0xDFEAF4))
+                    .child(format!("{} staged items", self.zone.items().len()))
+                    .child("Drop a file or folder here")
+                    .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| {
+                        this.status = match this.zone.add(&data.path) {
+                            Ok(()) => format!("Staged {} item(s)", this.zone.items().len()),
+                            Err(error) => format!("Cannot stage item: {error}"),
+                        };
+                        cx.notify();
+                    }))
+            )
+            .child("Choose destination, then Copy here")
             .into_any_element()
     }
 
@@ -505,8 +539,28 @@ impl Explorer {
                         div().id(format!("row-{}-{i}", folder.display())).w_full().p_2()
                             .bg(rgb(if active { 0x344F69 } else { 0x222C3A }))
                             .text_color(rgb(0xDFEAF4)).cursor_pointer().child(label)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_or_open(path.clone(), side, cx)
+                            .on_drag(FileDragInfo { path: path.clone() },
+                                |info: &FileDragInfo, position, _, cx| {
+                                    cx.new(|_| FileDragPreview {
+                                        name: browser::display_name(&info.path),
+                                        position,
+                                    })
+                                })
+                            .on_mouse_down(MouseButton::Right,
+                                cx.listener({
+                                    let context_path = path.clone();
+                                    move |this, event: &MouseDownEvent, _, cx| {
+                                        this.selected = Some(context_path.clone());
+                                        this.selected_history_event = None;
+                                        this.context_menu = Some(event.position);
+                                        cx.notify();
+                                    }
+                                }))
+                            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                                if event.standard_click() {
+                                    this.context_menu = None;
+                                    this.select_or_open(path.clone(), side, cx);
+                                }
                             }))
                     );
                 }
