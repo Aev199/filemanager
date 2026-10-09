@@ -5,6 +5,7 @@ use filemanager_core::search::{self, SearchIndex};
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::Root;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1085,7 +1086,11 @@ fn main() {
             KeyBinding::new("ctrl-shift-s", Stage, Some("Filemanager")),
             KeyBinding::new("f5", Refresh, Some("Filemanager")),
         ]);
-        cx.open_window(WindowOptions::default(), |window, cx| cx.new(|cx| Explorer::new(window, cx)))
+        cx.open_window(WindowOptions::default(), |window, cx| {
+            let explorer = cx.new(|cx| Explorer::new(window, cx));
+            // gpui_ce_components require Root as the outer window view.
+            cx.new(|cx| Root::new(explorer, window, cx))
+        })
             .expect("GPUI window failed");
         cx.activate(true);
     });
