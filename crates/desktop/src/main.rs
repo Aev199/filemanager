@@ -42,6 +42,8 @@ struct Explorer {
     copy_control: Option<Arc<CopyControl>>,
     context_menu: Option<Point<Pixels>>,
     rename_input: Entity<InputState>,
+    folder_input: Entity<InputState>,
+    creating_folder: bool,
     renaming: bool,
     last_move: Option<Receipt>,
     listing_limit: usize,
@@ -77,6 +79,7 @@ impl Explorer {
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on a save…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Actual author (optional)…"));
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New file or folder name…"));
+        let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("New folder name…"));
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search_query = input.read(cx).value().to_string();
@@ -100,8 +103,9 @@ impl Explorer {
             operation_busy: false,
             copy_control: None,
             context_menu: None,
-            rename_input,
+            rename_input, folder_input,
             renaming: false,
+            creating_folder: false,
             last_move: None,
             listing_limit: 200,
             miller_mode,
@@ -213,6 +217,51 @@ impl Explorer {
                     Some(details) => format!("{ok} copied, {errors} failed. First error: {details}"),
                     None => format!("{ok} files copied successfully"),
                 };
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn create_folder(&mut self, cx: &mut Context<Self>) {
+        if self.copy_in_progress || self.operation_busy {
+            self.status = "Wait for the active operation to finish".into();
+            cx.notify();
+            return;
+        }
+        let name = self.folder_input.read(cx).value().to_string();
+        if let Err(error) = filemanager_core::operations::validate_leaf_name(name.trim()) {
+            self.status = format!("Invalid folder name: {error}");
+            cx.notify();
+            return;
+        }
+        let parent = self.browser.active().active().path.clone();
+        let destination = parent.join(name.trim());
+        let plan = match Plan::prepare(Action::CreateFolder, &parent, Some(&destination)) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.status = format!("Cannot create folder: {error}");
+                cx.notify();
+                return;
+            }
+        };
+        self.operation_busy = true;
+        let task = cx.background_spawn(async move {
+            let mut queue = OperationQueue::default();
+            queue.submit(plan);
+            queue.run_all().remove(0).1
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.operation_busy = false;
+                match result {
+                    Ok(receipt) => {
+                        this.creating_folder = false;
+                        this.selected = receipt.destination;
+                        this.status = "Folder created safely".into();
+                    }
+                    Err(error) => this.status = format!("Folder creation failed: {error}"),
+                }
                 cx.notify();
             });
         }).detach();
@@ -934,6 +983,11 @@ impl Render for Explorer {
                 this.selected = None;
                 cx.notify();
             })))
+            .child(Self::control("New folder", "new-folder", cx.listener(|this, _, _, cx| {
+                this.creating_folder = !this.creating_folder;
+                this.context_menu = None;
+                cx.notify();
+            })))
             .child(Self::control("Split", "split", cx.listener(|this, _, _, cx| {
                 this.browser.active_mut().toggle_split(); cx.notify();
             })))
@@ -978,6 +1032,13 @@ impl Render for Explorer {
                     this.close_search();
                     cx.notify();
                 })));
+
+        let searchbar = if self.creating_folder {
+            searchbar
+                .child(div().w(px(230.)).child(Input::new(&self.folder_input)))
+                .child(Self::control("Create folder", "apply-create-folder",
+                    cx.listener(|this, _, _, cx| this.create_folder(cx))))
+        } else { searchbar };
 
         let mut body = div().flex_1().flex().overflow_hidden()
             .child(self.sidebar(cx));
