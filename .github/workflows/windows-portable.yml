@@ -1,0 +1,52 @@
+name: Windows portable EXE (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-filemanager-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build and test on Windows
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests (core only)
+        run: cargo test -p filemanager-core --all-targets
+
+      - name: Build native GPUI application
+        run: cargo build -p filemanager-desktop --release --target x86_64-pc-windows-msvc
+
+      - name: Package portable executable and checksum
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/filemanager-desktop.exe" "dist/Filemanager.exe"
+          $sha = (Get-FileHash "dist/Filemanager.exe" -Algorithm SHA256).Hash
+          Set-Content -Path "dist/SHA256.txt" -Value "$sha  Filemanager.exe"
+          Compress-Archive -Path "dist/Filemanager.exe", "dist/SHA256.txt" -DestinationPath "Filemanager-win64.zip" -Force
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Filemanager-Windows-x64
+          path: Filemanager-win64.zip
+          retention-days: 7
+          if-no-files-found: error
