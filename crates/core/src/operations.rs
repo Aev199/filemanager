@@ -569,6 +569,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn audited_undo_records_reversal_without_replaying_or_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("old.txt");
+        let dest = temp.path().join("new.txt");
+        fs::write(&src, b"original").unwrap();
+        let journal = crate::operation_journal::OperationJournal::open(
+            temp.path().join("operation-queue.sqlite3")
+        ).unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Rename, &src, Some(&dest)).unwrap());
+        let receipt = queue.run_all_audited(&CopyControl::default(), &journal)
+            .remove(0).1.unwrap();
+        assert!(dest.exists());
+        OperationQueue::default().undo_completed_audited(&receipt, &journal).unwrap();
+        assert!(src.exists());
+        assert!(!dest.exists());
+        assert!(journal.unresolved(10).unwrap().is_empty());
+    }
+
+    #[test]
     fn journal_failure_never_starts_file_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("a.txt");
