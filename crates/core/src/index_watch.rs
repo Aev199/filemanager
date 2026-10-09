@@ -49,6 +49,13 @@ impl IndexWatch {
             move |received: notify::Result<notify::Event>| {
                 match received {
                     Ok(event) => {
+                        // This index stores names, not contents. Editing an
+                        // existing file's bytes does not change its search key.
+                        // Keep create/remove/rename/metadata events.
+                        if matches!(
+                            event.kind,
+                            EventKind::Access(_) | EventKind::Modify(ModifyKind::Data(_))
+                        ) { return; }
                         // Backends may only report one side of a rename.
                         // Audit the root instead of keeping a ghost old path.
                         if matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
