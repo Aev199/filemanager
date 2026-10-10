@@ -317,6 +317,17 @@ impl Explorer {
         for (index, place) in self.drives.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             side = side.child(self.place_row(("drive", index), place, active, cx));
+            if let Some(&(free, total)) = self.drive_space.get(&place.path) {
+                let used = 1. - free as f32 / total as f32;
+                let color = if used > 0.9 { DANGER } else { ACCENT };
+                side = side.child(
+                    div().mx_2().pl(px(32.)).pr_2().pb_1().flex().flex_col().gap_1()
+                        .child(div().h(px(4.)).w_full().rounded_full().bg(rgb(BORDER))
+                            .child(div().h_full().rounded_full().bg(rgb(color)).w(gpui::relative(used))))
+                        .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                            .child(format!("свободно {} из {}", format_size(free), format_size(total))))
+                );
+            }
         }
         side = side.child(section_title("DROP ZONE")).child(self.drop_zone(cx));
         side = side.child(section_title("РАБОЧЕЕ ПРОСТРАНСТВО"))

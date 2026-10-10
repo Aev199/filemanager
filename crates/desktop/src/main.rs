@@ -95,6 +95,8 @@ struct Explorer {
     focus_handle: FocusHandle,
     places: Vec<Place>,
     drives: Vec<Place>,
+    /// Free and total bytes per local drive, filled in the background.
+    drive_space: HashMap<PathBuf, (u64, u64)>,
     sort: SortSpec,
     show_hidden: bool,
     show_sidebar: bool,
@@ -243,6 +245,7 @@ impl Explorer {
             focus_handle,
             places: places::user_places(),
             drives: places::drives(),
+            drive_space: HashMap::new(),
             sort: SortSpec::default(),
             show_hidden: false,
             show_sidebar: true,
@@ -366,6 +369,27 @@ impl Explorer {
         self.selected = None;
         self.close_search();
         cx.notify();
+    }
+
+    /// Reads free space of local drives off the UI thread. Network drives
+    /// are skipped: a sleeping server must not stall anything.
+    fn load_drive_space(&mut self, cx: &mut Context<Self>) {
+        let roots: Vec<PathBuf> = self.drives.iter()
+            .filter(|drive| drive.kind != places::PlaceKind::NetworkDrive)
+            .map(|drive| drive.path.clone())
+            .collect();
+        let task = cx.background_spawn(async move {
+            roots.into_iter()
+                .filter_map(|root| places::disk_space(&root).map(|space| (root, space)))
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |weak, cx| {
+            let spaces = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.drive_space = spaces.into_iter().collect();
+                cx.notify();
+            });
+        }).detach();
     }
 
     fn stage_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
@@ -1238,6 +1262,7 @@ fn main() {
         };
         cx.open_window(options, |window, cx| {
             let explorer = cx.new(|cx| Explorer::new(window, cx));
+            explorer.update(cx, |this, cx| this.load_drive_space(cx));
             let saver = explorer.downgrade();
             // Tabs, splits and view mode come back on the next start.
             window.on_window_should_close(cx, move |_, cx| {

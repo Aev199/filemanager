@@ -88,6 +88,24 @@ pub fn drives() -> Vec<Place> {
     vec![Place { label: "Корень системы".into(), path: PathBuf::from("/"), kind: PlaceKind::Drive }]
 }
 
+/// Free and total bytes of the volume holding `root`. May block on slow
+/// media: call from a background task, and never for network drives.
+#[cfg(windows)]
+pub fn disk_space(root: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut free = 0u64;
+    let mut total = 0u64;
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) };
+    (ok != 0 && total > 0).then_some((free, total))
+}
+
+#[cfg(not(windows))]
+pub fn disk_space(_root: &Path) -> Option<(u64, u64)> {
+    None
+}
+
 #[cfg(windows)]
 fn known_folder(kind: PlaceKind) -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
@@ -150,5 +168,13 @@ mod tests {
     #[test]
     fn drives_are_listed() {
         assert!(!drives().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_drive_reports_space() {
+        let drive = drives().into_iter().find(|d| d.kind == PlaceKind::Drive).unwrap();
+        let (free, total) = disk_space(&drive.path).unwrap();
+        assert!(free <= total);
     }
 }
