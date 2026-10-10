@@ -440,7 +440,19 @@ impl DropZone {
         control: &CopyControl,
         journal: &crate::operation_journal::OperationJournal,
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
-        self.transfer_with_optional_journal(Action::Copy, target, control, Some(journal))
+        self.transfer_with_optional_journal(Action::Copy, target, control, Some(journal), false)
+    }
+
+    /// Like `copy_to_audited`, but an occupied name gets a free
+    /// "name (2).ext" instead of failing — Explorer's paste-into-the-same-
+    /// folder behavior. Existing files are still never replaced.
+    pub fn copy_to_audited_keep_both(
+        &mut self,
+        target: &Path,
+        control: &CopyControl,
+        journal: &crate::operation_journal::OperationJournal,
+    ) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        self.transfer_with_optional_journal(Action::Copy, target, control, Some(journal), true)
     }
 
     /// Move staged items within one volume through the same durable audit
@@ -452,24 +464,32 @@ impl DropZone {
         control: &CopyControl,
         journal: &crate::operation_journal::OperationJournal,
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
-        self.transfer_with_optional_journal(Action::Move, target, control, Some(journal))
+        self.transfer_with_optional_journal(Action::Move, target, control, Some(journal), false)
     }
 
     pub fn copy_to_with_control(
         &mut self, target: &Path, control: &CopyControl
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
-        self.transfer_with_optional_journal(Action::Copy, target, control, None)
+        self.transfer_with_optional_journal(Action::Copy, target, control, None, false)
     }
 
     fn transfer_with_optional_journal(
         &mut self, action: Action, target: &Path, control: &CopyControl,
         journal: Option<&crate::operation_journal::OperationJournal>,
+        keep_both: bool,
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
         let mut results = Vec::new();
         let sources = std::mem::take(&mut self.sources);
         let mut queue = OperationQueue::default();
+        let mut reserved: Vec<PathBuf> = Vec::new();
         for source in &sources {
-            let destination = target.join(source.file_name().unwrap_or_default());
+            let name = source.file_name().unwrap_or_default();
+            let destination = if keep_both {
+                free_destination(target, Path::new(name), &reserved)
+            } else {
+                target.join(name)
+            };
+            reserved.push(destination.clone());
             match Plan::prepare(action, source, Some(&destination)) {
                 Ok(plan) => queue.submit(plan),
                 Err(error) => {
@@ -490,9 +510,38 @@ impl DropZone {
     }
 }
 
+/// `target/name`, or the first free "stem (N).ext" for N = 2, 3, …
+/// `reserved` holds names already planned in the same batch.
+pub fn free_destination(target: &Path, name: &Path, reserved: &[PathBuf]) -> PathBuf {
+    let taken = |path: &Path| fs::symlink_metadata(path).is_ok() || reserved.iter().any(|r| r == path);
+    let first = target.join(name);
+    if !taken(&first) {
+        return first;
+    }
+    let stem = name.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let extension = name.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    (2..).map(|n| target.join(format!("{stem} ({n}){extension}")))
+        .find(|candidate| !taken(candidate))
+        .expect("an unbounded range always yields a free name")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_destination_numbers_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("отчёт.pdf"), b"1").unwrap();
+        fs::write(tmp.path().join("отчёт (2).pdf"), b"2").unwrap();
+        assert_eq!(free_destination(tmp.path(), Path::new("отчёт.pdf"), &[]), tmp.path().join("отчёт (3).pdf"));
+        assert_eq!(free_destination(tmp.path(), Path::new("новый.txt"), &[]), tmp.path().join("новый.txt"));
+        let reserved = vec![tmp.path().join("отчёт (3).pdf")];
+        assert_eq!(free_destination(tmp.path(), Path::new("отчёт.pdf"), &reserved), tmp.path().join("отчёт (4).pdf"));
+        fs::create_dir(tmp.path().join("Папка")).unwrap();
+        assert_eq!(free_destination(tmp.path(), Path::new("Папка"), &[]), tmp.path().join("Папка (2)"));
+    }
+
     #[test]
     fn new_directory_is_queued_and_never_overwrites() {
         let temp = tempfile::tempdir().unwrap();

@@ -2,10 +2,12 @@
 
 mod assets;
 mod keys;
+mod messages;
 mod theme;
 mod view;
 
 use filemanager_core::browser::{self, Browser};
+use filemanager_core::clipboard;
 use filemanager_core::history::{Event, HistoryWatch, Journal};
 use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
 use filemanager_core::places::{self, Place};
@@ -439,18 +441,81 @@ impl Explorer {
         cx.notify();
     }
 
+    /// Ctrl+C / Ctrl+X: the selection goes to the Windows clipboard, so it
+    /// can be pasted here or in Explorer. Nothing on disk changes yet.
+    fn clipboard_put(&mut self, cut: bool, cx: &mut Context<Self>) {
+        let paths = self.selection();
+        if paths.is_empty() {
+            return;
+        }
+        self.status = match clipboard::write_files(&paths, cut) {
+            Ok(()) if cut => format!("Вырезано: {} — вставьте в папке назначения (Ctrl+V)", paths.len()),
+            Ok(()) => format!("Скопировано в буфер: {}", paths.len()),
+            Err(error) => format!("Буфер обмена недоступен: {error}"),
+        };
+        cx.notify();
+    }
+
+    /// Ctrl+V: files from the clipboard (ours or Explorer's) are copied, or
+    /// moved after a cut, into the focused pane via the audited queue.
+    fn clipboard_paste(&mut self, cx: &mut Context<Self>) {
+        let files = match clipboard::read_files() {
+            Ok(Some(files)) => files,
+            Ok(None) => {
+                self.status = "В буфере обмена нет файлов".into();
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.status = format!("Буфер обмена недоступен: {error}");
+                cx.notify();
+                return;
+            }
+        };
+        let mut zone = DropZone::default();
+        for path in &files.paths {
+            if let Err(error) = zone.add(path) {
+                self.status = format!("Нельзя вставить «{}»: {error}", browser::display_name(path));
+                cx.notify();
+                return;
+            }
+        }
+        if files.cut {
+            self.move_into(Some(zone), cx);
+            // A cut is consumed once, as in Explorer.
+            let _ = clipboard::write_files(&[], false);
+        } else {
+            // Pasting into the folder the files came from makes numbered
+            // copies, like Explorer; elsewhere an occupied name is refused.
+            let target = self.browser.active().active().path.clone();
+            let same_folder = files.paths.iter().any(|p| p.parent() == Some(target.as_path()));
+            self.copy_into_with(Some(zone), same_folder, cx);
+        }
+    }
+
     fn stage(&mut self, cx: &mut Context<Self>) {
         let paths = self.selection();
         self.stage_paths(&paths, cx);
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
+        self.copy_into(None, cx);
+    }
+
+    /// Copies the Drop Zone, or `external` items (clipboard), into the
+    /// focused pane through the audited, no-overwrite queue.
+    fn copy_into(&mut self, external: Option<DropZone>, cx: &mut Context<Self>) {
+        self.copy_into_with(external, false, cx);
+    }
+
+    fn copy_into_with(&mut self, external: Option<DropZone>, keep_both: bool, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
             return;
         }
-        if self.zone.items().is_empty() {
+        let from_staging = external.is_none();
+        if from_staging && self.zone.items().is_empty() {
             self.status = "Drop Zone пуста".into();
             cx.notify();
             return;
@@ -461,13 +526,17 @@ impl Explorer {
             return;
         };
         let target = self.browser.active().active().path.clone();
-        let mut zone = std::mem::take(&mut self.zone);
+        let mut zone = external.unwrap_or_else(|| std::mem::take(&mut self.zone));
         self.copy_in_progress = true;
         let control = Arc::new(CopyControl::default());
         self.copy_control = Some(Arc::clone(&control));
         self.status = "Копирование…".into();
         let task = cx.background_spawn(async move {
-            let results = zone.copy_to_audited(&target, &control, &audit);
+            let results = if keep_both {
+                zone.copy_to_audited_keep_both(&target, &control, &audit)
+            } else {
+                zone.copy_to_audited(&target, &control, &audit)
+            };
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
             let errors = results.len() - ok;
             let first_error = results.iter().find_map(|(path, result)| {
@@ -497,7 +566,7 @@ impl Explorer {
             let (zone, target, ok, errors, first_error) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 // Do not discard items staged while the earlier copy ran.
-                for pending in zone.items() {
+                for pending in zone.items().iter().filter(|_| from_staging) {
                     if let Err(error) = this.zone.add(pending) {
                         this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
                     }
@@ -517,12 +586,17 @@ impl Explorer {
     /// Move staged paths to the active pane only on the same volume.
     /// Each item is prepared again and journaled before any disk change.
     fn move_staged(&mut self, cx: &mut Context<Self>) {
+        self.move_into(None, cx);
+    }
+
+    fn move_into(&mut self, external: Option<DropZone>, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
             return;
         }
-        if self.zone.items().is_empty() {
+        let from_staging = external.is_none();
+        if from_staging && self.zone.items().is_empty() {
             self.status = "Drop Zone пуста".into();
             cx.notify();
             return;
@@ -533,7 +607,7 @@ impl Explorer {
             return;
         };
         let target = self.browser.active().active().path.clone();
-        let mut zone = std::mem::take(&mut self.zone);
+        let mut zone = external.unwrap_or_else(|| std::mem::take(&mut self.zone));
         self.operation_busy = true;
         self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
@@ -559,7 +633,7 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let (zone, target, moved, failed, first_error, sources, undo) = task.await;
             let _ = weak.update(cx, |this, cx| {
-                for path in zone.items() {
+                for path in zone.items().iter().filter(|_| from_staging) {
                     if let Err(error) = this.zone.add(path) {
                         this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
                     }

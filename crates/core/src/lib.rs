@@ -23,3 +23,5 @@ pub mod format;
 pub mod places;
 
 pub mod selection;
+
+pub mod clipboard;

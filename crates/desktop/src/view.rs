@@ -898,7 +898,8 @@ impl Explorer {
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             .when_some(count, |this, count| this.child(items_label(count)))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
-            .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM)).child(self.status.clone()));
+            .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
+                .child(crate::messages::localize(&self.status)));
         if self.copy_in_progress {
             bar = bar.child(
                 div().id("cancel-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(DANGER))
@@ -988,9 +989,19 @@ impl Explorer {
                 let stage_target = self.selection();
                 let count = stage_target.len();
                 list = list.child(Self::separator())
+                    .child(Self::menu_item("m-copy", "fm/copy.svg", "Копировать", "Ctrl+C", false, true)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.context_menu = None;
+                            this.clipboard_put(false, cx);
+                        })))
+                    .child(Self::menu_item("m-cut", "fm/move.svg", "Вырезать", "Ctrl+X", false, true)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.context_menu = None;
+                            this.clipboard_put(true, cx);
+                        })))
                     .child(Self::menu_item("m-rename", "fm/pencil.svg", "Переименовать", "F2", false, true)
                         .on_click(cx.listener(|this, _, window, cx| this.begin_rename(window, cx))))
-                    .child(Self::menu_item("m-copy-path", "fm/copy.svg", "Копировать путь", "Ctrl+Shift+C", false, true)
+                    .child(Self::menu_item("m-copy-path", "fm/clipboard.svg", "Копировать путь", "Ctrl+Shift+C", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
                             this.copy_path(&copy_target, cx);
@@ -1012,18 +1023,27 @@ impl Explorer {
             MenuTarget::Folder(folder) => {
                 let copy_target = folder.clone();
                 let tab_target = folder.clone();
+                let (f1, f2, f3, f4) = (folder.clone(), folder.clone(), folder.clone(), folder.clone());
                 list = list
                     .child(Self::menu_item("m-new-folder", "fm/folder-plus.svg", "Новая папка", "Ctrl+Shift+N", false, true)
-                        .on_click(cx.listener(|this, _, window, cx| this.begin_new_folder(window, cx))))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.enter_folder(&f1, cx);
+                            this.begin_new_folder(window, cx);
+                        })))
+                    .child(Self::menu_item("m-clipboard-paste", "fm/clipboard.svg", "Вставить", "Ctrl+V", false, true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.enter_folder(&f2, cx);
+                            this.clipboard_paste(cx);
+                        })))
                     .child(Self::menu_item("m-paste", "fm/clipboard.svg",
                         format!("Копировать сюда из Drop Zone ({staged})"), "", false, staged > 0)
-                        .when(staged > 0, |this| this.on_click(cx.listener(|this, _, _, cx| {
-                            this.context_menu = None;
+                        .when(staged > 0, |this| this.on_click(cx.listener(move |this, _, _, cx| {
+                            this.enter_folder(&f3, cx);
                             this.paste(cx);
                         }))))
                     .child(Self::menu_item("m-move-here", "fm/move.svg", "Переместить сюда из Drop Zone", "", false, staged > 0)
-                        .when(staged > 0, |this| this.on_click(cx.listener(|this, _, _, cx| {
-                            this.context_menu = None;
+                        .when(staged > 0, |this| this.on_click(cx.listener(move |this, _, _, cx| {
+                            this.enter_folder(&f4, cx);
                             this.move_staged(cx);
                         }))))
                     .child(Self::separator())
@@ -1235,6 +1255,9 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::key_view_columns))
             .on_action(cx.listener(Self::key_copy_path))
             .on_action(cx.listener(Self::key_select_all))
+            .on_action(cx.listener(Self::key_clipboard_copy))
+            .on_action(cx.listener(Self::key_clipboard_cut))
+            .on_action(cx.listener(Self::key_clipboard_paste))
             .on_action(cx.listener(Self::key_extend_next))
             .on_action(cx.listener(Self::key_extend_prev))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {

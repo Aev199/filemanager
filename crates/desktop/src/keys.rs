@@ -15,7 +15,7 @@ actions!(filemanager, [
     AddressBar, RenameSelected, NewFolder, DismissOverlay, SelectNext, SelectPrev,
     SelectFirst, SelectLast, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
-    CopyPath, SelectAll, ExtendNext, ExtendPrev,
+    CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -56,6 +56,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
         KeyBinding::new("shift-down", ExtendNext, Some(CONTEXT)),
         KeyBinding::new("shift-up", ExtendPrev, Some(CONTEXT)),
+        KeyBinding::new("ctrl-c", ClipboardCopy, Some(CONTEXT)),
+        KeyBinding::new("ctrl-x", ClipboardCut, Some(CONTEXT)),
+        KeyBinding::new("ctrl-v", ClipboardPaste, Some(CONTEXT)),
     ]);
 }
 
@@ -336,6 +339,16 @@ impl Explorer {
         cx.notify();
     }
 
+    /// Points the focused pane at `folder` (a right-clicked column) so
+    /// the following action targets it; closes the menu.
+    pub(crate) fn enter_folder(&mut self, folder: &Path, cx: &mut Context<Self>) {
+        let side = self.active_side();
+        if self.pane_path(side) != folder {
+            self.navigate_side(side, folder, None, cx);
+        }
+        self.context_menu = None;
+    }
+
     pub(crate) fn begin_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         self.creating_folder = true;
@@ -484,6 +497,10 @@ impl Explorer {
         self.marked = order;
         cx.notify();
     }
+
+    pub(crate) fn key_clipboard_copy(&mut self, _: &ClipboardCopy, _: &mut Window, cx: &mut Context<Self>) { self.clipboard_put(false, cx); }
+    pub(crate) fn key_clipboard_cut(&mut self, _: &ClipboardCut, _: &mut Window, cx: &mut Context<Self>) { self.clipboard_put(true, cx); }
+    pub(crate) fn key_clipboard_paste(&mut self, _: &ClipboardPaste, _: &mut Window, cx: &mut Context<Self>) { self.clipboard_paste(cx); }
 
     pub(crate) fn key_extend_next(&mut self, _: &ExtendNext, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(1, cx); }
     pub(crate) fn key_extend_prev(&mut self, _: &ExtendPrev, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(-1, cx); }
