@@ -481,7 +481,7 @@ impl Explorer {
             }
         }
         if files.cut {
-            self.move_into(Some(zone), cx);
+            self.move_into(Some(zone), None, cx);
             // A cut is consumed once, as in Explorer.
             let _ = clipboard::write_files(&[], false);
         } else {
@@ -489,7 +489,31 @@ impl Explorer {
             // copies, like Explorer; elsewhere an occupied name is refused.
             let target = self.browser.active().active().path.clone();
             let same_folder = files.paths.iter().any(|p| p.parent() == Some(target.as_path()));
-            self.copy_into_with(Some(zone), same_folder, cx);
+            self.copy_into_with(Some(zone), same_folder, None, cx);
+        }
+    }
+
+    /// Files dropped on a folder: copied, or moved when `copy` is false.
+    /// Dropping items onto their own folder copies with numbered names.
+    fn drop_into(&mut self, paths: &[PathBuf], folder: PathBuf, copy: bool, cx: &mut Context<Self>) {
+        if paths.iter().any(|path| folder.starts_with(path)) {
+            self.status = "Нельзя переместить или скопировать папку внутрь самой себя".into();
+            cx.notify();
+            return;
+        }
+        let mut zone = DropZone::default();
+        for path in paths {
+            if let Err(error) = zone.add(path) {
+                self.status = format!("Нельзя перенести «{}»: {error}", browser::display_name(path));
+                cx.notify();
+                return;
+            }
+        }
+        let same_folder = paths.iter().all(|path| path.parent() == Some(folder.as_path()));
+        if copy || same_folder {
+            self.copy_into_with(Some(zone), same_folder, Some(folder), cx);
+        } else {
+            self.move_into(Some(zone), Some(folder), cx);
         }
     }
 
@@ -505,10 +529,17 @@ impl Explorer {
     /// Copies the Drop Zone, or `external` items (clipboard), into the
     /// focused pane through the audited, no-overwrite queue.
     fn copy_into(&mut self, external: Option<DropZone>, cx: &mut Context<Self>) {
-        self.copy_into_with(external, false, cx);
+        self.copy_into_with(external, false, None, cx);
     }
 
-    fn copy_into_with(&mut self, external: Option<DropZone>, keep_both: bool, cx: &mut Context<Self>) {
+    /// `target` defaults to the focused pane's folder.
+    fn copy_into_with(
+        &mut self,
+        external: Option<DropZone>,
+        keep_both: bool,
+        target: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if self.copy_in_progress || self.operation_busy {
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
@@ -525,7 +556,7 @@ impl Explorer {
             cx.notify();
             return;
         };
-        let target = self.browser.active().active().path.clone();
+        let target = target.unwrap_or_else(|| self.browser.active().active().path.clone());
         let mut zone = external.unwrap_or_else(|| std::mem::take(&mut self.zone));
         self.copy_in_progress = true;
         let control = Arc::new(CopyControl::default());
@@ -586,10 +617,11 @@ impl Explorer {
     /// Move staged paths to the active pane only on the same volume.
     /// Each item is prepared again and journaled before any disk change.
     fn move_staged(&mut self, cx: &mut Context<Self>) {
-        self.move_into(None, cx);
+        self.move_into(None, None, cx);
     }
 
-    fn move_into(&mut self, external: Option<DropZone>, cx: &mut Context<Self>) {
+    /// `target` defaults to the focused pane's folder.
+    fn move_into(&mut self, external: Option<DropZone>, target: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
@@ -606,7 +638,7 @@ impl Explorer {
             cx.notify();
             return;
         };
-        let target = self.browser.active().active().path.clone();
+        let target = target.unwrap_or_else(|| self.browser.active().active().path.clone());
         let mut zone = external.unwrap_or_else(|| std::mem::take(&mut self.zone));
         self.operation_busy = true;
         self.status = "Перемещение…".into();

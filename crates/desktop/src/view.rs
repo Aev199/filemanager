@@ -12,7 +12,7 @@ use filemanager_core::sort::SortKey;
 use gpui::{
     anchored, deferred, div, rgb_to_hsla, ease_out_quint, prelude::*, px, rgb, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
-    MouseButton, MouseDownEvent, SharedString, Stateful, Window,
+    ExternalPaths, MouseButton, MouseDownEvent, SharedString, Stateful, Window,
 };
 use gpui_component::input::Input;
 use gpui_component::resizable::{h_resizable, resizable_panel};
@@ -368,7 +368,9 @@ impl Explorer {
         let mut zone = div().id("drop-zone").mx_3().mt_1().p_2().rounded_lg().flex().flex_col().gap_1()
             .border_1().border_dashed().border_color(rgb(BORDER_STRONG)).bg(rgb(SURFACE))
             .drag_over::<FileDragInfo>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
-            .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)));
+            .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
+            .on_drop(cx.listener(|this, data: &ExternalPaths, _, cx| this.stage_paths(data.paths(), cx)));
         if items.is_empty() {
             zone = zone.child(
                 div().py_2().flex().flex_col().items_center().gap_1().text_color(rgb(TEXT_DIM))
@@ -479,6 +481,14 @@ impl Explorer {
                         .child(path.display().to_string()))
             ))
             .child(body)
+            // Files from Explorer are copied into the pane's folder.
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
+            .on_drop(cx.listener({
+                let folder = path.clone();
+                move |this, data: &ExternalPaths, _, cx| {
+                    this.drop_into(data.paths(), folder.clone(), true, cx);
+                }
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                 let tab = this.browser.active_mut();
                 let target = side == Side::Right && tab.right.is_some();
@@ -617,6 +627,23 @@ impl Explorer {
                     .child(if is_dir { String::new() } else { format_size(entry.size) }));
         } else if is_dir {
             row = row.child(small_icon("fm/chevron-right.svg", TEXT_DIM));
+        }
+        if is_dir {
+            let internal_target = path.clone();
+            let external_target = path.clone();
+            row = row
+                .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)).border_1().border_color(rgb(ACCENT)))
+                .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)).border_1().border_color(rgb(ACCENT)))
+                // Inside the app a drop moves (Ctrl copies); from Explorer it copies.
+                .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
+                    cx.stop_propagation();
+                    let copy = window.modifiers().control;
+                    this.drop_into(&data.paths, internal_target.clone(), copy, cx);
+                }))
+                .on_drop(cx.listener(move |this, data: &ExternalPaths, _, cx| {
+                    cx.stop_propagation();
+                    this.drop_into(data.paths(), external_target.clone(), true, cx);
+                }));
         }
         let column_folder = folder.to_path_buf();
         let menu_path = path.clone();
