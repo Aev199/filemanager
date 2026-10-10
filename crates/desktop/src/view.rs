@@ -640,8 +640,13 @@ impl Explorer {
             .text_size(px(13.)).text_color(rgb(text)).cursor_pointer()
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
-            .child(icon(icon_path, tint).when(entry.hidden, |svg| svg.opacity(0.55)))
-            .child(div().flex_1().min_w_0().truncate().child(entry.name.clone()));
+            .child(icon(icon_path, tint).when(entry.hidden, |svg| svg.opacity(0.55)));
+        // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
+        row = if self.renaming && self.selected.as_ref() == Some(&path) {
+            row.child(div().flex_1().min_w_0().child(Input::new(&self.rename_input).h(px(24.))))
+        } else {
+            row.child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
+        };
         if list_mode {
             let (show_modified, show_kind) = self.list_columns();
             row = row
@@ -1231,12 +1236,7 @@ impl Explorer {
     }
 
     fn dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (title, body, confirm, kind): (&str, AnyElement, &str, ButtonKind) = if self.renaming {
-            let name = self.selected.as_deref().map(browser::display_name).unwrap_or_default();
-            ("Переименовать", div().flex().flex_col().gap_2()
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("Текущее имя: {name}")))
-                .child(Input::new(&self.rename_input)).into_any_element(), "Переименовать", ButtonKind::Primary)
-        } else if self.creating_folder {
+        let (title, body, confirm, kind): (&str, AnyElement, &str, ButtonKind) = if self.creating_folder {
             ("Новая папка", div().flex().flex_col().gap_2()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child(format!("В папке: {}", self.pane_path(self.active_side()).display())))
@@ -1272,9 +1272,7 @@ impl Explorer {
                     })))
                 .child(text_button("dialog-confirm", confirm, kind)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if this.renaming {
-                            this.commit_rename(cx);
-                        } else if this.saving_workspace {
+                        if this.saving_workspace {
                             this.save_named_workspace(cx);
                         } else if this.creating_folder {
                             this.create_folder(cx);

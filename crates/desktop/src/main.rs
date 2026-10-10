@@ -239,10 +239,18 @@ impl Explorer {
             }
         });
         let rename_subscription = cx.subscribe_in(&rename_input, window, |this, _, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                this.commit_rename(cx);
-                let handle = this.focus_handle.clone();
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    this.commit_rename(cx);
+                    let handle = this.focus_handle.clone();
                     window.focus(&handle, cx);
+                }
+                // Clicking elsewhere ends in-place renaming without changes.
+                InputEvent::Blur if this.renaming && !this.operation_busy => {
+                    this.renaming = false;
+                    cx.notify();
+                }
+                _ => {}
             }
         });
         let folder_subscription = cx.subscribe_in(&folder_input, window, |this, _, event: &InputEvent, window, cx| {
@@ -860,6 +868,7 @@ impl Explorer {
         let current = browser::display_name(path);
         self.rename_input.update(cx, |input, cx| {
             input.set_value(current, window, cx);
+            input.select_all(window, cx);
         });
         self.renaming = true;
         let focus = self.rename_input.focus_handle(cx);
