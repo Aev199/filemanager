@@ -24,10 +24,20 @@ pub struct Event {
 
 impl Event {
     /// Human-readable timestamp in the user's local time.
+    /// Russian label for the stored event kind.
+    pub fn kind_label(&self) -> &str {
+        match self.kind.as_str() {
+            "observed" => "Обнаружен",
+            "modified" => "Изменён",
+            "missing" => "Удалён или перемещён",
+            other => other,
+        }
+    }
+
     pub fn display_time(&self) -> String {
         DateTime::<Utc>::from_timestamp_millis(self.observed_ms)
-            .map(|utc| utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| "unknown time".into())
+            .map(|utc| utc.with_timezone(&chrono::Local).format("%d.%m.%Y %H:%M:%S").to_string())
+            .unwrap_or_else(|| "время неизвестно".into())
     }
 }
 

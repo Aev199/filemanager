@@ -4,6 +4,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::path_utils::normalize_extended_path;
+use crate::sort::natural_cmp;
+
 /// A pane owns its navigation history. Switching tabs does not affect other tabs.
 #[derive(Clone, Debug)]
 pub struct Pane {
@@ -58,6 +61,10 @@ impl Pane {
         false
     }
 
+    pub fn can_go_back(&self) -> bool { !self.back.is_empty() }
+
+    pub fn can_go_forward(&self) -> bool { !self.forward.is_empty() }
+
     pub fn columns(&self, max_columns: usize) -> Vec<PathBuf> {
         let mut reversed = self.path.ancestors().take(max_columns.max(1)).map(Path::to_path_buf).collect::<Vec<_>>();
         reversed.reverse();
@@ -66,7 +73,9 @@ impl Pane {
 }
 
 fn canonical_directory(path: impl AsRef<Path>) -> io::Result<PathBuf> {
-    let path = fs::canonicalize(path)?;
+    // Windows canonicalize() returns verbatim `\\?\C:\...` paths. They work,
+    // but must never reach breadcrumbs, tab titles or copied paths.
+    let path = normalize_extended_path(&fs::canonicalize(path)?);
     if !fs::metadata(&path)?.is_dir() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "Expected a directory"));
     }
@@ -144,10 +153,71 @@ impl Browser {
 pub struct Entry {
     pub path: PathBuf,
     pub name: String,
+    /// For links and junctions this describes the target.
     pub is_directory: bool,
     pub is_symlink: bool,
+    /// Windows "hidden" attribute, or a dot-prefixed name elsewhere.
+    pub hidden: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+}
+
+impl Entry {
+    /// Lower-case extension without the dot; folders have none.
+    pub fn extension(&self) -> Option<String> {
+        if self.is_directory {
+            return None;
+        }
+        Path::new(&self.name).extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
+            .filter(|ext| !ext.is_empty())
+    }
+
+    fn from_metadata(item: &fs::DirEntry, metadata: &fs::Metadata) -> Entry {
+        let path = item.path();
+        let name = item.file_name().to_string_lossy().into_owned();
+        let is_symlink = metadata.file_type().is_symlink();
+        let target = if is_symlink { fs::metadata(&path).ok() } else { None };
+        let is_directory = metadata.is_dir()
+            || target.as_ref().is_some_and(fs::Metadata::is_dir)
+            || (is_symlink && target.is_none() && is_directory_link(metadata));
+        let effective = target.as_ref().unwrap_or(metadata);
+        Entry {
+            hidden: is_hidden(&name, metadata),
+            size: if is_directory { 0 } else { effective.len() },
+            modified: effective.modified().ok(),
+            name,
+            path,
+            is_directory,
+            is_symlink,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn is_hidden(_name: &str, metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+#[cfg(not(windows))]
+fn is_hidden(name: &str, _metadata: &fs::Metadata) -> bool {
+    name.starts_with('.')
+}
+
+/// Junctions such as "Documents and Settings" deny access to their target
+/// but are still folders.
+#[cfg(windows)]
+fn is_directory_link(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
+}
+
+#[cfg(not(windows))]
+fn is_directory_link(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 #[derive(Debug)]
@@ -182,27 +252,35 @@ pub fn scan_directory(dir: &Path, max_entries: usize) -> io::Result<Listing> {
             Ok(metadata) => metadata,
             Err(_) => { truncated = true; continue; }
         };
-        entries.push(Entry {
-            name: item.file_name().to_string_lossy().into_owned(),
-            path: item.path(),
-            is_directory: metadata.is_dir(),
-            is_symlink: metadata.file_type().is_symlink(),
-            size: metadata.len(),
-            modified: metadata.modified().ok(),
-        });
+        entries.push(Entry::from_metadata(&item, &metadata));
     }
     entries.sort_by(|a, b| match (a.is_directory, b.is_directory) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.path.cmp(&b.path)),
+        _ => natural_cmp(&a.name, &b.name).then_with(|| a.path.cmp(&b.path)),
     });
     Ok(Listing { entries, truncated })
 }
 
+/// Last path component, or the root itself without its trailing separator
+/// (`C:` for `C:\`, `/` for `/`).
 pub fn display_name(path: &Path) -> String {
-    path.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
+    if let Some(name) = path.file_name() {
+        return name.to_string_lossy().into_owned();
+    }
+    let text = normalize_extended_path(path).display().to_string();
+    let trimmed = text.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() { text } else { trimmed.to_string() }
+}
+
+/// Folders from the root down to `path`, root first, for breadcrumbs.
+pub fn ancestors_from_root(path: &Path) -> Vec<PathBuf> {
+    let mut chain: Vec<PathBuf> = path.ancestors()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect();
+    chain.reverse();
+    chain
 }
 
 /// Reads at most 'limit + 1' entries, so very large folders do not freeze the UI.
@@ -214,14 +292,7 @@ pub fn list_directory(dir: &Path, limit: usize) -> io::Result<Listing> {
         let item = item?;
         if entries.len() == limit { truncated = true; break; }
         let metadata = fs::symlink_metadata(item.path())?;
-        entries.push(Entry {
-            name: item.file_name().to_string_lossy().into_owned(),
-            path: item.path(),
-            is_directory: metadata.is_dir(),
-            is_symlink: metadata.file_type().is_symlink(),
-            size: metadata.len(),
-            modified: metadata.modified().ok(),
-        });
+        entries.push(Entry::from_metadata(&item, &metadata));
     }
     entries.sort_by(|a, b| match (a.is_directory, b.is_directory) {
         (true, false) => Ordering::Less,

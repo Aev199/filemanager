@@ -81,27 +81,27 @@ pub fn subsequence_score(candidate: &str, needle: &str) -> Option<i32> {
 pub fn preview(path: &Path, max_bytes: u64) -> io::Result<Preview> {
     let meta = fs::metadata(path)?;
     if meta.is_dir() {
-        return Ok(Preview { kind: "folder", description: "Folder".to_owned() });
+        return Ok(Preview { kind: "folder", description: "Папка".to_owned() });
     }
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     if ["pdf", "doc", "docx", "xls", "xlsx", "dwg", "dxf", "gts", "mec", "out", "zip", "7z"].contains(&extension.as_str()) {
-        return Ok(Preview { kind: "metadata", description: format!("{} file · {} bytes. Open in its associated application for contents.", extension.to_uppercase(), meta.len()) });
+        return Ok(Preview { kind: "metadata", description: format!("Файл {} · {} байт. Содержимое открывается в связанной программе.", extension.to_uppercase(), meta.len()) });
     }
     if ["png", "jpg", "jpeg", "webp", "gif", "bmp"].contains(&extension.as_str()) {
-        return Ok(Preview { kind: "image", description: format!("Image · {} bytes. Thumbnail is not yet implemented.", meta.len()) });
+        return Ok(Preview { kind: "image", description: format!("Изображение · {} байт. Миниатюры появятся на этапе 3.", meta.len()) });
     }
     let file = File::open(path)?;
     let mut bytes = Vec::new();
     file.take(max_bytes.min(16 * 1024)).read_to_end(&mut bytes)?;
     if bytes.contains(&0) {
-        return Ok(Preview { kind: "binary", description: format!("Binary file · {} bytes", meta.len()) });
+        return Ok(Preview { kind: "binary", description: format!("Двоичный файл · {} байт", meta.len()) });
     }
     match String::from_utf8(bytes) {
         Ok(mut text) => {
-            if meta.len() > max_bytes.min(16 * 1024) { text.push_str("\n… (preview truncated)"); }
+            if meta.len() > max_bytes.min(16 * 1024) { text.push_str("\n… (показано начало файла)"); }
             Ok(Preview { kind: "text", description: text })
         }
-        Err(_) => Ok(Preview { kind: "binary", description: format!("Binary or non-UTF-8 file · {} bytes", meta.len()) }),
+        Err(_) => Ok(Preview { kind: "binary", description: format!("Двоичный файл или не UTF-8 · {} байт", meta.len()) }),
     }
 }
 
@@ -122,6 +122,6 @@ mod tests {
         assert_eq!(idx.query("fmdl", 10), vec![a.clone()]);
         let prev = preview(&a, 8).unwrap();
         assert_eq!(prev.kind, "text");
-        assert!(prev.description.contains("truncated"));
+        assert!(prev.description.contains("показано начало"));
     }
 }
