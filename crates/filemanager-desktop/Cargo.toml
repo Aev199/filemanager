@@ -1,0 +1,10 @@
+[package]
+name = "filemanager-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+filemanager-core = { path = "../filemanager-core" }
+gpui = "0.2.2"
