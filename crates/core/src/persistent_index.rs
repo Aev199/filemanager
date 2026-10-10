@@ -490,7 +490,7 @@ mod tests {
         fs::remove_dir_all(&nested).unwrap();
         index.reconcile_paths(&root, &[nested], 100).unwrap();
         assert!(index.query(&root, "report", 10).unwrap().is_empty());
-        assert!(index.query(&root, "новмод", 10).unwrap().contains(&renamed));
+        assert!(index.query(&root, "новмод", 10).unwrap().contains(&canonicalize_parent(&renamed)));
     }
 
     #[cfg(windows)]
