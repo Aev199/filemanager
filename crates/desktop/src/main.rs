@@ -38,6 +38,10 @@ struct FileDragInfo { paths: Vec<PathBuf> }
 
 struct FileDragPreview { name: String, position: Point<Pixels> }
 
+/// Dragging a tab to reorder it.
+#[derive(Clone)]
+struct TabDrag { index: usize, title: String }
+
 impl Render for FileDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()

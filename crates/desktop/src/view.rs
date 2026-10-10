@@ -22,7 +22,7 @@ use gpui_component::tooltip::Tooltip;
 
 use crate::keys;
 use crate::theme::*;
-use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, Side};
+use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, Side, TabDrag};
 
 const ROW_HEIGHT: f32 = 28.;
 const MILLER_COLUMNS: usize = 3;
@@ -156,6 +156,14 @@ impl Explorer {
                             }))
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_tab(index, cx)))
+                    .on_drag(TabDrag { index, title: tab.title.clone() }, |drag: &TabDrag, position, _, cx| {
+                        cx.new(|_| FileDragPreview { name: drag.title.clone(), position })
+                    })
+                    .drag_over::<TabDrag>(|style, _, _, _| style.border_l_2().border_color(rgb(ACCENT)))
+                    .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
+                        this.browser.move_tab(drag.index, index);
+                        cx.notify();
+                    }))
                     .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
                         this.close_tab_at(index, cx);
                     }))

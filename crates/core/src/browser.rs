@@ -141,6 +141,23 @@ impl Browser {
         Ok(())
     }
 
+    /// Moves a tab to another position, keeping the same tab active.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to { return; }
+        let active = self.active_tab;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active_tab = if active == from {
+            to
+        } else if from < active && to >= active {
+            active - 1
+        } else if from > active && to <= active {
+            active + 1
+        } else {
+            active
+        };
+    }
+
     pub fn close_tab(&mut self, index: usize) {
         if self.tabs.len() <= 1 || index >= self.tabs.len() { return; }
         self.tabs.remove(index);
@@ -305,6 +322,22 @@ pub fn list_directory(dir: &Path, limit: usize) -> io::Result<Listing> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn moving_tabs_keeps_the_active_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut browser = Browser::new(tmp.path()).unwrap();
+        browser.new_tab(tmp.path()).unwrap();
+        browser.new_tab(tmp.path()).unwrap();
+        for (i, tab) in browser.tabs.iter_mut().enumerate() { tab.title = i.to_string(); }
+        browser.active_tab = 1;
+        browser.move_tab(0, 2);
+        let titles: Vec<_> = browser.tabs.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["1", "2", "0"]);
+        assert_eq!(browser.active().title, "1");
+        browser.move_tab(0, 1);
+        assert_eq!(browser.active().title, "1");
+    }
+
     #[test]
     fn tab_and_pane_history_are_independent() {
         let tmp = tempfile::tempdir().unwrap();
