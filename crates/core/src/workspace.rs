@@ -95,6 +95,25 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    /// Saved workspace names, alphabetically.
+    pub fn list(&self) -> io::Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare("SELECT name FROM workspaces").map_err(db_error)?;
+        let mut names = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+        // SQLite's NOCASE only folds ASCII; sort Cyrillic names properly.
+        names.sort_by(|a, b| crate::sort::natural_cmp(a, b));
+        Ok(names)
+    }
+
+    /// Removes a workspace and its tabs. Returns false if it did not exist.
+    pub fn delete(&self, name: &str) -> io::Result<bool> {
+        Self::valid_name(name)?;
+        let conn = self.connection()?;
+        let removed = conn.execute("DELETE FROM workspaces WHERE name=?1", params![name]).map_err(db_error)?;
+        Ok(removed > 0)
+    }
+
     /// Missing folders are skipped. A damaged/empty workspace is not used.
     pub fn load(&self, name: &str) -> io::Result<Option<(Browser, bool)>> {
         Self::valid_name(name)?;
@@ -140,6 +159,20 @@ impl WorkspaceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_workspaces_can_be_listed_and_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::open(tmp.path().join("ws.sqlite3")).unwrap();
+        let browser = Browser::new(tmp.path()).unwrap();
+        store.save("Проект Б", &browser, true).unwrap();
+        store.save("архив", &browser, false).unwrap();
+        assert_eq!(store.list().unwrap(), ["архив", "Проект Б"]);
+        assert!(store.delete("архив").unwrap());
+        assert!(!store.delete("архив").unwrap());
+        assert_eq!(store.list().unwrap(), ["Проект Б"]);
+        assert!(store.load("архив").unwrap().is_none());
+    }
 
     #[test]
     fn workspace_roundtrip_preserves_tabs_and_split_layout() {

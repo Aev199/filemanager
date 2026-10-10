@@ -338,11 +338,31 @@ impl Explorer {
             }
         }
         side = side.child(section_title("DROP ZONE")).child(self.drop_zone(cx));
-        side = side.child(section_title("РАБОЧЕЕ ПРОСТРАНСТВО"))
-            .child(self.sidebar_action("save-workspace", "fm/save.svg", "Сохранить вкладки",
-                cx.listener(|this, _, _, cx| this.save_workspace(cx))))
-            .child(self.sidebar_action("restore-workspace", "fm/layers.svg", "Восстановить вкладки",
-                cx.listener(|this, _, _, cx| this.restore_workspace(cx))))
+        side = side.child(section_title("РАБОЧИЕ ПРОСТРАНСТВА"));
+        for (index, name) in self.workspace_names.iter().enumerate() {
+            let open_name = name.clone();
+            let delete_name = name.clone();
+            side = side.child(
+                div().id(("workspace", index)).group("workspace").mx_2().h(px(28.)).px_2().flex().items_center()
+                    .gap_2().rounded_md().cursor_pointer().text_color(rgb(TEXT_MUTED))
+                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                    .child(icon("fm/layers.svg", TEXT_MUTED))
+                    .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                    .child(div().id(("workspace-delete", index)).size(px(20.)).rounded_sm().flex()
+                        .items_center().justify_center().invisible().group_hover("workspace", |style| style.visible())
+                        .hover(|style| style.bg(rgb(PRESSED)))
+                        .child(small_icon("fm/x.svg", TEXT_DIM))
+                        .tooltip(|window, cx| Tooltip::new("Удалить рабочее пространство").build(window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.delete_workspace(&delete_name, cx);
+                        })))
+                    .on_click(cx.listener(move |this, _, _, cx| this.restore_workspace(&open_name, cx)))
+            );
+        }
+        side = side
+            .child(self.sidebar_action("save-workspace", "fm/plus.svg", "Сохранить вкладки как…",
+                cx.listener(|this, _, window, cx| this.begin_save_workspace(window, cx))))
             .child(self.sidebar_action("operation-review", "fm/history.svg", "Журнал операций",
                 cx.listener(|this, _, _, cx| this.toggle_operation_review(cx))));
         side.into_any_element()
@@ -1205,6 +1225,11 @@ impl Explorer {
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child(format!("В папке: {}", self.pane_path(self.active_side()).display())))
                 .child(Input::new(&self.folder_input)).into_any_element(), "Создать", ButtonKind::Primary)
+        } else if self.saving_workspace {
+            ("Сохранить рабочее пространство", div().flex().flex_col().gap_2()
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                    .child(format!("Вкладок: {}. Сохраняются только пути к папкам и вид окна.", self.browser.tabs.len())))
+                .child(Input::new(&self.workspace_input)).into_any_element(), "Сохранить", ButtonKind::Primary)
         } else if let Some(plans) = &self.confirm_recycle {
             let what = match plans.as_slice() {
                 [(path, _)] => format!("«{}»", browser::display_name(path)),
@@ -1233,6 +1258,8 @@ impl Explorer {
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.renaming {
                             this.commit_rename(cx);
+                        } else if this.saving_workspace {
+                            this.save_named_workspace(cx);
                         } else if this.creating_folder {
                             this.create_folder(cx);
                         } else {

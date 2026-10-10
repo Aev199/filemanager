@@ -400,13 +400,14 @@ impl Explorer {
     /// Escape never submits a filesystem change or silently cancels a copy.
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
-        let had_popup = self.renaming || self.creating_folder || self.address_editing
+        let had_popup = self.renaming || self.creating_folder || self.address_editing || self.saving_workspace
             || self.context_menu.is_some() || self.confirm_recycle.is_some();
         if self.pending_transfer.is_some() {
             self.resolve_transfer(crate::ConflictChoice::Cancel, cx);
         }
         self.renaming = false;
         self.creating_folder = false;
+        self.saving_workspace = false;
         self.address_editing = false;
         self.context_menu = None;
         self.confirm_recycle = None;

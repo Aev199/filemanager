@@ -72,6 +72,9 @@ struct Transfer {
 #[derive(Clone, Copy)]
 enum ConflictChoice { Skip, KeepBoth, Cancel }
 
+/// Internal name of the session restored at startup.
+const SESSION_WORKSPACE: &str = "Default";
+
 /// What a right-click was aimed at.
 #[derive(Clone)]
 enum MenuTarget {
@@ -155,6 +158,9 @@ struct Explorer {
     /// Fixed end of a Shift range.
     anchor: Option<PathBuf>,
     typeahead: String,
+    workspace_names: Vec<String>,
+    workspace_input: Entity<InputState>,
+    saving_workspace: bool,
     /// Transfer paused on name conflicts, with the conflicting items.
     pending_transfer: Option<(Transfer, Vec<PathBuf>)>,
     typeahead_at: Option<std::time::Instant>,
@@ -191,6 +197,14 @@ impl Explorer {
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фактический автор (необязательно)…"));
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Новое имя"));
         let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Имя папки"));
+        let workspace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Например: Проект «Мост»"));
+        let workspace_subscription = cx.subscribe_in(&workspace_input, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.save_named_workspace(cx);
+                let handle = this.focus_handle.clone();
+                window.focus(&handle, cx);
+            }
+        });
         let address_subscription = cx.subscribe_in(&address_input, window, |this, _, event: &InputEvent, window, cx| {
             match event {
                 InputEvent::PressEnter { .. } => {
@@ -244,7 +258,7 @@ impl Explorer {
         window.focus(&focus_handle, cx);
         let workspaces = WorkspaceStore::open(WorkspaceStore::default_path()).ok();
         let (browser, miller_mode) = workspaces.as_ref()
-            .and_then(|store| store.load("Default").ok().flatten())
+            .and_then(|store| store.load(SESSION_WORKSPACE).ok().flatten())
             .unwrap_or_else(|| (
                 Browser::new(home).or_else(|_| Browser::new("."))
                     .expect("No starting directory"),
@@ -278,6 +292,9 @@ impl Explorer {
             marked: Vec::new(),
             anchor: None,
             typeahead: String::new(),
+            workspace_names: Vec::new(),
+            workspace_input,
+            saving_workspace: false,
             pending_transfer: None,
             typeahead_at: None,
             pane_width: 800.,
@@ -308,6 +325,7 @@ impl Explorer {
             selected_history_event: None,
             _subscriptions: vec![
                 search_subscription, address_subscription, rename_subscription, folder_subscription,
+                workspace_subscription,
             ],
         }
     }
@@ -1205,39 +1223,81 @@ impl Explorer {
         cx.notify();
     }
 
-    fn save_workspace(&mut self, cx: &mut Context<Self>) {
+    /// Saves the current tabs under the name typed in the dialog.
+    fn save_named_workspace(&mut self, cx: &mut Context<Self>) {
+        let name = self.workspace_input.read(cx).value().trim().to_string();
+        if name.is_empty() || name == SESSION_WORKSPACE {
+            self.status = "Введите другое имя рабочего пространства".into();
+            cx.notify();
+            return;
+        }
         self.status = match self.workspaces.as_ref() {
-            Some(store) => match store.save("Default", &self.browser, self.miller_mode) {
-                Ok(()) => "Вкладки и панели сохранены".to_owned(),
-                Err(error) => format!("Не удалось сохранить вкладки: {error}"),
+            Some(store) => match store.save(&name, &self.browser, self.miller_mode) {
+                Ok(()) => {
+                    self.saving_workspace = false;
+                    format!("Рабочее пространство «{name}» сохранено")
+                }
+                Err(error) => format!("Не удалось сохранить: {error}"),
+            },
+            None => "База рабочих пространств недоступна".to_owned(),
+        };
+        self.refresh_workspace_names();
+        cx.notify();
+    }
+
+    /// Silent save of the session, used when the window closes.
+    fn persist_workspace(&self) {
+        if let Some(store) = self.workspaces.as_ref() {
+            let _ = store.save(SESSION_WORKSPACE, &self.browser, self.miller_mode);
+        }
+    }
+
+    fn restore_workspace(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.status = match self.workspaces.as_ref() {
+            Some(store) => match store.load(name) {
+                Ok(Some((browser, miller_mode))) => {
+                    self.browser = browser;
+                    self.miller_mode = miller_mode;
+                    self.selected = None;
+                    self.marked.clear();
+                    self.confirm_recycle = None;
+                    self.close_search();
+                    format!("Открыто рабочее пространство «{name}»")
+                },
+                Ok(None) => format!("«{name}»: папок больше нет"),
+                Err(error) => format!("Не удалось открыть: {error}"),
             },
             None => "База рабочих пространств недоступна".to_owned(),
         };
         cx.notify();
     }
 
-    /// Silent save used when the window closes.
-    fn persist_workspace(&self) {
+    fn delete_workspace(&mut self, name: &str, cx: &mut Context<Self>) {
         if let Some(store) = self.workspaces.as_ref() {
-            let _ = store.save("Default", &self.browser, self.miller_mode);
+            self.status = match store.delete(name) {
+                Ok(_) => format!("Рабочее пространство «{name}» удалено"),
+                Err(error) => format!("Не удалось удалить: {error}"),
+            };
         }
+        self.refresh_workspace_names();
+        cx.notify();
     }
 
-    fn restore_workspace(&mut self, cx: &mut Context<Self>) {
-        self.status = match self.workspaces.as_ref() {
-            Some(store) => match store.load("Default") {
-                Ok(Some((browser, miller_mode))) => {
-                    self.browser = browser;
-                    self.miller_mode = miller_mode;
-                    self.selected = None;
-                    self.confirm_recycle = None;
-                    "Вкладки восстановлены".to_owned()
-                },
-                Ok(None) => "Нет сохранённых вкладок (или их папок больше нет)".to_owned(),
-                Err(error) => format!("Не удалось восстановить вкладки: {error}"),
-            },
-            None => "База рабочих пространств недоступна".to_owned(),
-        };
+    fn refresh_workspace_names(&mut self) {
+        self.workspace_names = self.workspaces.as_ref()
+            .and_then(|store| store.list().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| name != SESSION_WORKSPACE)
+            .collect();
+    }
+
+    fn begin_save_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saving_workspace = true;
+        let suggestion = self.browser.active().title.clone();
+        self.workspace_input.update(cx, |input, cx| input.set_value(suggestion, window, cx));
+        let focus = self.workspace_input.focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -1440,7 +1500,10 @@ fn main() {
         };
         cx.open_window(options, |window, cx| {
             let explorer = cx.new(|cx| Explorer::new(window, cx));
-            explorer.update(cx, |this, cx| this.load_drive_space(cx));
+            explorer.update(cx, |this, cx| {
+                this.load_drive_space(cx);
+                this.refresh_workspace_names();
+            });
             let saver = explorer.downgrade();
             // Tabs, splits and view mode come back on the next start.
             window.on_window_should_close(cx, move |_, cx| {
