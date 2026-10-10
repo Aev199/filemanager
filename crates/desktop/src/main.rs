@@ -9,6 +9,7 @@ use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, uniform_list, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::resizable::{h_resizable, resizable_panel};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::Root;
 use std::path::PathBuf;
 use std::sync::Arc;
