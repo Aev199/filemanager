@@ -24,7 +24,16 @@ pub fn restore(paths: &[PathBuf], since: i64) -> io::Result<usize> {
             .filter(|item| is_entry_for(&item.original_parent, &item.name, path) && item.time_deleted >= since - 2)
             .max_by_key(|item| item.time_deleted);
         match newest {
-            Some(item) => chosen.push(item.clone()),
+            Some(item) => {
+                // The trash crate restores under the listed *display* name,
+                // which on Windows lacks hidden extensions; restore under
+                // the real file name instead.
+                let mut item = item.clone();
+                if let Some(name) = path.file_name() {
+                    item.name = name.to_os_string();
+                }
+                chosen.push(item);
+            }
             None => return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("{} is no longer in the Recycle Bin", path.display()),
