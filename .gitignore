@@ -7,3 +7,6 @@ __pycache__/
 *.sqlite3-shm
 build/
 dist/
+
+# Rust build output
+target/
