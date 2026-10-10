@@ -1139,6 +1139,46 @@ impl Explorer {
 
     // ------------------------------------------------------------ dialogs
 
+    fn conflict_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (transfer, conflicts) = self.pending_transfer.as_ref()?;
+        let names: Vec<String> = conflicts.iter().take(4).map(|p| browser::display_name(p)).collect();
+        let more = conflicts.len().saturating_sub(names.len());
+        let mut list = div().flex().flex_col().gap_1().p_2().rounded_md().bg(rgb(SURFACE))
+            .border_1().border_color(rgb(BORDER)).text_size(px(12.));
+        for name in names {
+            list = list.child(div().flex().items_center().gap_2()
+                .child(small_icon("fm/file.svg", TEXT_MUTED)).child(div().truncate().child(name)));
+        }
+        if more > 0 {
+            list = list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));
+        }
+        let dialog = div().id("conflict-dialog").w(px(460.)).p_4().flex().flex_col().gap_3()
+            .rounded_xl().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(format!("Совпадают имена: {}", conflicts.len())))
+            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                .child(format!("В папке «{}» уже есть объекты с такими именами. Существующие файлы не заменяются.",
+                    browser::display_name(&transfer.target))))
+            .child(list)
+            .child(div().flex().justify_end().gap_2()
+                .child(text_button("conflict-cancel", "Отмена", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Cancel, cx))))
+                .child(text_button("conflict-skip", "Пропустить", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Skip, cx))))
+                .child(text_button("conflict-keep", "Сохранить оба", ButtonKind::Primary)
+                    .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::KeepBoth, cx)))))
+            .with_animation("conflict-appear",
+                Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
+                |this, delta| this.opacity(delta).mt(px(12. * (1. - delta))));
+        Some(
+            div().id("conflict-backdrop").absolute().inset_0().flex().items_center().justify_center()
+                .bg(rgba(0x0000008C))
+                .child(dialog)
+                .into_any_element()
+        )
+    }
+
     fn dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (title, body, confirm, kind): (&str, AnyElement, &str, ButtonKind) = if self.renaming {
             let name = self.selected.as_deref().map(browser::display_name).unwrap_or_default();
@@ -1312,6 +1352,9 @@ impl Render for Explorer {
             root = root.child(self.context_menu_view(&menu, cx));
         }
         if let Some(dialog) = self.dialog(cx) {
+            root = root.child(dialog);
+        }
+        if let Some(dialog) = self.conflict_dialog(cx) {
             root = root.child(dialog);
         }
         root

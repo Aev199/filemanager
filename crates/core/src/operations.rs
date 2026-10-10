@@ -467,6 +467,31 @@ impl DropZone {
         self.transfer_with_optional_journal(Action::Move, target, control, Some(journal), false)
     }
 
+    /// Same-volume move that gives occupied names a free "name (2).ext".
+    pub fn move_to_audited_keep_both(
+        &mut self,
+        target: &Path,
+        control: &CopyControl,
+        journal: &crate::operation_journal::OperationJournal,
+    ) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        self.transfer_with_optional_journal(Action::Move, target, control, Some(journal), true)
+    }
+
+    /// Staged items whose name is already taken in `target`.
+    pub fn conflicts_in(&self, target: &Path) -> Vec<PathBuf> {
+        self.sources.iter()
+            .filter(|source| {
+                source.file_name().is_some_and(|name| fs::symlink_metadata(target.join(name)).is_ok())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Drops `paths` from the zone.
+    pub fn remove(&mut self, paths: &[PathBuf]) {
+        self.sources.retain(|source| !paths.contains(source));
+    }
+
     pub fn copy_to_with_control(
         &mut self, target: &Path, control: &CopyControl
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
@@ -528,6 +553,27 @@ pub fn free_destination(target: &Path, name: &Path, reserved: &[PathBuf]) -> Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zone_reports_and_drops_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("src");
+        let target = tmp.path().join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(source.join("a.txt"), b"a").unwrap();
+        fs::write(source.join("b.txt"), b"b").unwrap();
+        fs::write(target.join("a.txt"), b"old").unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&source.join("a.txt")).unwrap();
+        zone.add(&source.join("b.txt")).unwrap();
+        let conflicts = zone.conflicts_in(&target);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].ends_with("a.txt"));
+        zone.remove(&conflicts);
+        assert_eq!(zone.items().len(), 1);
+        assert!(zone.items()[0].ends_with("b.txt"));
+    }
 
     #[test]
     fn free_destination_numbers_copies() {

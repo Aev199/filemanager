@@ -402,6 +402,9 @@ impl Explorer {
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
         let had_popup = self.renaming || self.creating_folder || self.address_editing
             || self.context_menu.is_some() || self.confirm_recycle.is_some();
+        if self.pending_transfer.is_some() {
+            self.resolve_transfer(crate::ConflictChoice::Cancel, cx);
+        }
         self.renaming = false;
         self.creating_folder = false;
         self.address_editing = false;

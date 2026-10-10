@@ -58,6 +58,20 @@ impl Render for FileDragPreview {
     }
 }
 
+/// A copy or move waiting to run (or for the conflict dialog).
+struct Transfer {
+    zone: DropZone,
+    target: PathBuf,
+    copy: bool,
+    /// Occupied names get "name (2).ext" instead of being refused.
+    keep_both: bool,
+    /// Items came from the Drop Zone and go back there if not done.
+    restore_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ConflictChoice { Skip, KeepBoth, Cancel }
+
 /// What a right-click was aimed at.
 #[derive(Clone)]
 enum MenuTarget {
@@ -141,6 +155,8 @@ struct Explorer {
     /// Fixed end of a Shift range.
     anchor: Option<PathBuf>,
     typeahead: String,
+    /// Transfer paused on name conflicts, with the conflicting items.
+    pending_transfer: Option<(Transfer, Vec<PathBuf>)>,
     typeahead_at: Option<std::time::Instant>,
     status: String,
     search_input: Entity<InputState>,
@@ -262,6 +278,7 @@ impl Explorer {
             marked: Vec::new(),
             anchor: None,
             typeahead: String::new(),
+            pending_transfer: None,
             typeahead_at: None,
             pane_width: 800.,
             select_first_when_loaded: false,
@@ -472,49 +489,32 @@ impl Explorer {
                 return;
             }
         };
-        let mut zone = DropZone::default();
-        for path in &files.paths {
-            if let Err(error) = zone.add(path) {
-                self.status = format!("Нельзя вставить «{}»: {error}", browser::display_name(path));
-                cx.notify();
-                return;
-            }
-        }
+        let Some(zone) = self.zone_of(&files.paths, cx) else { return };
+        let target = self.browser.active().active().path.clone();
         if files.cut {
-            self.move_into(Some(zone), None, cx);
             // A cut is consumed once, as in Explorer.
             let _ = clipboard::write_files(&[], false);
-        } else {
-            // Pasting into the folder the files came from makes numbered
-            // copies, like Explorer; elsewhere an occupied name is refused.
-            let target = self.browser.active().active().path.clone();
-            let same_folder = files.paths.iter().any(|p| p.parent() == Some(target.as_path()));
-            self.copy_into_with(Some(zone), same_folder, None, cx);
         }
+        self.request_transfer(Transfer { zone, target, copy: !files.cut, keep_both: false, restore_failed: false }, cx);
     }
 
     /// Files dropped on a folder: copied, or moved when `copy` is false.
-    /// Dropping items onto their own folder copies with numbered names.
     fn drop_into(&mut self, paths: &[PathBuf], folder: PathBuf, copy: bool, cx: &mut Context<Self>) {
-        if paths.iter().any(|path| folder.starts_with(path)) {
-            self.status = "Нельзя переместить или скопировать папку внутрь самой себя".into();
-            cx.notify();
-            return;
-        }
+        let Some(zone) = self.zone_of(paths, cx) else { return };
+        self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, restore_failed: false }, cx);
+    }
+
+    /// Validated transfer list for external paths (clipboard, drops).
+    fn zone_of(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> Option<DropZone> {
         let mut zone = DropZone::default();
         for path in paths {
             if let Err(error) = zone.add(path) {
                 self.status = format!("Нельзя перенести «{}»: {error}", browser::display_name(path));
                 cx.notify();
-                return;
+                return None;
             }
         }
-        let same_folder = paths.iter().all(|path| path.parent() == Some(folder.as_path()));
-        if copy || same_folder {
-            self.copy_into_with(Some(zone), same_folder, Some(folder), cx);
-        } else {
-            self.move_into(Some(zone), Some(folder), cx);
-        }
+        Some(zone)
     }
 
     fn stage(&mut self, cx: &mut Context<Self>) {
@@ -522,42 +522,115 @@ impl Explorer {
         self.stage_paths(&paths, cx);
     }
 
+    /// Drop Zone → focused pane, copying.
     fn paste(&mut self, cx: &mut Context<Self>) {
-        self.copy_into(None, cx);
+        self.transfer_staged(true, cx);
     }
 
-    /// Copies the Drop Zone, or `external` items (clipboard), into the
-    /// focused pane through the audited, no-overwrite queue.
-    fn copy_into(&mut self, external: Option<DropZone>, cx: &mut Context<Self>) {
-        self.copy_into_with(external, false, None, cx);
+    /// Drop Zone → focused pane, moving within one volume.
+    fn move_staged(&mut self, cx: &mut Context<Self>) {
+        self.transfer_staged(false, cx);
     }
 
-    /// `target` defaults to the focused pane's folder.
-    fn copy_into_with(
-        &mut self,
-        external: Option<DropZone>,
-        keep_both: bool,
-        target: Option<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.copy_in_progress || self.operation_busy {
-            self.status = "Выполняется другая операция, дождитесь её завершения".into();
-            cx.notify();
-            return;
-        }
-        let from_staging = external.is_none();
-        if from_staging && self.zone.items().is_empty() {
+    fn transfer_staged(&mut self, copy: bool, cx: &mut Context<Self>) {
+        if self.zone.items().is_empty() {
             self.status = "Drop Zone пуста".into();
             cx.notify();
             return;
         }
+        let zone = std::mem::take(&mut self.zone);
+        let target = self.browser.active().active().path.clone();
+        self.request_transfer(Transfer { zone, target, copy, keep_both: false, restore_failed: true }, cx);
+    }
+
+    /// Checks a transfer before running it: copying into the items' own
+    /// folder makes numbered copies (as Explorer does); occupied names
+    /// elsewhere ask the user. Nothing is ever replaced.
+    fn request_transfer(&mut self, mut transfer: Transfer, cx: &mut Context<Self>) {
+        if self.copy_in_progress || self.operation_busy {
+            self.status = "Выполняется другая операция, дождитесь её завершения".into();
+            self.return_to_staging(&transfer);
+            cx.notify();
+            return;
+        }
+        let items = transfer.zone.items().to_vec();
+        if items.iter().any(|path| transfer.target.starts_with(path)) {
+            self.status = "Нельзя переместить или скопировать папку внутрь самой себя".into();
+            self.return_to_staging(&transfer);
+            cx.notify();
+            return;
+        }
+        if items.iter().all(|path| path.parent() == Some(transfer.target.as_path())) {
+            if !transfer.copy {
+                self.status = "Объекты уже находятся в этой папке".into();
+                self.return_to_staging(&transfer);
+                cx.notify();
+                return;
+            }
+            transfer.keep_both = true;
+        }
+        let conflicts = if transfer.keep_both { Vec::new() } else { transfer.zone.conflicts_in(&transfer.target) };
+        if conflicts.is_empty() {
+            self.execute_transfer(transfer, cx);
+        } else {
+            self.pending_transfer = Some((transfer, conflicts));
+            cx.notify();
+        }
+    }
+
+    /// Answer from the name-conflict dialog.
+    fn resolve_transfer(&mut self, choice: ConflictChoice, cx: &mut Context<Self>) {
+        let Some((mut transfer, conflicts)) = self.pending_transfer.take() else { return };
+        match choice {
+            ConflictChoice::Cancel => {
+                self.return_to_staging(&transfer);
+                self.status = "Отменено, файлы не изменены".into();
+            }
+            ConflictChoice::Skip => {
+                transfer.zone.remove(&conflicts);
+                if transfer.restore_failed {
+                    for path in &conflicts {
+                        let _ = self.zone.add(path);
+                    }
+                }
+                if transfer.zone.items().is_empty() {
+                    self.status = "Все объекты пропущены".into();
+                } else {
+                    self.execute_transfer(transfer, cx);
+                }
+            }
+            ConflictChoice::KeepBoth => {
+                transfer.keep_both = true;
+                self.execute_transfer(transfer, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A cancelled Drop Zone transfer keeps its items staged.
+    fn return_to_staging(&mut self, transfer: &Transfer) {
+        if transfer.restore_failed {
+            for path in transfer.zone.items() {
+                let _ = self.zone.add(path);
+            }
+        }
+    }
+
+    fn execute_transfer(&mut self, transfer: Transfer, cx: &mut Context<Self>) {
+        let Transfer { zone, target, copy, keep_both, restore_failed } = transfer;
+        if copy {
+            self.run_copy(zone, target, keep_both, restore_failed, cx);
+        } else {
+            self.run_move(zone, target, keep_both, restore_failed, cx);
+        }
+    }
+
+    fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, restore_failed: bool, cx: &mut Context<Self>) {
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.status = "Копирование отклонено: журнал операций недоступен".into();
             cx.notify();
             return;
         };
-        let target = target.unwrap_or_else(|| self.browser.active().active().path.clone());
-        let mut zone = external.unwrap_or_else(|| std::mem::take(&mut self.zone));
         self.copy_in_progress = true;
         let control = Arc::new(CopyControl::default());
         self.copy_control = Some(Arc::clone(&control));
@@ -596,8 +669,8 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let (zone, target, ok, errors, first_error) = task.await;
             let _ = weak.update(cx, |this, cx| {
-                // Do not discard items staged while the earlier copy ran.
-                for pending in zone.items().iter().filter(|_| from_staging) {
+                // Failed Drop Zone items stay staged; staging done meanwhile is kept.
+                for pending in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(pending) {
                         this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
                     }
@@ -614,36 +687,22 @@ impl Explorer {
         }).detach();
     }
 
-    /// Move staged paths to the active pane only on the same volume.
-    /// Each item is prepared again and journaled before any disk change.
-    fn move_staged(&mut self, cx: &mut Context<Self>) {
-        self.move_into(None, None, cx);
-    }
-
-    /// `target` defaults to the focused pane's folder.
-    fn move_into(&mut self, external: Option<DropZone>, target: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.copy_in_progress || self.operation_busy {
-            self.status = "Выполняется другая операция, дождитесь её завершения".into();
-            cx.notify();
-            return;
-        }
-        let from_staging = external.is_none();
-        if from_staging && self.zone.items().is_empty() {
-            self.status = "Drop Zone пуста".into();
-            cx.notify();
-            return;
-        }
+    /// Moves within one volume only. Each item is prepared again and
+    /// journaled before any disk change.
+    fn run_move(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, restore_failed: bool, cx: &mut Context<Self>) {
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.status = "Перемещение отклонено: журнал операций недоступен".into();
             cx.notify();
             return;
         };
-        let target = target.unwrap_or_else(|| self.browser.active().active().path.clone());
-        let mut zone = external.unwrap_or_else(|| std::mem::take(&mut self.zone));
         self.operation_busy = true;
         self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
-            let results = zone.move_to_audited(&target, &CopyControl::default(), &audit);
+            let results = if keep_both {
+                zone.move_to_audited_keep_both(&target, &CopyControl::default(), &audit)
+            } else {
+                zone.move_to_audited(&target, &CopyControl::default(), &audit)
+            };
             let moved = results.iter().filter(|(_, result)| result.is_ok()).count();
             let failed = results.len() - moved;
             let first_error = results.iter().find_map(|(path, result)| {
@@ -665,7 +724,7 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let (zone, target, moved, failed, first_error, sources, undo) = task.await;
             let _ = weak.update(cx, |this, cx| {
-                for path in zone.items().iter().filter(|_| from_staging) {
+                for path in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(path) {
                         this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
                     }
@@ -681,7 +740,7 @@ impl Explorer {
                         .and_then(|receipt| receipt.destination.clone());
                 }
                 this.status = match first_error {
-                    Some(details) => format!("Перемещено: {moved}, ошибок: {failed}; неудачные остались в Drop Zone. {details}"),
+                    Some(details) => format!("Перемещено: {moved}, ошибок: {failed}. {details}"),
                     None if moved == 1 => "Перемещено. Отмена доступна в панели сведений.".into(),
                     None => format!("Перемещено: {moved}. Пакетная отмена пока недоступна."),
                 };
