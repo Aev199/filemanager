@@ -900,7 +900,7 @@ impl Explorer {
     }
 
     fn control(label: &'static str, id: &'static str, click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
-        div().id(id).px_3().py_2().rounded_md()
+        div().id(id).flex_none().whitespace_nowrap().px_3().py_2().rounded_md()
             .bg(rgb(0x333F50)).text_color(rgb(0xF1F5F9))
             .cursor_pointer().child(label).on_click(click).into_any_element()
     }
@@ -1054,8 +1054,14 @@ impl Explorer {
                 cx.listener({
                     let context_path = path.clone();
                     move |this, event: &MouseDownEvent, _, cx| {
+                        // Right-click selects the pane it belongs to, not
+                        // whichever pane happened to have keyboard focus.
+                        let right_exists = this.browser.active().right.is_some();
+                        this.browser.active_mut().focus_right =
+                            matches!(side, Side::Right) && right_exists;
                         this.selected = Some(context_path.clone());
                         this.selected_history_event = None;
+                        this.confirm_recycle = None;
                         this.context_menu = Some(event.position);
                         cx.notify();
                     }
@@ -1165,7 +1171,12 @@ impl Explorer {
                 if let Some(selected) = &this.selected {
                     if selected.is_dir() {
                         let selected = selected.clone();
-                        this.go_to(selected, Side::Left, cx);
+                        let side = if this.browser.active().focus_right {
+                            Side::Right
+                        } else {
+                            Side::Left
+                        };
+                        this.go_to(selected, side, cx);
                     } else if let Err(error) = open::that(selected) {
                         this.status = format!("Cannot open file: {error}");
                     }
@@ -1280,7 +1291,7 @@ impl Explorer {
             if self.last_move.is_some() {
                 box_ = box_.child(
                     div().id("undo-rename").p_2().rounded_md().cursor_pointer()
-                        .bg(rgb(0x273544)).child("Undo last rename")
+                        .bg(rgb(0x273544)).child("Undo last rename / move")
                         .on_click(cx.listener(|this, _, _, cx| this.undo_move(cx)))
                 );
             }
@@ -1452,23 +1463,32 @@ impl Render for Explorer {
         if !self.search_active {
             self.load_visible_directories(cx);
         }
-        let mut tabs = div().flex().gap_2().p_2().bg(rgb(0x141C27));
+        // Tabs and toolbar actions stay reachable on small windows.
+        // Scrolling is preferable to letting controls disappear off-screen.
+        let mut tabs = div().w_full().flex().gap_2().p_2()
+            .overflow_x_scroll().bg(rgb(0x141C27));
         for (i, tab) in self.browser.tabs.iter().enumerate() {
             let active = i == self.browser.active_tab;
             tabs = tabs.child(
-                div().id(format!("tab-{i}")).px_3().py_2().rounded_md()
+                div().id(format!("tab-{i}")).flex_none().max_w(px(250.))
+                    .overflow_hidden().whitespace_nowrap()
+                    .px_3().py_2().rounded_md()
                     .bg(rgb(if active { 0x3A4D60 } else { 0x273544 }))
                     .text_color(rgb(0xE9EFF7)).cursor_pointer().child(tab.title.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.browser.active_tab = i;
                         this.close_search();
                         this.selected = None;
+                        this.selected_history_event = None;
+                        this.confirm_recycle = None;
+                        this.context_menu = None;
                         cx.notify();
                     }))
             );
         }
         tabs = tabs.child(Self::control("+", "add-tab", cx.listener(|this, _, _, cx| this.add_tab(cx))));
-        let toolbar = div().flex().gap_2().p_2().bg(rgb(0x273241))
+        let toolbar = div().w_full().flex().gap_2().p_2()
+            .overflow_x_scroll().bg(rgb(0x273241))
             .child(Self::control("Close tab", "close-tab", cx.listener(|this, _, _, cx| {
                 let index = this.browser.active_tab;
                 this.browser.close_tab(index);
@@ -1506,7 +1526,12 @@ impl Render for Explorer {
             })))
             .child(Self::control("Focus", "focus", cx.listener(|this, _, _, cx| {
                 let tab = this.browser.active_mut();
-                if tab.right.is_some() { tab.focus_right = !tab.focus_right; }
+                if tab.right.is_some() {
+                    tab.focus_right = !tab.focus_right;
+                    this.selected = None;
+                    this.selected_history_event = None;
+                    this.confirm_recycle = None;
+                }
                 cx.notify();
             })))
             .child(Self::control("Save layout", "save-layout", cx.listener(|this, _, _, cx| {
