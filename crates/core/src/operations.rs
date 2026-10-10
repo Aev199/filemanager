@@ -319,7 +319,16 @@ impl Plan {
                 let parent = dest.parent().ok_or_else(|| invalid("Missing destination folder"))?;
                 let mut input = fs::File::open(&self.source)?;
                 let opened_meta = input.metadata()?;
-                if !opened_meta.is_file() { return Err(invalid("Source is not a regular file")); }
+                if !opened_meta.is_file() {
+                    return Err(invalid("Source is not a regular file"));
+                }
+                // A source may be swapped between path preflight and open().
+                // Compare metadata from the exact handle used for copying.
+                if SourceStamp::read(&opened_meta) != self.stamp {
+                    return Err(io::Error::other(
+                        "Source changed between preflight and opening its handle; copy refused"
+                    ));
+                }
                 let mut staging = Builder::new()
                     .prefix(".filemanager-copy-")
                     .suffix(".fm-partial")
@@ -331,9 +340,7 @@ impl Plan {
                     return Err(io::Error::other("Source length changed while copying; destination was not published"));
                 }
                 let end_meta = fs::metadata(&self.source)?;
-                if end_meta.len() != opened_meta.len()
-                    || end_meta.modified().ok() != opened_meta.modified().ok()
-                {
+                if SourceStamp::read(&end_meta) != self.stamp {
                     return Err(io::Error::other("Source changed while copying; destination was not published"));
                 }
                 if let Ok(timestamp) = opened_meta.modified() {
@@ -401,7 +408,13 @@ impl DropZone {
     pub fn items(&self) -> &[PathBuf] { &self.sources }
 
     pub fn add(&mut self, source: &Path) -> io::Result<()> {
+        // Check the *supplied* path before canonicalize. Otherwise adding a
+        // symlink/junction silently stages its target rather than refusing it.
+        crate::folder_copy::reject_link(source)?;
         let canonical = fs::canonicalize(source)?;
+        if canonical.parent().is_none() {
+            return Err(invalid("Cannot stage a filesystem root"));
+        }
         if !self.sources.contains(&canonical) { self.sources.push(canonical); }
         Ok(())
     }
@@ -815,6 +828,36 @@ mod tests {
         assert_eq!(fs::read(&original).unwrap(), b"safe");
         assert!(!target_dir.join("source.txt").exists());
         assert_eq!(zone.items().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_zone_refuses_symlinks_without_following_the_target() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("real.txt");
+        let link = tmp.path().join("shortcut.txt");
+        fs::write(&original, b"important").unwrap();
+        symlink(&original, &link).unwrap();
+
+        let mut zone = DropZone::default();
+        assert!(zone.add(&link).is_err());
+        assert!(zone.items().is_empty());
+        assert_eq!(fs::read(original).unwrap(), b"important");
+    }
+
+    #[test]
+    fn copy_source_handle_must_match_original_preflight_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.txt");
+        let destination = tmp.path().join("destination.txt");
+        fs::write(&source, b"initial contents").unwrap();
+        let original = Plan::prepare(Action::Copy, &source, Some(&destination)).unwrap();
+        fs::write(&source, b"external edit with new size").unwrap();
+        let opened = fs::File::open(&source).unwrap();
+        assert_ne!(SourceStamp::read(&opened.metadata().unwrap()), original.stamp);
+        assert!(original.execute().is_err());
+        assert!(!destination.exists());
     }
 
     #[test]

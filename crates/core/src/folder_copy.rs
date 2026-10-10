@@ -101,11 +101,24 @@ fn copy_one(source: &Path, target: &Path, item: &Item, control: &CopyControl) ->
         fs::create_dir(target)?;
     } else {
         let mut input = fs::File::open(source)?;
+        if Stamp::from(&input.metadata()?) != item.stamp {
+            return Err(io::Error::other(
+                "Folder entry was changed between preflight and opening its handle"
+            ));
+        }
         let mut output = OpenOptions::new().write(true).create_new(true).open(target)?;
         // All output stays in the temporary unpublished directory.
+        // A short read also refuses publication; do not trust only timestamps.
         let result = copy_stream(&mut input, &mut output, control)
-            .and_then(|_| output.flush())
-            .and_then(|_| output.sync_all());
+            .and_then(|bytes| {
+                if bytes != item.stamp.size {
+                    return Err(io::Error::other(
+                        "Folder file length changed while copying"
+                    ));
+                }
+                output.flush()?;
+                output.sync_all()
+            });
         if let Err(error) = result {
             drop(output);
             return Err(error);
