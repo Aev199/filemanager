@@ -305,9 +305,14 @@ impl Plan {
                     crate::folder_copy::copy_folder(&self.source, dest, control)?;
                     // Finish reading the destination before moving its
                     // owning Option<PathBuf> into the Receipt (Rust E0505).
-                    let published_meta = fs::symlink_metadata(dest)?;
-                    let modified = published_meta.modified().ok();
-                    let completed_stamp = Some(SourceStamp::read(&published_meta));
+                    // The copy is already published. A transient metadata
+                    // read failure must not report a completed disk mutation
+                    // as a failed operation or encourage an unsafe retry.
+                    let published_meta = fs::symlink_metadata(dest).ok();
+                    let modified = published_meta.as_ref()
+                        .and_then(|meta| meta.modified().ok());
+                    let completed_stamp = published_meta.as_ref()
+                        .map(SourceStamp::read);
                     return Ok(Receipt {
                         action: self.action, source: self.source.clone(),
                         destination, modified, size, completed_stamp,

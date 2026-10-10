@@ -29,6 +29,12 @@ jobs:
       - name: Cache Rust build dependencies
         uses: Swatinem/rust-cache@v2
 
+      # Compile every workspace crate (including the Windows GPUI desktop)
+      # before running tests. One manual build then reports interface/compiler
+      # errors rather than stopping at the first crate and hiding the rest.
+      - name: Check all Rust workspace targets
+        run: cargo check --workspace --all-targets
+
       - name: Unit tests (core only)
         run: cargo test -p filemanager-core --all-targets
 
