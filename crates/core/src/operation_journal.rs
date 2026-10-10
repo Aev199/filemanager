@@ -69,6 +69,31 @@ impl OperationJournal {
         Ok(conn)
     }
 
+    /// Advisory cross-process gate held for the entire audited filesystem
+    /// operation. The OS automatically releases a lock on process crash.
+    ///
+    /// All Filemanager executors must use the same SQLite database path.
+    /// This never acquires SQLite's database lock while running a file copy.
+    /// Non-Filemanager programs do not participate in this advisory gate.
+    pub(crate) fn lock_executor(&self) -> io::Result<fs::File> {
+        let mut name = self.database.as_os_str().to_os_string();
+        name.push(".executor.lock");
+        let lock_path = PathBuf::from(name);
+        let lock = fs::OpenOptions::new()
+            .read(true).write(true).create(true).open(&lock_path)?;
+        lock.try_lock().map_err(|err| {
+            if io::Error::from(err).kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Another Filemanager window is modifying files; retry after it finishes",
+                )
+            } else {
+                io::Error::other("Cannot lock operation journal; filesystem action refused")
+            }
+        })?;
+        Ok(lock)
+    }
+
     /// A valid job record must exist before any filesystem operation begins.
     pub fn queue(&self, plan: &Plan) -> io::Result<i64> {
         let conn = self.connection()?;

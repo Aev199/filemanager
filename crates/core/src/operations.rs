@@ -111,6 +111,9 @@ impl OperationQueue {
         if !self.pending.is_empty() {
             return Err(io::Error::other("Finish the pending queue before undo"));
         }
+        // Undo has the same single-executor contract as Copy/Move/Recycle.
+        // Keep the guard alive until both filesystem and journal finish.
+        let _executor_lock = journal.lock_executor()?;
         let id = journal.queue_undo(receipt)?;
         journal.start(id)?;
         let result = receipt.undo();
@@ -140,6 +143,17 @@ impl OperationQueue {
         journal: &crate::operation_journal::OperationJournal,
     ) -> Vec<(Plan, io::Result<Receipt>)> {
         let mut results = Vec::new();
+        // Fail closed if another Filemanager process owns the executor lock.
+        // Hold the lock for the entire batch, not one file at a time.
+        let _executor_lock = match journal.lock_executor() {
+            Ok(lock) => lock,
+            Err(error) => {
+                while let Some(plan) = self.pending.pop_front() {
+                    results.push((plan, Err(io::Error::new(error.kind(), error.to_string()))));
+                }
+                return results;
+            }
+        };
         while let Some(plan) = self.pending.pop_front() {
             let result = match journal.queue(&plan) {
                 Ok(id) => match journal.start(id) {
@@ -599,6 +613,35 @@ mod tests {
         assert!(src.exists());
         assert!(!dest.exists());
         assert!(journal.unresolved(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn competing_audited_executor_refuses_mutation_until_lock_is_released() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("jobs.sqlite3");
+        let journal = crate::operation_journal::OperationJournal::open(&db).unwrap();
+        let second_window = crate::operation_journal::OperationJournal::open(&db).unwrap();
+        let src = tmp.path().join("document.txt");
+        let dst = tmp.path().join("copy.txt");
+        fs::write(&src, b"keep original").unwrap();
+
+        // Simulate a running operation in another window or process.
+        let first_guard = journal.lock_executor().unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Copy, &src, Some(&dst)).unwrap());
+        let blocked = queue.run_all_audited(&CopyControl::default(), &second_window);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].1.as_ref().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(!dst.exists(), "No filesystem changes while another executor is active");
+        assert_eq!(fs::read(&src).unwrap(), b"keep original");
+        drop(first_guard);
+
+        // A fresh user action may be submitted after a lock is released;
+        // interrupted jobs are never silently replayed.
+        let mut next_queue = OperationQueue::default();
+        next_queue.submit(Plan::prepare(Action::Copy, &src, Some(&dst)).unwrap());
+        assert!(next_queue.run_all_audited(&CopyControl::default(), &second_window)[0].1.is_ok());
+        assert_eq!(fs::read(dst).unwrap(), b"keep original");
     }
 
     #[test]
