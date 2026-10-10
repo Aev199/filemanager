@@ -1253,14 +1253,23 @@ fn main() {
         Theme::change(ThemeMode::Dark, None, cx);
         view::apply_component_theme(cx);
         keys::bind(cx);
-        let bounds = Bounds::centered(None, size(px(1360.), px(860.)), cx);
+        // Fit small screens (laptops, remote sessions) instead of
+        // opening a window larger than the display.
+        let preferred = size(px(1360.), px(860.));
+        let window_size = cx.primary_display()
+            .map(|display| {
+                let area = display.visible_bounds().size;
+                size(preferred.width.min(area.width * 0.92), preferred.height.min(area.height * 0.92))
+            })
+            .unwrap_or(preferred);
+        let bounds = Bounds::centered(None, window_size, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Filemanager".into()),
                 ..Default::default()
             }),
-            window_min_size: Some(size(px(860.), px(520.))),
+            window_min_size: Some(size(px(760.), px(480.))),
             app_id: Some("filemanager".into()),
             ..Default::default()
         };
