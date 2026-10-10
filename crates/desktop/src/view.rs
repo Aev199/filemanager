@@ -875,9 +875,19 @@ impl Explorer {
         // Images are decoded by GPUI off the UI thread and cached; very
         // large files are skipped so a 500 MB TIFF cannot eat memory.
         const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
+        if let Some(thumbnail) = self.inspector_thumbnail.clone().filter(|_| self.inspector_path.as_ref() == Some(&entry.path)) {
+            return div().flex().flex_col().gap_1()
+                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ПРЕДПРОСМОТР"))
+                .child(div().w_full().h(px(240.)).p_1().rounded_md().bg(rgb(SURFACE))
+                    .border_1().border_color(rgb(BORDER)).flex().items_center().justify_center()
+                    .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)))
+                .into_any_element();
+        }
         let is_image = matches!(entry.extension().as_deref(),
             Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "tif" | "tiff"));
-        if is_image && entry.size <= IMAGE_LIMIT {
+        // Large images on Windows wait for the Shell thumbnail instead.
+        let direct_limit = if cfg!(windows) { 16 * 1024 * 1024 } else { IMAGE_LIMIT };
+        if is_image && entry.size <= direct_limit {
             return div().flex().flex_col().gap_1()
                 .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ПРЕДПРОСМОТР · ИЗОБРАЖЕНИЕ"))
                 .child(div().w_full().h(px(220.)).p_1().rounded_md().bg(rgb(SURFACE))

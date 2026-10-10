@@ -90,6 +90,23 @@ struct Undo {
 
 const UNDO_LIMIT: usize = 50;
 
+/// Files whose preview comes from the Windows Shell thumbnail: documents,
+/// video and very large images (decoding those directly costs memory).
+fn wants_shell_thumbnail(path: &std::path::Path) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match extension.as_str() {
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf"
+        | "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v" | "mpg" | "mpeg"
+        | "heic" | "heif" | "psd" | "svg" | "dwg" | "dxf" => true,
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" =>
+            std::fs::metadata(path).is_ok_and(|m| m.len() > 16 * 1024 * 1024),
+        _ => false,
+    }
+}
+
 /// Internal name of the session restored at startup.
 const SESSION_WORKSPACE: &str = "Default";
 
@@ -127,6 +144,8 @@ struct Explorer {
     inspector_request: u64,
     inspector_loading: bool,
     inspector_preview: Option<(String, String)>,
+    /// Shell thumbnail (PNG in the cache) for the selected file, if any.
+    inspector_thumbnail: Option<PathBuf>,
     inspector_history: Vec<Event>,
     zone: DropZone,
     copy_in_progress: bool,
@@ -314,6 +333,7 @@ impl Explorer {
             inspector_request: 0,
             inspector_loading: false,
             inspector_preview: None,
+            inspector_thumbnail: None,
             inspector_history: Vec::new(),
             zone: DropZone::default(),
             copy_in_progress: false,
@@ -386,6 +406,7 @@ impl Explorer {
         let request = self.inspector_request;
         self.inspector_path = self.selected.clone();
         self.inspector_preview = None;
+        self.inspector_thumbnail = None;
         self.inspector_history.clear();
         let Some(path) = self.selected.clone() else {
             self.inspector_loading = false;
@@ -401,15 +422,19 @@ impl Explorer {
             let history = history_journal.as_ref()
                 .and_then(|journal| journal.events(&path, 8).ok())
                 .unwrap_or_default();
-            (preview, history)
+            let thumbnail = wants_shell_thumbnail(&path)
+                .then(|| filemanager_core::thumbnail::thumbnail(&path, 320).ok())
+                .flatten();
+            (preview, history, thumbnail)
         });
         cx.spawn(async move |weak, cx| {
-            let (preview, history) = task.await;
+            let (preview, history, thumbnail) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 if this.inspector_request != request {
                     return;
                 }
                 this.inspector_preview = preview;
+                this.inspector_thumbnail = thumbnail;
                 this.inspector_history = history;
                 this.inspector_loading = false;
                 cx.notify();

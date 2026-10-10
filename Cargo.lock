@@ -1792,11 +1792,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "filetime",
+ "image",
  "notify 8.2.0",
  "rusqlite",
  "tempfile",
  "trash",
  "walkdir",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 

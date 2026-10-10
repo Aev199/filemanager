@@ -27,3 +27,5 @@ pub mod selection;
 pub mod clipboard;
 
 pub mod recycle_bin;
+
+pub mod thumbnail;
