@@ -155,8 +155,12 @@ impl OperationJournal {
         Ok(())
     }
 
-    /// On app startup, disclose uncertain operations without repeating them.
+    /// Mark jobs uncertain *only when no other Filemanager executor is active*.
+    /// The caller must explicitly request reconciliation after a crash; merely
+    /// opening a second window must never rewrite the active window's statuses.
+    /// No filesystem operation is retried, rolled back or replayed here.
     pub fn mark_interrupted(&self) -> io::Result<usize> {
+        let _executor_lock = self.lock_executor()?;
         self.connection()?.execute(
             "UPDATE operation_jobs SET status='interrupted',updated_ms=?1,
              error=COALESCE(error,'Interrupted or terminated before completion. Verify files manually.')
@@ -218,6 +222,34 @@ mod tests {
         assert!(reopened.acknowledge(id).unwrap());
         assert!(reopened.unresolved(10).unwrap().is_empty());
     }
+    #[test]
+    fn cannot_mark_another_windows_running_job_as_interrupted() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("jobs.sqlite");
+        let journal = OperationJournal::open(&path).unwrap();
+        let second_window = OperationJournal::open(&path).unwrap();
+
+        let source = temp.path().join("original.txt");
+        let destination = temp.path().join("destination.txt");
+        fs::write(&source, b"important").unwrap();
+        let plan = Plan::prepare(Action::Copy, &source, Some(&destination)).unwrap();
+        let id = journal.queue(&plan).unwrap();
+        journal.start(id).unwrap();
+
+        let active_executor = journal.lock_executor().unwrap();
+        let err = second_window.mark_interrupted().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        let unresolved = journal.unresolved(10).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].status, "running");
+
+        drop(active_executor);
+        assert_eq!(second_window.mark_interrupted().unwrap(), 1);
+        assert_eq!(journal.unresolved(10).unwrap()[0].status, "interrupted");
+        assert!(source.exists());
+        assert!(!destination.exists());
+    }
+
     #[test]
     fn journal_records_normal_and_failed_results_without_file_contents() {
         let temp = tempfile::tempdir().unwrap();
