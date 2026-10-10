@@ -19,6 +19,7 @@ use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
 use gpui_component::tooltip::Tooltip;
+use gpui_component::TitleBar;
 
 use crate::keys;
 use crate::theme::*;
@@ -128,7 +129,7 @@ impl Explorer {
     // ---------------------------------------------------------------- tabs
 
     fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut strip = div().id("tab-strip").flex_1().min_w_0().h_full().flex().items_end()
+        let mut strip = div().id("tab-strip").flex_initial().min_w_0().h_full().flex().items_end()
             .gap_1().px_2().overflow_x_scroll();
         for (index, tab) in self.browser.tabs.iter().enumerate() {
             let active = index == self.browser.active_tab;
@@ -179,25 +180,31 @@ impl Explorer {
         )
     }
 
+    /// Our own title bar: tabs live in it, as in Atlas. The empty space
+    /// after the tabs drags the window; Windows draws the system buttons.
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().w_full().h(px(40.)).flex_none().flex().items_end().bg(rgb(WINDOW))
-            .border_b_1().border_color(rgb(BORDER))
+        TitleBar::new().h(px(40.)).pl_0().bg(rgb(WINDOW)).border_color(rgb(BORDER))
             .child(
-                div().flex_none().h_full().flex().items_center().pl_2()
-                    .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Боковая панель (Ctrl+B)", self.show_sidebar, true)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_sidebar = !this.show_sidebar;
-                            cx.notify();
-                        })))
-            )
-            .child(self.tab_strip(cx))
-            .child(
-                div().flex_none().h_full().flex().items_center().pr_2()
-                    .child(icon_button("toggle-inspector", "fm/panel-right.svg", "Панель сведений (Ctrl+I)", self.show_inspector, true)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_inspector = !this.show_inspector;
-                            cx.notify();
-                        })))
+                div().h_full().flex_1().min_w_0().flex().items_end()
+                    .child(
+                        div().flex_none().h_full().flex().items_center().pl_2()
+                            .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Боковая панель (Ctrl+B)", self.show_sidebar, true)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_sidebar = !this.show_sidebar;
+                                    cx.notify();
+                                })))
+                    )
+                    .child(self.tab_strip(cx))
+                    // Free space: window drag area.
+                    .child(div().flex_1().h_full())
+                    .child(
+                        div().flex_none().h_full().flex().items_center().pr_2()
+                            .child(icon_button("toggle-inspector", "fm/panel-right.svg", "Панель сведений (Ctrl+I)", self.show_inspector, true)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_inspector = !this.show_inspector;
+                                    cx.notify();
+                                })))
+                    )
             )
     }
 

@@ -1569,15 +1569,17 @@ fn main() {
             })
             .unwrap_or(preferred);
         let bounds = Bounds::centered(None, window_size, cx);
+        // The title bar is drawn by the app (tabs live in it); the system
+        // still provides resizing and, on Windows, the caption buttons.
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some("Filemanager".into()),
-                ..Default::default()
+                ..gpui_component::TitleBar::title_bar_options()
             }),
             window_min_size: Some(size(px(760.), px(480.))),
             app_id: Some("filemanager".into()),
-            ..Default::default()
+            ..gpui_component::TitleBar::window_options()
         };
         cx.open_window(options, |window, cx| {
             let explorer = cx.new(|cx| Explorer::new(window, cx));
