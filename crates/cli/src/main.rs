@@ -1,6 +1,7 @@
 //! Console companion for testing without GPUI and adding version comments.
 use filemanager_core::history::{HistoryWatch, Journal};
-use filemanager_core::operations::{Action, OperationQueue, Plan};
+use filemanager_core::operations::{Action, CopyControl, OperationQueue, Plan};
+use filemanager_core::operation_journal::OperationJournal;
 use filemanager_core::search::preview;
 use filemanager_core::persistent_index::PersistentIndex;
 use std::env;
@@ -15,6 +16,14 @@ fn argument(values: &mut impl Iterator<Item = String>, name: &str) -> io::Result
 
 fn path(values: &mut impl Iterator<Item = String>, name: &str) -> io::Result<PathBuf> {
     Ok(PathBuf::from(argument(values, name)?))
+}
+
+/// Use exactly the same SQLite journal and cross-process lock as GPUI.
+fn execute_audited(plan: Plan) -> io::Result<filemanager_core::operations::Receipt> {
+    let journal = OperationJournal::open(OperationJournal::default_path())?;
+    let mut queue = OperationQueue::default();
+    queue.submit(plan);
+    queue.run_all_audited(&CopyControl::default(), &journal).remove(0).1
 }
 
 fn usage() {
@@ -33,6 +42,7 @@ fn usage() {
   fmctl trash FILE --confirm
 
 Comments are annotations on a logged event, not a copy of its file.
+Mutations share the GUI's audited SQLite journal and execution lock.
 Run from a Windows terminal, enclosing paths with spaces in quotes.");
 }
 
@@ -112,9 +122,7 @@ fn run() -> io::Result<()> {
                 _ => Action::Rename,
             };
             let plan = Plan::prepare(action, &source, Some(&destination))?;
-            let mut queue = OperationQueue::default();
-            queue.submit(plan);
-            let receipt = queue.run_all().remove(0).1?;
+            let receipt = execute_audited(plan)?;
             println!("{:?}: {} -> {}", receipt.action, receipt.source.display(),
                 receipt.destination.as_deref().map(|p| p.display().to_string()).unwrap_or_default());
         }
@@ -124,9 +132,7 @@ fn run() -> io::Result<()> {
             filemanager_core::operations::validate_leaf_name(&name)?;
             let destination = parent.join(&name);
             let plan = Plan::prepare(Action::CreateFolder, &parent, Some(&destination))?;
-            let mut queue = OperationQueue::default();
-            queue.submit(plan);
-            queue.run_all().remove(0).1?;
+            execute_audited(plan)?;
             println!("Created {}", destination.display());
         }
         "trash" => {
@@ -135,9 +141,7 @@ fn run() -> io::Result<()> {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "Use --confirm to recycle"));
             }
             let plan = Plan::prepare(Action::Recycle, &source, None)?;
-            let mut queue = OperationQueue::default();
-            queue.submit(plan);
-            queue.run_all().remove(0).1?;
+            execute_audited(plan)?;
             println!("Moved to the system Recycle Bin.");
         }
         _ => {
