@@ -9,6 +9,9 @@ description = "Native Windows GPUI file manager"
 name = "filemanager-desktop"
 path = "src/main.rs"
 
+[build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 filemanager-core = { path = "../core" }
 gpui = { package = "gpui-ce", version = "=0.2.2" }
