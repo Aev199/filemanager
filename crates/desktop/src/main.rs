@@ -1,5 +1,5 @@
 use filemanager_core::browser::{self, Browser};
-use filemanager_core::history::{HistoryWatch, Journal};
+use filemanager_core::history::{Event, HistoryWatch, Journal};
 use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
 use filemanager_core::search;
 use filemanager_core::persistent_index::PersistentIndex;
@@ -43,6 +43,12 @@ impl Render for FileDragPreview {
 struct Explorer {
     browser: Browser,
     selected: Option<PathBuf>,
+    // Inspector data is loaded off the UI thread, never during Render.
+    inspector_path: Option<PathBuf>,
+    inspector_request: u64,
+    inspector_loading: bool,
+    inspector_preview: Option<(String, String)>,
+    inspector_history: Vec<Event>,
     zone: DropZone,
     copy_in_progress: bool,
     operation_busy: bool,
@@ -131,6 +137,11 @@ impl Explorer {
         Self {
             browser,
             selected: None,
+            inspector_path: None,
+            inspector_request: 0,
+            inspector_loading: false,
+            inspector_preview: None,
+            inspector_history: Vec::new(),
             zone: DropZone::default(),
             copy_in_progress: false,
             operation_busy: false,
@@ -162,6 +173,48 @@ impl Explorer {
             selected_history_event: None,
             _subscriptions: vec![search_subscription],
         }
+    }
+
+    /// One bounded preview and at most eight history rows per selection.
+    /// A request number prevents a slow response for a previously selected
+    /// file from overwriting the active inspector.
+    fn load_selected_details(&mut self, cx: &mut Context<Self>) {
+        if self.inspector_path == self.selected {
+            return;
+        }
+        self.inspector_request = self.inspector_request.wrapping_add(1);
+        let request = self.inspector_request;
+        self.inspector_path = self.selected.clone();
+        self.inspector_preview = None;
+        self.inspector_history.clear();
+        let Some(path) = self.selected.clone() else {
+            self.inspector_loading = false;
+            return;
+        };
+        self.inspector_loading = true;
+        let history_journal = self.journal.clone();
+        let task = cx.background_spawn(async move {
+            // Expensive network paths and a busy SQLite database may take
+            // seconds. Neither can hold up GPUI painting or scrolling.
+            let preview = search::preview(&path, 1024)
+                .ok().map(|result| (result.kind.to_owned(), result.description));
+            let history = history_journal.as_ref()
+                .and_then(|journal| journal.events(&path, 8).ok())
+                .unwrap_or_default();
+            (preview, history)
+        });
+        cx.spawn(async move |weak, cx| {
+            let (preview, history) = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.inspector_request != request {
+                    return;
+                }
+                this.inspector_preview = preview;
+                this.inspector_history = history;
+                this.inspector_loading = false;
+                cx.notify();
+            });
+        }).detach();
     }
 
     fn close_search(&mut self) {
@@ -845,6 +898,8 @@ impl Explorer {
             },
             None => "History unavailable".into(),
         };
+        // Reload the newly annotated row without querying SQLite on Render.
+        self.inspector_path = None;
         cx.notify();
     }
 
@@ -1027,7 +1082,8 @@ impl Explorer {
         for folder in self.visible_directories() {
             self.load_directory(folder, true, cx);
         }
-        self.status = "Refreshing visible folders in the background".into();
+        self.inspector_path = None;
+        self.status = "Refreshing visible folders and file details in the background".into();
         cx.notify();
     }
 
@@ -1260,7 +1316,12 @@ impl Explorer {
         let mut box_ = div().id("inspector-panel").w_full().h_full().min_h_0()
             .overflow_y_scroll().flex().flex_col().gap_2()
             .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
-            .child("PREVIEW & HISTORY");
+            .child("PREVIEW & HISTORY")
+            .child(Self::control("Refresh details", "refresh-inspector",
+                cx.listener(|this, _, _, cx| {
+                    this.inspector_path = None;
+                    cx.notify();
+                })));
         if let Some(path) = &self.selected {
             let copied_path = path.clone();
             box_ = box_.child(browser::display_name(path))
@@ -1295,12 +1356,16 @@ impl Explorer {
                         .on_click(cx.listener(|this, _, _, cx| this.undo_move(cx)))
                 );
             }
-            if let Ok(p) = search::preview(path, 1024) {
-                box_ = box_.child(format!("{} preview:", p.kind))
-                    .child(div().id("preview-scroll").max_h(px(170.)).overflow_y_scroll().child(p.description));
-            }
-            if let Some(journal) = &self.journal {
-                if let Ok(history) = journal.events(path, 8) {
+            if self.inspector_loading {
+                box_ = box_.child("Loading preview and history...");
+            } else if self.inspector_path.as_ref() == Some(path) {
+                if let Some((kind, description)) = &self.inspector_preview {
+                    box_ = box_.child(format!("{kind} preview:"))
+                        .child(div().id("preview-scroll").max_h(px(170.))
+                            .overflow_y_scroll().child(description.clone()));
+                }
+                if self.journal.is_some() {
+                    let history = &self.inspector_history;
                     box_ = box_.child(format!("Recorded events: {}", history.len()));
                     box_ = box_.child(div().text_color(rgb(0xA9C0DA))
                         .child("Select a save below, enter a comment, then press Save comment."));
@@ -1313,7 +1378,7 @@ impl Explorer {
                                 .child(format!("#{} · {} · {}", event.id, event.kind, event.display_time()))
                                 .child(format!("Author: {}", event.author.as_deref().unwrap_or("not verified")))
                                 .child(format!("Observer: {}", event.recorded_by))
-                                .child(if event.comment.is_empty() { "(no comment)".to_owned() } else { event.comment })
+                                .child(if event.comment.is_empty() { "(no comment)".to_owned() } else { event.comment.clone() })
                                 .child(
                                     div().id(format!("select-comment-{event_id}"))
                                         .mt_2().p_2().rounded_md().cursor_pointer()
@@ -1463,6 +1528,7 @@ impl Render for Explorer {
         if !self.search_active {
             self.load_visible_directories(cx);
         }
+        self.load_selected_details(cx);
         // Tabs and toolbar actions stay reachable on small windows.
         // Scrolling is preferable to letting controls disappear off-screen.
         let mut tabs = div().w_full().flex().gap_2().p_2()
