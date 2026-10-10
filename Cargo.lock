@@ -1797,6 +1797,7 @@ dependencies = [
  "tempfile",
  "trash",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1806,6 +1807,7 @@ dependencies = [
  "filemanager-core",
  "gpui-ce",
  "gpui_ce_components",
+ "gpui_ce_components_assets",
  "gpui_ce_platform",
  "open",
 ]

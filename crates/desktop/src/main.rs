@@ -1,24 +1,34 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod assets;
+mod keys;
+mod theme;
+mod view;
+
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::history::{Event, HistoryWatch, Journal};
 use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
+use filemanager_core::places::{self, Place};
 use filemanager_core::search;
+use filemanager_core::sort::SortSpec;
 use filemanager_core::persistent_index::PersistentIndex;
 use filemanager_core::index_watch::IndexWatch;
 use filemanager_core::operation_journal::{InterruptedAction, OperationJournal};
 use filemanager_core::workspace::WorkspaceStore;
-use gpui::{actions, div, uniform_list, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::resizable::{h_resizable, resizable_panel};
-use gpui_component::scroll::ScrollableElement;
+use gpui::{
+    div, prelude::*, px, rgb, size, App, Bounds, Context, Entity, FocusHandle, Focusable,
+    IntoElement, Pixels, Point, Render, Subscription, TitlebarOptions, UniformListScrollHandle,
+    Window, WindowBounds, WindowOptions,
+};
+use gpui_component::input::{InputEvent, InputState};
+use gpui_component::theme::{Theme, ThemeMode};
 use gpui_component::Root;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find, AddressBar, NextTab, RenameSelected, NewFolder, DismissOverlay]);
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Side { Left, Right }
 
 /// Internal drag-and-drop payload. Dropping only stages a path; no file
@@ -31,14 +41,40 @@ struct FileDragPreview { name: String, position: Point<Pixels> }
 impl Render for FileDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .pl(self.position.x)
-            .pt(self.position.y)
+            .pl(self.position.x + px(12.))
+            .pt(self.position.y + px(8.))
             .child(
-                div().px_3().py_2().rounded_md().bg(rgb(0x344F69))
-                    .text_color(rgb(0xE9EFF7))
+                div().px_3().py_1().rounded_md().bg(rgb(theme::SELECTED))
+                    .border_1().border_color(rgb(theme::SELECTED_BORDER))
+                    .text_color(rgb(theme::TEXT)).text_size(px(13.))
                     .child(self.name.clone())
             )
     }
+}
+
+/// What a right-click was aimed at.
+#[derive(Clone)]
+enum MenuTarget {
+    Entry(PathBuf),
+    Folder(PathBuf),
+    Tab(usize),
+}
+
+#[derive(Clone)]
+struct ContextMenu {
+    position: Point<Pixels>,
+    target: MenuTarget,
+    /// Distinct id per opening, so the appear animation replays.
+    serial: u64,
+}
+
+/// Display order of one folder: the listing it was built from (by
+/// pointer), and the visible entry indices after sorting and filtering.
+struct FolderView {
+    listing: Arc<browser::Listing>,
+    spec: SortSpec,
+    show_hidden: bool,
+    indices: Arc<Vec<usize>>,
 }
 
 struct Explorer {
@@ -54,7 +90,23 @@ struct Explorer {
     copy_in_progress: bool,
     operation_busy: bool,
     copy_control: Option<Arc<CopyControl>>,
-    context_menu: Option<Point<Pixels>>,
+    context_menu: Option<ContextMenu>,
+    menu_serial: u64,
+    focus_handle: FocusHandle,
+    places: Vec<Place>,
+    drives: Vec<Place>,
+    sort: SortSpec,
+    show_hidden: bool,
+    show_sidebar: bool,
+    show_inspector: bool,
+    folder_views: HashMap<PathBuf, FolderView>,
+    scroll_handles: HashMap<PathBuf, UniformListScrollHandle>,
+    address_editing: bool,
+    /// Width of one file pane at the last layout, for column dropping.
+    pane_width: f32,
+    /// After entering a folder from the keyboard, select its first entry
+    /// once the listing arrives.
+    select_first_when_loaded: bool,
     rename_input: Entity<InputState>,
     folder_input: Entity<InputState>,
     creating_folder: bool,
@@ -101,12 +153,41 @@ impl Explorer {
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search filenames in this folder…"));
-        let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder path · Ctrl+L…"));
-        let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Comment on a save…"));
-        let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Actual author (optional)…"));
-        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New file or folder name…"));
-        let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("New folder name…"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск в папке…"));
+        let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке"));
+        let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Комментарий к сохранению…"));
+        let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фактический автор (необязательно)…"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Новое имя"));
+        let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Имя папки"));
+        let address_subscription = cx.subscribe_in(&address_input, window, |this, _, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    this.open_address(cx);
+                    this.address_editing = false;
+                    let handle = this.focus_handle.clone();
+                    window.focus(&handle, cx);
+                }
+                InputEvent::Blur => {
+                    this.address_editing = false;
+                    cx.notify();
+                }
+                _ => {}
+            }
+        });
+        let rename_subscription = cx.subscribe_in(&rename_input, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_rename(cx);
+                let handle = this.focus_handle.clone();
+                    window.focus(&handle, cx);
+            }
+        });
+        let folder_subscription = cx.subscribe_in(&folder_input, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.create_folder(cx);
+                let handle = this.focus_handle.clone();
+                    window.focus(&handle, cx);
+            }
+        });
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search_query = input.read(cx).value().to_string();
@@ -119,14 +200,16 @@ impl Explorer {
         let operation_status = match operation_journal.as_ref() {
             Some(journal) => match journal.unresolved(100) {
                 Ok(pending) if !pending.is_empty() => format!(
-                    "WARNING: {} unfinished file operations. Verify affected paths; nothing was retried.",
+                    "Внимание: незавершённых операций с файлами: {}. Проверьте затронутые пути, повтор не выполнялся.",
                     pending.len()
                 ),
-                Ok(_) => "Filemanager · metadata-only history · verified file-op queue".into(),
-                Err(error) => format!("Operation diagnostics unavailable: {error}"),
+                Ok(_) => "Готово".into(),
+                Err(error) => format!("Диагностика операций недоступна: {error}"),
             },
-            None => "Operation journal unavailable; file changes disabled".into(),
+            None => "Журнал операций недоступен: изменение файлов отключено".into(),
         };
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
         let workspaces = WorkspaceStore::open(WorkspaceStore::default_path()).ok();
         let (browser, miller_mode) = workspaces.as_ref()
             .and_then(|store| store.load("Default").ok().flatten())
@@ -148,6 +231,19 @@ impl Explorer {
             operation_busy: false,
             copy_control: None,
             context_menu: None,
+            menu_serial: 0,
+            focus_handle,
+            places: places::user_places(),
+            drives: places::drives(),
+            sort: SortSpec::default(),
+            show_hidden: false,
+            show_sidebar: true,
+            show_inspector: true,
+            folder_views: HashMap::new(),
+            scroll_handles: HashMap::new(),
+            address_editing: false,
+            pane_width: 800.,
+            select_first_when_loaded: false,
             rename_input, folder_input,
             renaming: false,
             creating_folder: false,
@@ -172,7 +268,9 @@ impl Explorer {
             index_watch_stale: false,
             search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
-            _subscriptions: vec![search_subscription],
+            _subscriptions: vec![
+                search_subscription, address_subscription, rename_subscription, folder_subscription,
+            ],
         }
     }
 
@@ -240,23 +338,12 @@ impl Explorer {
                 self.selected_history_event = None;
                 self.confirm_recycle = None;
                 self.context_menu = None;
-                "Folder opened".to_owned()
+                "Папка открыта".to_owned()
             }
-            Err(e) => format!("Navigation failed: {e}"),
+            Err(e) => format!("Не удалось открыть папку: {e}"),
         };
         self.close_search();
         cx.notify();
-    }
-
-    fn select_or_open(&mut self, path: PathBuf, side: Side, cx: &mut Context<Self>) {
-        if path.is_dir() { self.go_to(path, side, cx); }
-        else {
-            self.browser.active_mut().focus_right = matches!(side, Side::Right);
-            self.selected = Some(path);
-            self.selected_history_event = None;
-            self.confirm_recycle = None;
-            cx.notify();
-        }
     }
 
     fn add_tab(&mut self, cx: &mut Context<Self>) {
@@ -269,10 +356,46 @@ impl Explorer {
         cx.notify();
     }
 
+    fn stage_path(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.status = match self.zone.add(path) {
+            Ok(()) => format!("В Drop Zone: {}", self.zone.items().len()),
+            Err(error) => format!("Нельзя добавить в Drop Zone: {error}"),
+        };
+        cx.notify();
+    }
+
+    fn open_in_new_tab(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if let Err(error) = self.browser.new_tab(path) {
+            self.status = format!("Не удалось открыть вкладку: {error}");
+        }
+        self.selected = None;
+        self.close_search();
+        cx.notify();
+    }
+
+    fn open_in_other_pane(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let tab = self.browser.active_mut();
+        if tab.right.is_none() {
+            tab.toggle_split();
+        }
+        let other = if self.active_side() == Side::Right { Side::Left } else { Side::Right };
+        self.navigate_side(other, path, None, cx);
+    }
+
+    fn close_other_tabs(&mut self, keep: usize, cx: &mut Context<Self>) {
+        if keep < self.browser.tabs.len() {
+            let tab = self.browser.tabs.remove(keep);
+            self.browser.tabs = vec![tab];
+            self.browser.active_tab = 0;
+            self.selected = None;
+        }
+        cx.notify();
+    }
+
     fn stage(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = &self.selected {
             self.status = match self.zone.add(path) {
-                Ok(()) => format!("{} item(s) staged", self.zone.items().len()),
+                Ok(()) => format!("В Drop Zone: {}", self.zone.items().len()),
                 Err(e) => e.to_string(),
             };
         }
@@ -281,17 +404,17 @@ impl Explorer {
 
     fn paste(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
-            self.status = "Another file operation is running. Wait for it to finish.".into();
+            self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
             return;
         }
         if self.zone.items().is_empty() {
-            self.status = "Drop Zone is empty".into();
+            self.status = "Drop Zone пуста".into();
             cx.notify();
             return;
         }
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.status = "Copy refused: operation journal unavailable".into();
+            self.status = "Копирование отклонено: журнал операций недоступен".into();
             cx.notify();
             return;
         };
@@ -300,7 +423,7 @@ impl Explorer {
         self.copy_in_progress = true;
         let control = Arc::new(CopyControl::default());
         self.copy_control = Some(Arc::clone(&control));
-        self.status = "Copying staged files or folders...".into();
+        self.status = "Копирование…".into();
         let task = cx.background_spawn(async move {
             let results = zone.copy_to_audited(&target, &control, &audit);
             let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
@@ -321,7 +444,7 @@ impl Explorer {
                 let keep_going = weak.update(cx, |this, cx| {
                     if !this.copy_in_progress { return false; }
                     let mib = progress.bytes_copied() as f64 / 1_048_576.0;
-                    this.status = format!("Copying... {mib:.1} MiB transferred · Cancel copy to stop");
+                    this.status = format!("Копирование… {mib:.1} МБ");
                     cx.notify();
                     true
                 }).unwrap_or(false);
@@ -334,15 +457,15 @@ impl Explorer {
                 // Do not discard items staged while the earlier copy ran.
                 for pending in zone.items() {
                     if let Err(error) = this.zone.add(pending) {
-                        this.status = format!("Cannot restore staged item: {error}");
+                        this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
                     }
                 }
                 this.copy_in_progress = false;
                 this.copy_control = None;
                 this.load_directory(target, true, cx);
                 this.status = match first_error {
-                    Some(details) => format!("{ok} copied, {errors} failed. First error: {details}"),
-                    None => format!("{ok} files copied successfully"),
+                    Some(details) => format!("Скопировано: {ok}, ошибок: {errors}. Первая ошибка: {details}"),
+                    None => format!("Скопировано: {ok}"),
                 };
                 cx.notify();
             });
@@ -353,24 +476,24 @@ impl Explorer {
     /// Each item is prepared again and journaled before any disk change.
     fn move_staged(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
-            self.status = "Another file operation is running. Wait for it to finish.".into();
+            self.status = "Выполняется другая операция, дождитесь её завершения".into();
             cx.notify();
             return;
         }
         if self.zone.items().is_empty() {
-            self.status = "Drop Zone is empty".into();
+            self.status = "Drop Zone пуста".into();
             cx.notify();
             return;
         }
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.status = "Move refused: operation journal unavailable".into();
+            self.status = "Перемещение отклонено: журнал операций недоступен".into();
             cx.notify();
             return;
         };
         let target = self.browser.active().active().path.clone();
         let mut zone = std::mem::take(&mut self.zone);
         self.operation_busy = true;
-        self.status = "Moving staged items on the same volume...".into();
+        self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
             let results = zone.move_to_audited(&target, &CopyControl::default(), &audit);
             let moved = results.iter().filter(|(_, result)| result.is_ok()).count();
@@ -396,7 +519,7 @@ impl Explorer {
             let _ = weak.update(cx, |this, cx| {
                 for path in zone.items() {
                     if let Err(error) = this.zone.add(path) {
-                        this.status = format!("Cannot restore staged path: {error}");
+                        this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
                     }
                 }
                 this.operation_busy = false;
@@ -410,9 +533,9 @@ impl Explorer {
                         .and_then(|receipt| receipt.destination.clone());
                 }
                 this.status = match first_error {
-                    Some(details) => format!("{moved} moved, {failed} failed; failed items remain in Drop Zone. {details}"),
-                    None if moved == 1 => "Moved safely. Undo available in the inspector.".into(),
-                    None => format!("{moved} items moved safely. Batch Undo is not available."),
+                    Some(details) => format!("Перемещено: {moved}, ошибок: {failed}; неудачные остались в Drop Zone. {details}"),
+                    None if moved == 1 => "Перемещено. Отмена доступна в панели сведений.".into(),
+                    None => format!("Перемещено: {moved}. Пакетная отмена пока недоступна."),
                 };
                 cx.notify();
             });
@@ -421,13 +544,13 @@ impl Explorer {
 
     fn create_folder(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
-            self.status = "Wait for the active operation to finish".into();
+            self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
         }
         let name = self.folder_input.read(cx).value().to_string();
         if let Err(error) = filemanager_core::operations::validate_leaf_name(name.trim()) {
-            self.status = format!("Invalid folder name: {error}");
+            self.status = format!("Недопустимое имя папки: {error}");
             cx.notify();
             return;
         }
@@ -436,7 +559,7 @@ impl Explorer {
         let plan = match Plan::prepare(Action::CreateFolder, &parent, Some(&destination)) {
             Ok(plan) => plan,
             Err(error) => {
-                self.status = format!("Cannot create folder: {error}");
+                self.status = format!("Не удалось создать папку: {error}");
                 cx.notify();
                 return;
             }
@@ -444,7 +567,7 @@ impl Explorer {
         self.operation_busy = true;
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.operation_busy = false;
-            self.status = "Operation refused: SQLite audit journal unavailable".into();
+            self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
             return;
         };
@@ -464,9 +587,9 @@ impl Explorer {
                             this.refresh_parent_of(dest, cx);
                         }
                         this.selected = receipt.destination;
-                        this.status = "Folder created safely".into();
+                        this.status = "Папка создана".into();
                     }
-                    Err(error) => this.status = format!("Folder creation failed: {error}"),
+                    Err(error) => this.status = format!("Не удалось создать папку: {error}"),
                 }
                 cx.notify();
             });
@@ -476,7 +599,7 @@ impl Explorer {
     fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         let Some(path) = &self.selected else {
-            self.status = "Select a file or folder first".into();
+            self.status = "Сначала выберите файл или папку".into();
             cx.notify();
             return;
         };
@@ -485,13 +608,14 @@ impl Explorer {
             input.set_value(current, window, cx);
         });
         self.renaming = true;
-        self.status = "Enter the new name in the right panel".into();
+        let focus = self.rename_input.focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
     fn commit_rename(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
-            self.status = "Wait for the current file operation to finish".into();
+            self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
         }
@@ -500,7 +624,7 @@ impl Explorer {
         let name = name.trim();
         if name.is_empty() || name == "." || name == ".." ||
             name.contains('/') || name.contains('\\') {
-            self.status = "Invalid new name (no path separators)".into();
+            self.status = "Недопустимое имя (без разделителей пути)".into();
             cx.notify();
             return;
         }
@@ -508,16 +632,16 @@ impl Explorer {
         let plan = match Plan::prepare(Action::Rename, &source, Some(&dest)) {
             Ok(plan) => plan,
             Err(error) => {
-                self.status = format!("Cannot rename: {error}");
+                self.status = format!("Переименование невозможно: {error}");
                 cx.notify();
                 return;
             }
         };
         self.operation_busy = true;
-        self.status = "Renaming...".into();
+        self.status = "Переименование…".into();
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.operation_busy = false;
-            self.status = "Operation refused: SQLite audit journal unavailable".into();
+            self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
             return;
         };
@@ -539,9 +663,9 @@ impl Explorer {
                         this.selected = receipt.destination.clone();
                         this.last_move = Some(receipt);
                         this.renaming = false;
-                        this.status = "Renamed. Undo is available until another action.".into();
+                        this.status = "Переименовано. Отмена доступна до следующего действия.".into();
                     }
-                    Err(error) => this.status = format!("Rename refused: {error}"),
+                    Err(error) => this.status = format!("Переименование отклонено: {error}"),
                 }
                 cx.notify();
             });
@@ -550,18 +674,18 @@ impl Explorer {
 
     fn undo_move(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
-            self.status = "Wait for the active operation to finish".into();
+            self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
         }
         let Some(receipt) = self.last_move.take() else {
-            self.status = "No rename or move to undo".into();
+            self.status = "Нечего отменять".into();
             cx.notify();
             return;
         };
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.last_move = Some(receipt);
-            self.status = "Undo refused: operation journal unavailable".into();
+            self.status = "Отмена отклонена: журнал операций недоступен".into();
             cx.notify();
             return;
         };
@@ -582,10 +706,10 @@ impl Explorer {
                             this.refresh_parent_of(dest, cx);
                         }
                         this.selected = Some(receipt.source);
-                        this.status = "Undo successful".into();
+                        this.status = "Действие отменено".into();
                     }
                     Err(error) => {
-                        this.status = format!("Undo refused: {error}");
+                        this.status = format!("Отмена отклонена: {error}");
                         this.last_move = Some(receipt);
                     }
                 }
@@ -597,21 +721,21 @@ impl Explorer {
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {
         if let Some(control) = &self.copy_control {
             control.cancel();
-            self.status = "Cancellation requested. Unfinished files will not be published.".into();
+            self.status = "Отмена запрошена: недокопированные файлы не появятся в папке назначения".into();
         } else {
-            self.status = "No copy is running".into();
+            self.status = "Копирование не выполняется".into();
         }
         cx.notify();
     }
 
     fn recycle(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
-            self.status = "Wait for the current copy to finish before recycling".into();
+            self.status = "Дождитесь завершения копирования".into();
             cx.notify();
             return;
         }
         let Some(path) = self.selected.clone() else {
-            self.status = "Select a file".into();
+            self.status = "Выберите файл".into();
             cx.notify();
             return;
         };
@@ -625,9 +749,9 @@ impl Explorer {
                 match Plan::prepare(Action::Recycle, &path, None) {
                     Ok(plan) => {
                         self.confirm_recycle = Some((path, plan));
-                        self.status = "Click Recycle again to confirm this selected file".into();
+                        self.status = "Подтвердите удаление в Корзину".into();
                     }
-                    Err(error) => self.status = format!("Cannot prepare recycling: {error}"),
+                    Err(error) => self.status = format!("Удаление невозможно: {error}"),
                 }
                 cx.notify();
                 return;
@@ -636,10 +760,10 @@ impl Explorer {
         self.selected = None;
         self.selected_history_event = None;
         self.operation_busy = true;
-        self.status = "Sending to Windows Recycle Bin...".into();
+        self.status = "Удаление в Корзину…".into();
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.operation_busy = false;
-            self.status = "Operation refused: SQLite audit journal unavailable".into();
+            self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
             return;
         };
@@ -655,36 +779,13 @@ impl Explorer {
                 this.status = match result {
                     Ok(receipt) => {
                         this.refresh_parent_of(&receipt.source, cx);
-                        "Moved to Recycle Bin".into()
+                        "Перемещено в Корзину".into()
                     },
-                    Err(error) => format!("Recycle refused: {error}"),
+                    Err(error) => format!("Удаление отклонено: {error}"),
                 };
                 cx.notify();
             });
         }).detach();
-    }
-
-    fn paste_history_comment(&mut self, event_id: i64, cx: &mut Context<Self>) {
-        let content = cx.read_from_clipboard().and_then(|item| item.text());
-        let Some(content) = content.filter(|text| !text.trim().is_empty()) else {
-            self.status = "Copy a comment to the Windows clipboard first".into();
-            cx.notify();
-            return;
-        };
-        if content.chars().count() > 5000 {
-            self.status = "Comment is too long (maximum 5000 characters)".into();
-            cx.notify();
-            return;
-        }
-        self.status = match self.journal.as_ref() {
-            Some(journal) => match journal.set_comment(event_id, content.trim()) {
-                Ok(true) => format!("Comment saved for history event #{event_id}"),
-                Ok(false) => format!("History event #{event_id} no longer exists"),
-                Err(error) => format!("Cannot save comment: {error}"),
-            },
-            None => "History database unavailable".into(),
-        };
-        cx.notify();
     }
 
     fn ensure_index_watcher(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -721,10 +822,10 @@ impl Explorer {
                                 if stale {
                                     this.status = match reason {
                                         Some(reason) => format!(
-                                            "Index not up to date: {}. Retry or use Refresh index",
+                                            "Индекс поиска устарел: {}. Обновите индекс",
                                             reason.chars().take(180).collect::<String>(),
                                         ),
-                                        None => "Search index may be stale; use Refresh index".into(),
+                                        None => "Индекс поиска мог устареть, обновите его".into(),
                                     };
                                 }
                                 cx.notify();
@@ -743,7 +844,7 @@ impl Explorer {
             }
             Err(error) => {
                 self.status = format!(
-                    "Filename index saved; automatic monitoring unavailable: {error}. Use Refresh index."
+                    "Индекс сохранён, но автообновление недоступно: {error}"
                 );
                 cx.notify();
             }
@@ -768,7 +869,7 @@ impl Explorer {
         let root = self.browser.active().active().path.clone();
         if self.search_busy && self.search_root.as_ref() == Some(&root) {
             if force_refresh {
-                self.status = "Index task already running; wait for it to finish.".into();
+                self.status = "Индексация уже идёт".into();
                 cx.notify();
             }
             // The running task will query the newest text when it completes.
@@ -780,9 +881,9 @@ impl Explorer {
         self.search_results.clear();
         self.search_busy = true;
         self.status = if force_refresh {
-            "Refreshing saved SQLite filename index...".into()
+            "Обновление индекса…".into()
         } else {
-            "Searching indexed filenames...".into()
+            "Поиск…".into()
         };
         cx.notify();
 
@@ -817,15 +918,15 @@ impl Explorer {
                     Ok((info, matches)) => {
                         this.search_results = matches;
                         this.status = format!(
-                            "{} results · {} saved names{}",
+                            "Найдено: {} · в индексе: {}{}",
                             this.search_results.len(), info.entries,
-                            if info.incomplete { " (incomplete: access restrictions)" } else { "" },
+                            if info.incomplete { " (неполный: нет доступа к части папок)" } else { "" },
                         );
                         this.ensure_index_watcher(root_for_callback.clone(), cx);
                     }
                     Err(error) => {
                         this.search_results.clear();
-                        this.status = format!("Index/search error: {error}");
+                        this.status = format!("Ошибка поиска: {error}");
                     }
                 }
                 cx.notify();
@@ -839,51 +940,22 @@ impl Explorer {
         } else {
             if let Some(parent) = path.parent() {
                 if let Err(error) = self.browser.active_mut().navigate(parent) {
-                    self.status = format!("Cannot open result folder: {error}");
+                    self.status = format!("Не удалось открыть папку результата: {error}");
                     cx.notify();
                     return;
                 }
             }
             self.selected = Some(path.clone());
             self.selected_history_event = None;
-            self.status = format!("Selected search result: {}", path.display());
+            self.status = format!("Выбрано: {}", path.display());
         }
         self.close_search();
         cx.notify();
     }
 
-    fn search_results_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut rows = div().id("search-results").flex_1().min_w_0().min_h_0()
-            .flex().flex_col().overflow_y_scrollbar().p_3().gap_1()
-            .bg(rgb(0x222C3A))
-            .child(div().p_2().text_color(rgb(0xE9EFF7))
-                .child(format!("Filename search · {}", self.search_query)));
-        if self.search_busy {
-            rows = rows.child("Scanning the current folder in the background…");
-        }
-        if !self.search_busy && self.search_results.is_empty() {
-            rows = rows.child("No matches. Search only covers filenames in the current folder.");
-        }
-        for (index, path) in self.search_results.iter().enumerate() {
-            let selected_path = path.clone();
-            rows = rows.child(
-                div().id(format!("search-hit-{index}")).p_2().rounded_md()
-                    .cursor_pointer().bg(rgb(0x273544))
-                    .hover(|style| style.bg(rgb(0x344F69)))
-                    .text_color(rgb(0xDFEAF4))
-                    .child(path.strip_prefix(self.search_root.as_deref().unwrap_or(path))
-                        .unwrap_or(path).display().to_string())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_search_result(selected_path.clone(), cx);
-                    }))
-            );
-        }
-        rows.into_any_element()
-    }
-
     fn save_comment(&mut self, cx: &mut Context<Self>) {
         let Some(event_id) = self.selected_history_event else {
-            self.status = "Select a history entry first".into();
+            self.status = "Сначала выберите запись истории".into();
             cx.notify();
             return;
         };
@@ -895,11 +967,11 @@ impl Explorer {
                 if author.trim().is_empty() { None } else { Some(author.trim()) },
                 comment.trim()
             ) {
-                Ok(true) => format!("Comment saved for event #{event_id}"),
-                Ok(false) => "History entry no longer exists".into(),
-                Err(error) => format!("Comment not saved: {error}"),
+                Ok(true) => format!("Комментарий сохранён (#{event_id})"),
+                Ok(false) => "Запись истории больше не существует".into(),
+                Err(error) => format!("Комментарий не сохранён: {error}"),
             },
-            None => "History unavailable".into(),
+            None => "История недоступна".into(),
         };
         // Reload the newly annotated row without querying SQLite on Render.
         self.inspector_path = None;
@@ -909,12 +981,19 @@ impl Explorer {
     fn save_workspace(&mut self, cx: &mut Context<Self>) {
         self.status = match self.workspaces.as_ref() {
             Some(store) => match store.save("Default", &self.browser, self.miller_mode) {
-                Ok(()) => "Workspace saved: tabs, panes and viewing mode (no file data)".to_owned(),
-                Err(error) => format!("Cannot save workspace: {error}"),
+                Ok(()) => "Вкладки и панели сохранены".to_owned(),
+                Err(error) => format!("Не удалось сохранить вкладки: {error}"),
             },
-            None => "Workspace database unavailable".to_owned(),
+            None => "База рабочих пространств недоступна".to_owned(),
         };
         cx.notify();
+    }
+
+    /// Silent save used when the window closes.
+    fn persist_workspace(&self) {
+        if let Some(store) = self.workspaces.as_ref() {
+            let _ = store.save("Default", &self.browser, self.miller_mode);
+        }
     }
 
     fn restore_workspace(&mut self, cx: &mut Context<Self>) {
@@ -925,12 +1004,12 @@ impl Explorer {
                     self.miller_mode = miller_mode;
                     self.selected = None;
                     self.confirm_recycle = None;
-                    "Workspace restored".to_owned()
+                    "Вкладки восстановлены".to_owned()
                 },
-                Ok(None) => "No saved workspace (or its folders no longer exist)".to_owned(),
-                Err(error) => format!("Cannot restore workspace: {error}"),
+                Ok(None) => "Нет сохранённых вкладок (или их папок больше нет)".to_owned(),
+                Err(error) => format!("Не удалось восстановить вкладки: {error}"),
             },
-            None => "Workspace database unavailable".to_owned(),
+            None => "База рабочих пространств недоступна".to_owned(),
         };
         cx.notify();
     }
@@ -939,7 +1018,7 @@ impl Explorer {
         if self.watcher.is_some() {
             self.watcher = None;
             self.watched_root = None;
-            self.status = "Monitoring stopped".into();
+            self.status = "Наблюдение остановлено".into();
             cx.notify();
             return;
         }
@@ -949,80 +1028,21 @@ impl Explorer {
                 Ok(watch) => {
                     self.watcher = Some(watch);
                     self.watched_root = Some(root);
-                    self.status = "Monitoring selected folder while Filemanager is open".into();
+                    self.status = "Наблюдение за папкой включено, пока окно открыто".into();
                 }
-                Err(e) => self.status = format!("Monitor error: {e}"),
+                Err(e) => self.status = format!("Ошибка наблюдения: {e}"),
             }
         }
         cx.notify();
     }
 
-    fn control(label: &'static str, id: &'static str, click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
-        div().id(id).flex_none().whitespace_nowrap().px_3().py_2().rounded_md()
-            .bg(rgb(0x333F50))
-            .hover(|style| style.bg(rgb(0x43566C)))
-            .active(|style| style.bg(rgb(0x526980)))
-            .text_color(rgb(0xF1F5F9))
-            .cursor_pointer().child(label).on_click(click).into_any_element()
-    }
-
-    fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let home = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.browser.active().left.path.clone());
-        let destinations = [
-            ("Home", home.clone()),
-            ("Documents", home.join("Documents")),
-            ("Downloads", home.join("Downloads")),
-            ("Desktop", home.join("Desktop")),
-        ];
-        let mut side = div().w_full().h_full().min_h_0().overflow_y_scrollbar().flex().flex_col().p_3().gap_2()
-            .bg(rgb(0x1A2230)).text_color(rgb(0xCFD9E5)).child("PLACES");
-        for (i, (name, path)) in destinations.into_iter().enumerate() {
-            if !path.is_dir() { continue; }
-            side = side.child(
-                div().id(format!("place-{i}")).p_2().rounded_md()
-                            .hover(|style| style.bg(rgb(0x2C4054)))
-                    .cursor_pointer().child(name)
-                    .on_click(cx.listener(move |this, _, _, cx| this.go_to(path.clone(), Side::Left, cx)))
-            );
-        }
-        side.child(div().mt_4().child("DROP ZONE"))
-            .child(
-                div().id("native-drop-zone").mt_2().p_3().rounded_md()
-                    .border_2().border_dashed().border_color(rgb(0x526680))
-                    .bg(rgb(0x273544))
-                    .text_color(rgb(0xDFEAF4))
-                    .child(format!("{} staged items", self.zone.items().len()))
-                    .child("Drop a file or folder here")
-                    .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| {
-                        this.status = match this.zone.add(&data.path) {
-                            Ok(()) => format!("Staged {} item(s)", this.zone.items().len()),
-                            Err(error) => format!("Cannot stage item: {error}"),
-                        };
-                        cx.notify();
-                    }))
-            )
-            .child("Choose destination, then Copy here")
-            .child(Self::control("Operation review", "operation-review-button",
-                cx.listener(|this, _, _, cx| this.toggle_operation_review(cx))))
-            .into_any_element()
-    }
-
     /// Only currently visible columns are requested. Directory enumeration
     /// runs on a background thread; re-rendering never re-reads the disk.
     fn visible_directories(&self) -> Vec<PathBuf> {
-        let tab = self.browser.active();
-        let mut folders = Vec::new();
-        for pane in [Some(&tab.left), tab.right.as_ref()].into_iter().flatten() {
-            let columns = if self.miller_mode {
-                pane.columns(3)
-            } else {
-                vec![pane.path.clone()]
-            };
-            for path in columns {
-                if !folders.contains(&path) { folders.push(path); }
+        let mut folders = self.pane_columns(Side::Left);
+        if self.browser.active().right.is_some() {
+            for folder in self.pane_columns(Side::Right) {
+                if !folders.contains(&folder) { folders.push(folder); }
             }
         }
         folders
@@ -1057,9 +1077,9 @@ impl Explorer {
                         this.directory_cache_order.retain(|old| old != &folder);
                         this.directory_cache_order.push_back(folder.clone());
                         this.directory_cache.insert(folder.clone(), Arc::new(listing));
-                        // 8 slots bound the memory used by the file listing
+                        // 16 slots bound the memory used by the file listing
                         // cache even after navigating through many directories.
-                        while this.directory_cache_order.len() > 8 {
+                        while this.directory_cache_order.len() > 16 {
                             if let Some(old) = this.directory_cache_order.pop_front() {
                                 this.directory_cache.remove(&old);
                             }
@@ -1091,189 +1111,8 @@ impl Explorer {
             self.load_directory(folder, true, cx);
         }
         self.inspector_path = None;
-        self.status = "Refreshing visible folders and file details in the background".into();
+        self.status = "Обновление…".into();
         cx.notify();
-    }
-
-    fn directory_row(&self, entry: &browser::Entry, side: Side, cx: &mut Context<Self>) -> AnyElement {
-        let path = entry.path.clone();
-        let label = if entry.is_directory {
-            format!("▸ {}", entry.name)
-        } else {
-            format!("  {}", entry.name)
-        };
-        let active = self.selected.as_ref() == Some(&path);
-        div().id(format!("row-{}", path.display()))
-            .w_full().h(px(31.)).px_3().flex().items_center()
-            .bg(rgb(if active { 0x344F69 } else { 0x222C3A }))
-            .hover(|style| style.bg(rgb(0x344657)))
-            .text_color(rgb(0xDFEAF4)).cursor_pointer()
-            .child(label)
-            .on_drag(FileDragInfo { path: path.clone() },
-                |info: &FileDragInfo, position, _, cx| {
-                    cx.new(|_| FileDragPreview {
-                        name: browser::display_name(&info.path), position,
-                    })
-                })
-            .on_mouse_down(MouseButton::Right,
-                cx.listener({
-                    let context_path = path.clone();
-                    move |this, event: &MouseDownEvent, _, cx| {
-                        // Right-click selects the pane it belongs to, not
-                        // whichever pane happened to have keyboard focus.
-                        let right_exists = this.browser.active().right.is_some();
-                        this.browser.active_mut().focus_right =
-                            matches!(side, Side::Right) && right_exists;
-                        this.selected = Some(context_path.clone());
-                        this.selected_history_event = None;
-                        this.confirm_recycle = None;
-                        this.context_menu = Some(event.position);
-                        cx.notify();
-                    }
-                }))
-            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                if event.standard_click() {
-                    this.context_menu = None;
-                    this.select_or_open(path.clone(), side, cx);
-                }
-            }))
-            .into_any_element()
-    }
-
-    fn column(&self, folder: PathBuf, side: Side, cx: &mut Context<Self>) -> AnyElement {
-        // The containing GPUI resizable panel owns Miller column widths.
-        // In list mode the file list simply fills its available pane.
-        let mut column = div()
-            .w_full().h_full().min_h_0().flex().flex_col()
-            .border_r_1().border_color(rgb(0x364252))
-            .child(div().p_3().bg(rgb(0x293544))
-                .text_color(rgb(0xF5F7F9))
-                .child(browser::display_name(&folder)));
-
-        if let Some(listing) = self.directory_cache.get(&folder) {
-            let listing = Arc::clone(listing);
-            let count = listing.entries.len();
-            column = column.child(
-                div().px_3().py_1().text_color(rgb(0xA9C0DA))
-                    .child(format!("{} items{}", count,
-                        if listing.truncated { " · directory limit / unreadable items" }
-                        else { "" }))
-            );
-            // GPUI only constructs on-screen rows. Scrolling no longer calls
-            // read_dir or rebuilds tens of thousands of GPUI elements.
-            let id = format!("virtual-{}", folder.display());
-            column = column.child(
-                div().flex_1().min_h_0()
-                    .child(
-                        uniform_list(
-                            id, count,
-                            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                                range.map(|index| {
-                                    this.directory_row(&listing.entries[index], side, cx)
-                                }).collect::<Vec<_>>()
-                            }),
-                        ).h_full()
-                    )
-            );
-        } else if let Some(error) = self.directory_errors.get(&folder) {
-            column = column.child(div().p_3().text_color(rgb(0xE4A5A5))
-                .child(format!("Could not read directory: {error}. Press F5 to retry.")));
-        } else {
-            column = column.child(div().p_3().text_color(rgb(0xA9C0DA))
-                .child("Loading directory…"));
-        }
-
-        column.into_any_element()
-    }
-
-    fn pane(&self, side: Side, cx: &mut Context<Self>) -> AnyElement {
-        let tab = self.browser.active();
-        let pane = match side {
-            Side::Left => &tab.left,
-            Side::Right => tab.right.as_ref().unwrap_or(&tab.left),
-        };
-        let mut columns = div()
-            .id(format!("columns-{}", if matches!(side, Side::Left) { "left" } else { "right" }))
-            .flex_1().min_h_0().flex().overflow_x_scrollbar();
-        if self.miller_mode {
-            let folders = pane.columns(3);
-            // Scroll horizontally on narrow windows, instead of squeezing
-            // all columns below their readable minimum. Resizing is handled
-            // entirely in GPUI and does not invalidate directory snapshots.
-            let minimum_width = px(200. * folders.len() as f32);
-            let group_id = format!(
-                "miller-columns-{}-{}",
-                self.browser.active_tab,
-                if matches!(side, Side::Left) { "left" } else { "right" },
-            );
-            let mut group = h_resizable(group_id);
-            for folder in folders {
-                group = group.child(
-                    resizable_panel()
-                        .size(px(235.))
-                        .size_range(px(200.)..px(1100.))
-                        .child(self.column(folder, side, cx))
-                );
-            }
-            columns = columns.child(
-                div().w_full().min_w(minimum_width).h_full().child(group)
-            );
-        } else {
-            columns = columns.child(self.column(pane.path.clone(), side, cx));
-        }
-        div().flex_1().h_full().flex().flex_col().overflow_hidden()
-            .child(div().p_2().bg(rgb(0x202A37)).text_color(rgb(0xA9C0DA))
-                .child(pane.path.display().to_string()))
-            .child(columns).into_any_element()
-    }
-
-    fn context_popup(&self, position: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
-        div().id("file-context-menu").absolute()
-            .left(position.x).top(position.y).w(px(215.)).p_2()
-            .rounded_md().border_1().border_color(rgb(0x56687C))
-            .bg(rgb(0x1A2230)).flex().flex_col().gap_1()
-            .child(Self::control("Open", "ctx-open", cx.listener(|this, _, _, cx| {
-                this.context_menu = None;
-                if let Some(selected) = &this.selected {
-                    if selected.is_dir() {
-                        let selected = selected.clone();
-                        let side = if this.browser.active().focus_right {
-                            Side::Right
-                        } else {
-                            Side::Left
-                        };
-                        this.go_to(selected, side, cx);
-                    } else if let Err(error) = open::that(selected) {
-                        this.status = format!("Cannot open file: {error}");
-                    }
-                }
-                cx.notify();
-            })))
-            .child(Self::control("Stage to Drop Zone", "ctx-stage", cx.listener(|this, _, _, cx| {
-                this.context_menu = None;
-                this.stage(cx);
-            })))
-            .child(Self::control("Rename", "ctx-rename", cx.listener(|this, _, window, cx| {
-                this.begin_rename(window, cx);
-            })))
-            .child(Self::control("Copy full path", "ctx-copy-path", cx.listener(|this, _, _, cx| {
-                this.context_menu = None;
-                if let Some(path) = &this.selected {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                        path.to_string_lossy().into_owned()
-                    ));
-                }
-                cx.notify();
-            })))
-            .child(Self::control("Recycle (confirm twice)", "ctx-recycle", cx.listener(|this, _, _, cx| {
-                this.context_menu = None;
-                this.recycle(cx);
-            })))
-            .child(Self::control("Dismiss menu", "ctx-close", cx.listener(|this, _, _, cx| {
-                this.context_menu = None;
-                cx.notify();
-            })))
-            .into_any_element()
     }
 
     fn toggle_operation_review(&mut self, cx: &mut Context<Self>) {
@@ -1286,153 +1125,15 @@ impl Explorer {
                         let total = jobs.len();
                         self.operation_alerts = jobs;
                         self.status = format!(
-                            "{total} queued/running/interrupted records; inspect disk before retrying"
+                            "Незавершённых записей: {total}. Проверьте файлы перед повтором"
                         );
                     }
-                    Err(error) => self.status = format!("Cannot inspect operation journal: {error}"),
+                    Err(error) => self.status = format!("Не удалось прочитать журнал операций: {error}"),
                 },
-                None => self.status = "Operation journal unavailable; file changes disabled".into(),
+                None => self.status = "Журнал операций недоступен: изменение файлов отключено".into(),
             };
         }
         cx.notify();
-    }
-
-    fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.operation_review {
-            let mut view = div().id("operation-review").w_full().h_full()
-                .min_h_0().overflow_y_scrollbar().flex().flex_col().gap_2()
-                .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
-                .child("UNFINISHED FILE OPERATIONS")
-                .child("Do not retry blindly. Verify source and destination in Windows Explorer.")
-                .child("This list only reports SQLite statuses and does not modify any files.");
-            if self.operation_alerts.is_empty() {
-                view = view.child("No unfinished records were found.");
-            }
-            for entry in &self.operation_alerts {
-                view = view.child(
-                    div().p_2().bg(rgb(0x263343)).rounded_md()
-                        .child(format!("#{}  {} — {}", entry.id, entry.action, entry.status))
-                        .child(format!("From: {}", entry.source.display()))
-                        .child(format!(
-                            "To: {}",
-                            entry.destination.as_ref()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_else(|| "(Recycle Bin)".into()),
-                        ))
-                );
-            }
-            return view.into_any_element();
-        }
-        let mut box_ = div().id("inspector-panel").w_full().h_full().min_h_0()
-            .overflow_y_scrollbar().flex().flex_col().gap_2()
-            .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
-            .child("PREVIEW & HISTORY")
-            .child(Self::control("Refresh details", "refresh-inspector",
-                cx.listener(|this, _, _, cx| {
-                    this.inspector_path = None;
-                    cx.notify();
-                })));
-        if let Some(path) = &self.selected {
-            let copied_path = path.clone();
-            box_ = box_.child(browser::display_name(path))
-                .child(path.display().to_string())
-                .child(
-                    div().id("copy-full-path").p_2().rounded_md()
-                        .bg(rgb(0x333F50)).cursor_pointer()
-                        .child("Copy full path")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                copied_path.to_string_lossy().into_owned()
-                            ));
-                            this.status = "File path copied to clipboard".into();
-                            cx.notify();
-                        }))
-                );
-            if self.renaming {
-                box_ = box_
-                    .child(div().mt_2().child("RENAME"))
-                    .child(div().w_full().child(Input::new(&self.rename_input)))
-                    .child(
-                        div().id("rename-commit").p_2().rounded_md()
-                            .cursor_pointer().bg(rgb(0x344F69))
-                            .child("Apply rename")
-                            .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx)))
-                    );
-            }
-            if self.last_move.is_some() {
-                box_ = box_.child(
-                    div().id("undo-rename").p_2().rounded_md().cursor_pointer()
-                        .bg(rgb(0x273544)).child("Undo last rename / move")
-                        .on_click(cx.listener(|this, _, _, cx| this.undo_move(cx)))
-                );
-            }
-            if self.inspector_loading {
-                box_ = box_.child("Loading preview and history...");
-            } else if self.inspector_path.as_ref() == Some(path) {
-                if let Some((kind, description)) = &self.inspector_preview {
-                    box_ = box_.child(format!("{kind} preview:"))
-                        .child(div().id("preview-scroll").max_h(px(170.))
-                            .overflow_y_scrollbar().child(description.clone()));
-                }
-                if self.journal.is_some() {
-                    let history = &self.inspector_history;
-                    box_ = box_.child(format!("Recorded events: {}", history.len()));
-                    box_ = box_.child(div().text_color(rgb(0xA9C0DA))
-                        .child("Select a save below, enter a comment, then press Save comment."));
-                    for event in history {
-                        let event_id = event.id;
-                        let saved_comment = event.comment.clone();
-                        let saved_author = event.author.clone().unwrap_or_default();
-                        box_ = box_.child(
-                            div().border_t_1().border_color(rgb(0x303E50)).pt_2()
-                                .child(format!("#{} · {} · {}", event.id, event.kind, event.display_time()))
-                                .child(format!("Author: {}", event.author.as_deref().unwrap_or("not verified")))
-                                .child(format!("Observer: {}", event.recorded_by))
-                                .child(if event.comment.is_empty() { "(no comment)".to_owned() } else { event.comment.clone() })
-                                .child(
-                                    div().id(format!("select-comment-{event_id}"))
-                                        .mt_2().p_2().rounded_md().cursor_pointer()
-                                        .bg(rgb(if self.selected_history_event == Some(event_id) {
-                                            0x344F69
-                                        } else { 0x333F50 }))
-                                        .child(if self.selected_history_event == Some(event_id) {
-                                            "Selected for annotation"
-                                        } else { "Select this save" })
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.selected_history_event = Some(event_id);
-                                            this.comment_input.update(cx, |input, cx| {
-                                                input.set_value(saved_comment.clone(), window, cx);
-                                            });
-                                            this.author_input.update(cx, |input, cx| {
-                                                input.set_value(saved_author.clone(), window, cx);
-                                            });
-                                            cx.notify();
-                                        }))
-                                )
-                        );
-                    }
-                }
-            }
-            if self.selected_history_event.is_some() {
-                box_ = box_
-                    .child(div().mt_3().child("AUTHOR (optional)"))
-                    .child(div().w_full().child(Input::new(&self.author_input)))
-                    .child(div().mt_3().child("COMMENT"))
-                    .child(div().w_full().child(Input::new(&self.comment_input)))
-                    .child(
-                        div().id("save-history-comment").p_2()
-                            .rounded_md().cursor_pointer().bg(rgb(0x344F69))
-                            .child("Save comment")
-                            .on_click(cx.listener(|this, _, _, cx| this.save_comment(cx)))
-                    );
-            }
-        } else {
-            box_ = box_.child("Select a file");
-        }
-        if let Some(root) = &self.watched_root {
-            box_ = box_.child(format!("Monitoring: {}", root.display()));
-        }
-        box_.into_any_element()
     }
 
     fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1449,13 +1150,13 @@ impl Explorer {
         let path = self.address_input.read(cx).value().to_string();
         let entered = path.trim().trim_matches('"');
         if entered.is_empty() {
-            self.status = "Enter an existing folder path".into();
+            self.status = "Введите путь к существующей папке".into();
             cx.notify();
             return;
         }
         let candidate = PathBuf::from(entered);
         if !candidate.is_absolute() {
-            self.status = "Only absolute paths are accepted (for example C:\\Work)".into();
+            self.status = "Нужен полный путь, например C:\\Work".into();
             cx.notify();
             return;
         }
@@ -1467,306 +1168,52 @@ impl Explorer {
                 self.selected = None;
                 self.selected_history_event = None;
                 self.confirm_recycle = None;
-                format!("Opened {}", candidate.display())
+                format!("Открыта папка {}", candidate.display())
             }
-            Err(err) => format!("Could not open folder: {err}"),
+            Err(err) => format!("Не удалось открыть папку: {err}"),
         };
         self.close_search();
         cx.notify();
     }
 
-    /// Escape never submits a filesystem change or silently cancels a copy.
-    /// It only dismisses transient GUI state and pending Recycle approval.
-    fn key_dismiss_overlay(
-        &mut self, _: &DismissOverlay, _: &mut Window, cx: &mut Context<Self>
-    ) {
-        let had_popup = self.renaming || self.creating_folder
-            || self.context_menu.is_some() || self.confirm_recycle.is_some();
-        self.renaming = false;
-        self.creating_folder = false;
-        self.context_menu = None;
-        self.confirm_recycle = None;
-        if self.search_active {
-            self.close_search();
-            self.status = "Search closed".into();
-        } else if had_popup {
-            self.status = "Action dismissed; no files were changed".into();
-        }
-        cx.notify();
-    }
-
-    fn key_address(&mut self, _: &AddressBar, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_address(window, cx);
-    }
-
-    fn key_next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
-        if self.browser.tabs.len() > 1 {
-            self.browser.active_tab = (self.browser.active_tab + 1) % self.browser.tabs.len();
-            self.selected = None;
-            self.confirm_recycle = None;
-            self.close_search();
-            cx.notify();
-        }
-    }
-
-    fn key_rename(&mut self, _: &RenameSelected, window: &mut Window, cx: &mut Context<Self>) {
-        self.begin_rename(window, cx);
-    }
-
-    fn key_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
-        self.creating_folder = true;
-        let focus = self.folder_input.focus_handle(cx);
-        window.focus(&focus, cx);
-        cx.notify();
-    }
-
-    fn key_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = self.search_input.focus_handle(cx);
-        window.focus(&focus, cx);
-        cx.notify();
-    }
-
-    fn key_back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
-        self.browser.active_mut().active_mut().back();
-        self.close_search();
-        self.selected = None;
-        cx.notify();
-    }
-    fn key_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.browser.active_mut().active_mut().up();
-        self.close_search();
-        self.selected = None;
-        cx.notify();
-    }
-    fn key_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) { self.add_tab(cx); }
-    fn key_close(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
-        let active = self.browser.active_tab;
-        self.browser.close_tab(active);
-        self.selected = None;
-        cx.notify();
-    }
-    fn key_split(&mut self, _: &Split, _: &mut Window, cx: &mut Context<Self>) {
-        self.browser.active_mut().toggle_split();
-        cx.notify();
-    }
-    fn key_stage(&mut self, _: &Stage, _: &mut Window, cx: &mut Context<Self>) { self.stage(cx); }
-    fn key_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_visible_directories(cx);
-    }
 }
 
-impl Render for Explorer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Do not compete with SQLite search for I/O while displaying results.
-        if !self.search_active {
-            self.load_visible_directories(cx);
-        }
-        self.load_selected_details(cx);
-        // Tabs and toolbar actions stay reachable on small windows.
-        // Scrolling is preferable to letting controls disappear off-screen.
-        // The scrollbar wrapper is size_full by default; a fixed height keeps
-        // these bars from taking the space of the file list.
-        let mut tabs = div().w_full().h(px(48.)).flex_none().flex().items_center().gap_2().px_2()
-            .overflow_x_scrollbar().bg(rgb(0x141C27));
-        for (i, tab) in self.browser.tabs.iter().enumerate() {
-            let active = i == self.browser.active_tab;
-            tabs = tabs.child(
-                div().id(format!("tab-{i}")).flex_none().max_w(px(250.))
-                    .overflow_hidden().whitespace_nowrap()
-                    .px_3().py_2().rounded_md()
-                    .bg(rgb(if active { 0x3A4D60 } else { 0x273544 }))
-                            .hover(|style| style.bg(rgb(0x3A4B60)))
-                    .text_color(rgb(0xE9EFF7)).cursor_pointer().child(tab.title.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.browser.active_tab = i;
-                        this.close_search();
-                        this.selected = None;
-                        this.selected_history_event = None;
-                        this.confirm_recycle = None;
-                        this.context_menu = None;
-                        cx.notify();
-                    }))
-            );
-        }
-        tabs = tabs.child(Self::control("+", "add-tab", cx.listener(|this, _, _, cx| this.add_tab(cx))));
-        let toolbar = div().w_full().h(px(48.)).flex_none().flex().items_center().gap_2().px_2()
-            .overflow_x_scrollbar().bg(rgb(0x273241))
-            .child(Self::control("Close tab", "close-tab", cx.listener(|this, _, _, cx| {
-                let index = this.browser.active_tab;
-                this.browser.close_tab(index);
-                this.selected = None;
-                cx.notify();
-            })))
-            .child(Self::control("Back", "back", cx.listener(|this, _, _, cx| {
-                this.browser.active_mut().active_mut().back();
-                this.close_search();
-                this.selected = None;
-                cx.notify();
-            })))
-            .child(Self::control("Forward", "forward", cx.listener(|this, _, _, cx| {
-                this.browser.active_mut().active_mut().forward();
-                this.close_search();
-                this.selected = None;
-                cx.notify();
-            })))
-            .child(Self::control("Up", "up", cx.listener(|this, _, _, cx| {
-                let _ = this.browser.active_mut().active_mut().up();
-                this.close_search();
-                this.selected = None;
-                cx.notify();
-            })))
-            .child(Self::control("New folder", "new-folder", cx.listener(|this, _, _, cx| {
-                this.creating_folder = !this.creating_folder;
-                this.context_menu = None;
-                cx.notify();
-            })))
-            .child(Self::control("Split", "split", cx.listener(|this, _, _, cx| {
-                this.browser.active_mut().toggle_split(); cx.notify();
-            })))
-            .child(Self::control("Mode", "miller-mode", cx.listener(|this, _, _, cx| {
-                this.miller_mode = !this.miller_mode; cx.notify();
-            })))
-            .child(Self::control("Focus", "focus", cx.listener(|this, _, _, cx| {
-                let tab = this.browser.active_mut();
-                if tab.right.is_some() {
-                    tab.focus_right = !tab.focus_right;
-                    this.selected = None;
-                    this.selected_history_event = None;
-                    this.confirm_recycle = None;
-                }
-                cx.notify();
-            })))
-            .child(Self::control("Save layout", "save-layout", cx.listener(|this, _, _, cx| {
-                this.save_workspace(cx);
-            })))
-            .child(Self::control("Restore layout", "restore-layout", cx.listener(|this, _, _, cx| {
-                this.restore_workspace(cx);
-            })))
-            .child(Self::control("Stage", "stage", cx.listener(|this, _, _, cx| this.stage(cx))))
-            .child(Self::control("Copy here", "paste", cx.listener(|this, _, _, cx| this.paste(cx))))
-            .child(Self::control("Move here", "move-here", cx.listener(|this, _, _, cx| this.move_staged(cx))))
-            .child(Self::control("Cancel copy", "cancel-copy", cx.listener(|this, _, _, cx| {
-                this.cancel_copy(cx);
-            })))
-            .child(Self::control("Open", "open", cx.listener(|this, _, _, cx| {
-                if let Some(path) = &this.selected {
-                    if let Err(e) = open::that(path) { this.status = e.to_string(); }
-                }
-                cx.notify();
-            })))
-            .child(Self::control("Recycle", "recycle", cx.listener(|this, _, _, cx| this.recycle(cx))))
-            .child(Self::control("Watch folder", "watch", cx.listener(|this, _, _, cx| this.watch(cx))))
-            .child(Self::control("Refresh", "refresh", cx.listener(|this, _, _, cx| {
-                this.refresh_visible_directories(cx);
-            })));
-        let searchbar = div().w_full().flex().items_center().gap_2().p_2()
-            .bg(rgb(0x1A2230))
-            .child(div().w(px(340.)).child(Input::new(&self.address_input)))
-            .child(Self::control("Go", "open-address",
-                cx.listener(|this, _, _, cx| this.open_address(cx))))
-            .child(div().w(px(300.)).child(Input::new(&self.search_input)))
-            .child(Self::control("Find in current folder", "find-files",
-                cx.listener(|this, _, _, cx| {
-                    this.search_active = !this.search_query.trim().is_empty();
-                    this.update_search(cx);
-                })))
-            .child(Self::control("Refresh index", "refresh-file-index",
-                cx.listener(|this, _, _, cx| {
-                    this.search_active = true;
-                    this.run_search(true, cx);
-                })))
-            .child(Self::control("Close results", "clear-results",
-                cx.listener(|this, _, _, cx| {
-                    this.close_search();
-                    cx.notify();
-                })));
 
-        let searchbar = if self.creating_folder {
-            searchbar
-                .child(div().w(px(230.)).child(Input::new(&self.folder_input)))
-                .child(Self::control("Create folder", "apply-create-folder",
-                    cx.listener(|this, _, _, cx| this.create_folder(cx))))
-        } else { searchbar };
-
-        // Native GPUI divider handles; no filesystem IO runs while resizing.
-        // Each slot keeps its own width as tabs and split mode change.
-        let mut panels = h_resizable("filemanager-main-panels")
-            .child(
-                resizable_panel().size(px(175.)).size_range(px(135.)..px(340.))
-                    .flex_none().child(self.sidebar(cx))
-            );
-        if self.search_active {
-            panels = panels.child(
-                resizable_panel().size_range(px(300.)..px(2600.))
-                    .child(self.search_results_panel(cx))
-            );
-        } else {
-            panels = panels.child(
-                resizable_panel().size_range(px(260.)..px(2600.))
-                    .child(self.pane(Side::Left, cx))
-            );
-            if self.browser.active().right.is_some() {
-                panels = panels.child(
-                    resizable_panel().size_range(px(260.)..px(2600.))
-                        .child(self.pane(Side::Right, cx))
-                );
-            }
-        }
-        panels = panels.child(
-            resizable_panel().size(px(270.)).size_range(px(215.)..px(540.))
-                .flex_none().child(self.inspector(cx))
-        );
-        let body = div().flex_1().min_h_0().overflow_hidden().child(panels);
-        let mut root = div().relative().size_full().flex().flex_col().bg(rgb(0x222C3A))
-            .text_size(px(13.))
-            .key_context("Filemanager")
-            .on_action(cx.listener(Self::key_address))
-            .on_action(cx.listener(Self::key_dismiss_overlay))
-            .on_action(cx.listener(Self::key_next_tab))
-            .on_action(cx.listener(Self::key_rename))
-            .on_action(cx.listener(Self::key_new_folder))
-            .on_action(cx.listener(Self::key_find))
-            .on_action(cx.listener(Self::key_back))
-            .on_action(cx.listener(Self::key_up))
-            .on_action(cx.listener(Self::key_tab))
-            .on_action(cx.listener(Self::key_close))
-            .on_action(cx.listener(Self::key_split))
-            .on_action(cx.listener(Self::key_refresh))
-            .on_action(cx.listener(Self::key_stage))
-            .child(tabs).child(toolbar).child(searchbar).child(body)
-            .child(div().p_2().bg(rgb(0x141C27)).text_color(rgb(0xB7C6D6))
-                .child(self.status.clone()));
-        if let Some(position) = self.context_menu {
-            root = root.child(self.context_popup(position, cx));
-        }
-        root
+impl Focusable for Explorer {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
+    gpui_platform::application().with_assets(assets::Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-t", NewTab, Some("Filemanager")),
-            KeyBinding::new("ctrl-f", Find, Some("Filemanager")),
-            KeyBinding::new("ctrl-l", AddressBar, Some("Filemanager")),
-            KeyBinding::new("escape", DismissOverlay, Some("Filemanager")),
-            KeyBinding::new("ctrl-tab", NextTab, Some("Filemanager")),
-            KeyBinding::new("f2", RenameSelected, Some("Filemanager")),
-            KeyBinding::new("ctrl-shift-n", NewFolder, Some("Filemanager")),
-            KeyBinding::new("ctrl-w", CloseTab, Some("Filemanager")),
-            KeyBinding::new("alt-left", Back, Some("Filemanager")),
-            KeyBinding::new("alt-up", Up, Some("Filemanager")),
-            KeyBinding::new("ctrl-backslash", Split, Some("Filemanager")),
-            KeyBinding::new("ctrl-shift-s", Stage, Some("Filemanager")),
-            KeyBinding::new("f5", Refresh, Some("Filemanager")),
-        ]);
-        cx.open_window(WindowOptions::default(), |window, cx| {
+        Theme::change(ThemeMode::Dark, None, cx);
+        view::apply_component_theme(cx);
+        keys::bind(cx);
+        let bounds = Bounds::centered(None, size(px(1360.), px(860.)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Filemanager".into()),
+                ..Default::default()
+            }),
+            window_min_size: Some(size(px(860.), px(520.))),
+            app_id: Some("filemanager".into()),
+            ..Default::default()
+        };
+        cx.open_window(options, |window, cx| {
             let explorer = cx.new(|cx| Explorer::new(window, cx));
+            let saver = explorer.downgrade();
+            // Tabs, splits and view mode come back on the next start.
+            window.on_window_should_close(cx, move |_, cx| {
+                let _ = saver.update(cx, |this, _| this.persist_workspace());
+                true
+            });
             // gpui_ce_components require Root as the outer window view.
             cx.new(|cx| Root::new(explorer, window, cx))
         })
-            .expect("GPUI window failed");
+        .expect("GPUI window failed");
         cx.activate(true);
     });
 }
