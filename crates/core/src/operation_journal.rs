@@ -17,6 +17,8 @@ pub struct InterruptedAction {
     pub source: PathBuf,
     pub destination: Option<PathBuf>,
     pub status: String,
+    pub phase: Option<String>,
+    pub error: Option<String>,
 }
 
 fn sql_error(error: rusqlite::Error) -> io::Error { io::Error::other(error) }
@@ -47,7 +49,9 @@ impl OperationJournal {
         let database = path.as_ref().to_owned();
         if let Some(parent) = database.parent() { fs::create_dir_all(parent)?; }
         let journal = Self { database };
-        journal.connection()?.execute_batch("
+        let mut conn = journal.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(sql_error)?;
+        tx.execute_batch("
             CREATE TABLE IF NOT EXISTS operation_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 action TEXT NOT NULL,
@@ -56,10 +60,18 @@ impl OperationJournal {
                 created_ms INTEGER NOT NULL,
                 updated_ms INTEGER NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('queued','running','done','failed','interrupted')),
-                error TEXT
+                error TEXT,
+                phase TEXT
             );
             CREATE INDEX IF NOT EXISTS operation_jobs_status ON operation_jobs(status,id);
         ").map_err(sql_error)?;
+        let has_phase = {
+            let mut stmt = tx.prepare("PRAGMA table_info(operation_jobs)").map_err(sql_error)?;
+            let names = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(sql_error)?;
+            names.collect::<Result<Vec<_>,_>>().map_err(sql_error)?.iter().any(|name| name == "phase")
+        };
+        if !has_phase { tx.execute_batch("ALTER TABLE operation_jobs ADD COLUMN phase TEXT").map_err(sql_error)?; }
+        tx.commit().map_err(sql_error)?;
         Ok(journal)
     }
 
@@ -138,6 +150,16 @@ impl OperationJournal {
         Ok(())
     }
 
+    /// Persist the next phase before its filesystem mutation is allowed.
+    pub(crate) fn checkpoint(&self, id: i64, phase: &str) -> io::Result<()> {
+        let changed = self.connection()?.execute(
+            "UPDATE operation_jobs SET phase=?2,updated_ms=?3 WHERE id=?1 AND status='running'",
+            params![id, phase, clock_ms()],
+        ).map_err(sql_error)?;
+        if changed != 1 { return Err(io::Error::other("Operation phase could not be persisted; next filesystem step refused")); }
+        Ok(())
+    }
+
     pub fn finish(&self, id: i64, result: &io::Result<crate::operations::Receipt>) -> io::Result<()> {
         let status = if result.is_ok() { "done" } else { "failed" };
         let error = result.as_ref().err().map(|err| {
@@ -160,8 +182,12 @@ impl OperationJournal {
             Ok(outcome) => outcome.warning.clone(),
             Err(error) => Some(error.to_string()),
         }.map(|message| message.chars().take(1200).collect::<String>());
-        let restored = result.as_ref().ok().and_then(|outcome| outcome.restored_path.as_ref())
-            .map(|path| path.to_string_lossy().into_owned());
+        let restored = match result {
+            Ok(outcome) => outcome.restored_path.as_ref(),
+            Err(error) => error.get_ref()
+                .and_then(|inner| inner.downcast_ref::<crate::cross_volume_move::PartialUndoError>())
+                .map(|partial| &partial.restored_path),
+        }.map(|path| path.to_string_lossy().into_owned());
         let changed = self.connection()?.execute(
             "UPDATE operation_jobs SET status=?2,error=?3,updated_ms=?4,destination=COALESCE(?5,destination)
              WHERE id=?1 AND status='running'",
@@ -188,15 +214,16 @@ impl OperationJournal {
     pub fn unresolved(&self, max: usize) -> io::Result<Vec<InterruptedAction>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id,action,source,destination,status FROM operation_jobs
-             WHERE status IN ('queued','running','interrupted') ORDER BY id DESC LIMIT ?1"
+            "SELECT id,action,source,destination,status,phase,error FROM operation_jobs
+             WHERE status IN ('queued','running','interrupted') OR (status='failed' AND phase IS NOT NULL)
+             ORDER BY id DESC LIMIT ?1"
         ).map_err(sql_error)?;
         let mapped = stmt.query_map(params![max.min(100) as i64], |row| {
             Ok(InterruptedAction {
                 id: row.get(0)?, action: row.get(1)?,
                 source: PathBuf::from(row.get::<_, String>(2)?),
                 destination: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
-                status: row.get(4)?,
+                status: row.get(4)?, phase: row.get(5)?, error: row.get(6)?,
             })
         }).map_err(sql_error)?;
         mapped.collect::<Result<Vec<_>,_>>().map_err(sql_error)
@@ -217,6 +244,47 @@ impl OperationJournal {
 mod tests {
     use super::*;
     use crate::operations::{Action, Plan};
+    #[test]
+    fn failed_phased_action_remains_inspectable_after_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("jobs.sqlite");
+        let source = tmp.path().join("source");
+        fs::write(&source, b"data").unwrap();
+        let plan = Plan::prepare(Action::Move, &source, Some(&tmp.path().join("target"))).unwrap();
+        let journal = OperationJournal::open(&path).unwrap();
+        let id = journal.queue(&plan).unwrap();
+        journal.start(id).unwrap();
+        journal.checkpoint(id, "move_verifying_copy").unwrap();
+        journal.finish(id, &Err(io::Error::other("published copy retained; verify paths"))).unwrap();
+        let reopened = OperationJournal::open(&path).unwrap();
+        assert_eq!(reopened.mark_interrupted().unwrap(), 0);
+        let records = reopened.unresolved(10).unwrap();
+        assert_eq!(records[0].status, "failed");
+        assert_eq!(records[0].phase.as_deref(), Some("move_verifying_copy"));
+        assert!(records[0].error.as_ref().unwrap().contains("verify paths"));
+    }
+    #[test]
+    fn legacy_schema_migrates_and_phases_survive_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.sqlite");
+        Connection::open(&path).unwrap().execute_batch("CREATE TABLE operation_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, source TEXT NOT NULL,
+            destination TEXT, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+            status TEXT NOT NULL, error TEXT);").unwrap();
+        let source = tmp.path().join("source");
+        fs::write(&source, b"data").unwrap();
+        let plan = Plan::prepare(Action::Move, &source, Some(&tmp.path().join("target"))).unwrap();
+        let journal = OperationJournal::open(&path).unwrap();
+        let id = journal.queue(&plan).unwrap();
+        assert!(journal.checkpoint(id, "move_copying").is_err());
+        journal.start(id).unwrap();
+        journal.checkpoint(id, "move_verifying_copy").unwrap();
+        let reopened = OperationJournal::open(&path).unwrap();
+        reopened.mark_interrupted().unwrap();
+        assert_eq!(reopened.unresolved(10).unwrap()[0].phase.as_deref(), Some("move_verifying_copy"));
+        assert!(reopened.checkpoint(id, "move_recycling_source").is_err());
+        assert!(source.exists());
+    }
     #[test]
     fn crash_records_are_inspectable_but_never_auto_executed() {
         let temp = tempfile::tempdir().unwrap();

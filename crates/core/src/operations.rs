@@ -6,7 +6,7 @@ use std::io;
 use std::io::Read;
 #[cfg(any(not(windows), test))]
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering}};
 use tempfile::Builder;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -15,11 +15,14 @@ use std::time::SystemTime;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action { Copy, Move, Rename, Recycle, CreateFolder }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct UndoOutcome {
     pub restored_path: Option<PathBuf>,
     pub warning: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferPhase { Copying, Verifying, Recycling }
 
 /// Cooperative cancellation and byte progress shared with the UI worker.
 #[derive(Default, Debug)]
@@ -27,8 +30,18 @@ pub struct CopyControl {
     cancelled: AtomicBool,
     copied_bytes: AtomicU64,
     total_bytes: AtomicU64,
+    phase: AtomicU8,
 }
 impl CopyControl {
+    pub fn phase(&self) -> TransferPhase {
+        match self.phase.load(Ordering::Relaxed) {
+            1 => TransferPhase::Verifying, 2 => TransferPhase::Recycling,
+            _ => TransferPhase::Copying,
+        }
+    }
+    pub(crate) fn set_phase(&self, phase: TransferPhase) {
+        self.phase.store(match phase { TransferPhase::Copying => 0, TransferPhase::Verifying => 1, TransferPhase::Recycling => 2 }, Ordering::Relaxed);
+    }
     pub fn cancel(&self) { self.cancelled.store(true, Ordering::Relaxed); }
     pub fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Relaxed) }
     pub fn bytes_copied(&self) -> u64 { self.copied_bytes.load(Ordering::Relaxed) }
@@ -105,6 +118,7 @@ pub struct Receipt {
     completed_stamp: Option<SourceStamp>,
     created_snapshot: Option<crate::undo_snapshot::Snapshot>,
     recycled: Option<crate::recycle_bin::RecycleToken>,
+    cross_move: Option<Arc<crate::cross_volume_move::UndoState>>,
 }
 
 /// Serial execution boundary between the user interface and filesystem changes.
@@ -133,7 +147,7 @@ impl OperationQueue {
         let _executor_lock = journal.lock_executor()?;
         let id = journal.queue_undo(receipt)?;
         journal.start(id)?;
-        let result = receipt.undo();
+        let result = receipt.undo_with_checkpoint(&|phase| journal.checkpoint(id, phase));
         // Do not turn a successful filesystem Undo into an operation failure
         // if only the final SQLite status update fails.
         if let Err(error) = journal.finish_undo(id, &result) {
@@ -174,7 +188,7 @@ impl OperationQueue {
                 Ok(id) => match journal.start(id) {
                     Ok(()) => {
                         let result = control.check()
-                            .and_then(|_| plan.execute_with_control(control));
+                            .and_then(|_| plan.execute_with_checkpoint(control, &|phase| journal.checkpoint(id, phase)));
                         if let Err(error) = journal.finish(id, &result) {
                             // A success has already changed disk; never
                             // requeue it as a failure. The unfinished
@@ -212,6 +226,11 @@ fn occupied(path: &Path) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+fn is_cross_volume_error(error: &io::Error) -> bool {
+    // Other failures must never turn a refused move into Copy + source removal.
+    cfg!(windows) && error.raw_os_error() == Some(17)
 }
 
 /// MoveFileW refuses to overwrite an existing file on Windows.
@@ -303,6 +322,25 @@ impl Plan {
     }
 
     pub fn execute_with_control(&self, control: &CopyControl) -> io::Result<Receipt> {
+        self.execute_with_checkpoint(control, &|_| Ok(()))
+    }
+
+    pub(crate) fn copy_for_move(&self, control: &CopyControl) -> io::Result<Receipt> {
+        let mut copy = self.clone();
+        copy.action = Action::Copy;
+        copy.execute_with_control(control)
+    }
+
+    pub(crate) fn execute_cross_volume(&self, control: &CopyControl,
+        checkpoint: &dyn Fn(&str) -> io::Result<()>) -> io::Result<Receipt> {
+        let (mut copy, undo) = crate::cross_volume_move::execute(self, control, checkpoint)?;
+        copy.action = Action::Move;
+        copy.cross_move = Some(Arc::new(undo));
+        Ok(copy)
+    }
+
+    fn execute_with_checkpoint(&self, control: &CopyControl,
+        checkpoint: &dyn Fn(&str) -> io::Result<()>) -> io::Result<Receipt> {
         control.check()?;
         let meta = fs::symlink_metadata(&self.source)?;
         crate::folder_copy::reject_link(&self.source)?;
@@ -317,6 +355,7 @@ impl Plan {
         let mut recycled = None;
         match self.action {
             Action::Copy => {
+                control.set_phase(TransferPhase::Copying);
                 let dest = destination.as_ref().unwrap();
                 if meta.is_dir() {
                     let snapshot = crate::folder_copy::copy_folder(&self.source, dest, control)?;
@@ -333,7 +372,7 @@ impl Plan {
                     return Ok(Receipt {
                         action: self.action, source: self.source.clone(),
                         destination, modified, size, completed_stamp,
-                        created_snapshot: Some(snapshot), recycled: None,
+                        created_snapshot: Some(snapshot), recycled: None, cross_move: None,
                     });
                 }
                 if !meta.is_file() { return Err(invalid("Unsupported source type")); }
@@ -413,7 +452,12 @@ impl Plan {
                 let dest = destination.as_ref().unwrap();
                 if occupied(dest)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
                 // MoveFileW never replaces occupied destinations and rejects cross-volume moves.
-                safe_rename(&self.source, dest)?;
+                if let Err(error) = safe_rename(&self.source, dest) {
+                    if self.action == Action::Move && is_cross_volume_error(&error) {
+                        return self.execute_cross_volume(control, checkpoint);
+                    }
+                    return Err(error);
+                }
             }
             Action::Recycle => {
                 recycled = crate::recycle_bin::recycle(&self.source)?;
@@ -433,13 +477,16 @@ impl Plan {
             modified: last_metadata.as_ref().and_then(|m| m.modified().ok()),
             size: last_metadata.as_ref().map_or(size, |m| m.len()),
             completed_stamp: last_metadata.as_ref().map(SourceStamp::read),
-            created_snapshot, recycled,
+            created_snapshot, recycled, cross_move: None,
         })
     }
 }
 
 impl Receipt {
     pub fn can_undo(&self) -> bool {
+        if let Some(undo) = &self.cross_move {
+            return undo.can_undo() && self.created_snapshot.is_some();
+        }
         match self.action {
             Action::Copy | Action::CreateFolder => self.created_snapshot.is_some(),
             Action::Recycle => self.recycled.is_some(),
@@ -463,6 +510,15 @@ impl Receipt {
 
     /// Guard created objects, and restore only the exact recycled object.
     fn undo(&self) -> io::Result<UndoOutcome> {
+        self.undo_with_checkpoint(&|_| Ok(()))
+    }
+
+    pub(crate) fn undo_with_checkpoint(&self, checkpoint: &dyn Fn(&str) -> io::Result<()>) -> io::Result<UndoOutcome> {
+        if let Some(undo) = &self.cross_move {
+            let target = self.destination.as_deref().ok_or_else(|| invalid("Missing destination"))?;
+            let snapshot = self.created_snapshot.as_ref().ok_or_else(|| invalid("Original copy identity unavailable; Undo refused"))?;
+            return undo.undo(target, snapshot, checkpoint);
+        }
         if self.action == Action::Recycle {
             let token = self.recycled.as_ref().ok_or_else(|| invalid("Recycle Bin identity unavailable; restore manually in Explorer"))?;
             let restored_path = crate::recycle_bin::restore(token)?;
@@ -644,6 +700,13 @@ pub fn free_destination(target: &Path, name: &Path, reserved: &[PathBuf]) -> Pat
 mod tests {
     use super::*;
 
+    #[test]
+    fn cross_volume_fallback_requires_windows_error_17() {
+        assert_eq!(super::is_cross_volume_error(&io::Error::from_raw_os_error(17)), cfg!(windows));
+        for code in [5, 18, 32, 80, 183] {
+            assert!(!super::is_cross_volume_error(&io::Error::from_raw_os_error(code)));
+        }
+    }
     #[test]
     fn recycle_undo_requires_executor_lock_and_a_valid_journal_then_can_retry() {
         let temp = tempfile::tempdir().unwrap();

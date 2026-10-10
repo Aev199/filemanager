@@ -772,6 +772,15 @@ impl Explorer {
                 panel = panel.child(
                     div().p_2().rounded_md().bg(rgb(RAISED)).flex().flex_col().gap_1().text_size(px(12.))
                         .child(format!("#{} · {} · {}", entry.id, entry.action, entry.status))
+                        .child(match entry.phase.as_deref() {
+                            Some("move_copying") => "Этап: создание копии",
+                            Some("move_verifying_copy") => "Этап: проверка копии",
+                            Some("move_recycling_source") => "Этап: перенос исходника в Корзину",
+                            Some("undo_restoring_source") => "Этап: восстановление исходника",
+                            Some("undo_recycling_copy") => "Этап: перенос копии в Корзину",
+                            _ => "Этап не указан",
+                        })
+                        .child(entry.error.clone().unwrap_or_default())
                         .child(div().text_color(rgb(TEXT_MUTED)).child(format!("Откуда: {}", entry.source.display())))
                         .child(div().text_color(rgb(TEXT_MUTED)).child(format!("Куда: {}",
                             entry.destination.as_ref().map(|p| p.display().to_string())
@@ -1019,7 +1028,7 @@ impl Explorer {
             bar = bar.child(
                 div().id("cancel-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(DANGER))
                     .hover(|style| style.bg(rgb(HOVER)))
-                    .child("Отменить копирование")
+                    .child("Отменить передачу")
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))
             );
         }

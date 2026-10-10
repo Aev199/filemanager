@@ -10,7 +10,7 @@ use filemanager_core::browser::{self, Browser};
 use filemanager_core::clipboard;
 use filemanager_core::history::{Event, Journal};
 use filemanager_core::directory_watch::DirectoryWatch;
-use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
+use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt, TransferPhase};
 use filemanager_core::places::{self, Place};
 use filemanager_core::search;
 use filemanager_core::sort::SortSpec;
@@ -729,6 +729,31 @@ impl Explorer {
         }
     }
 
+    fn start_transfer_progress(&mut self, moving: bool, cx: &mut Context<Self>) {
+        let progress = self.copy_control.as_ref().unwrap().clone();
+        cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_spawn(async { std::thread::sleep(Duration::from_millis(250)); }).await;
+                let keep_going = weak.update(cx, |this, cx| {
+                    if !this.copy_in_progress || !this.copy_control.as_ref()
+                        .is_some_and(|active| Arc::ptr_eq(active, &progress)) { return false; }
+                    this.status = match progress.phase() {
+                        TransferPhase::Verifying => "Проверка копии…".into(),
+                        TransferPhase::Recycling => "Завершение переноса…".into(),
+                        TransferPhase::Copying => {
+                            let mib = progress.bytes_copied() as f64 / 1_048_576.0;
+                            let action = if moving { "Перемещение" } else { "Копирование" };
+                            format!("{action}… {mib:.1} МБ")
+                        }
+                    };
+                    cx.notify();
+                    true
+                }).unwrap_or(false);
+                if !keep_going { break; }
+            }
+        }).detach();
+    }
+
     fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, restore_failed: bool, cx: &mut Context<Self>) {
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.status = "Копирование отклонено: журнал операций недоступен".into();
@@ -755,24 +780,7 @@ impl Explorer {
                 .collect();
             (zone, target, ok, errors, first_error, created)
         });
-        // UI heartbeat reads atomic byte progress without touching source
-        // files and without blocking the rendering thread.
-        let progress = self.copy_control.as_ref().unwrap().clone();
-        cx.spawn(async move |weak, cx| {
-            loop {
-                cx.background_spawn(async {
-                    std::thread::sleep(Duration::from_millis(250));
-                }).await;
-                let keep_going = weak.update(cx, |this, cx| {
-                    if !this.copy_in_progress { return false; }
-                    let mib = progress.bytes_copied() as f64 / 1_048_576.0;
-                    this.status = format!("Копирование… {mib:.1} МБ");
-                    cx.notify();
-                    true
-                }).unwrap_or(false);
-                if !keep_going { break; }
-            }
-        }).detach();
+        self.start_transfer_progress(false, cx);
         cx.spawn(async move |weak, cx| {
             let (zone, target, ok, errors, first_error, created) = task.await;
             let _ = weak.update(cx, |this, cx| {
@@ -798,7 +806,7 @@ impl Explorer {
         }).detach();
     }
 
-    /// Moves within one volume only. Each item is prepared again and
+    /// Same-volume rename or verified cross-volume transfer. Each item is prepared again and
     /// journaled before any disk change.
     fn run_move(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, restore_failed: bool, cx: &mut Context<Self>) {
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
@@ -807,12 +815,16 @@ impl Explorer {
             return;
         };
         self.operation_busy = true;
+        self.copy_in_progress = true;
+        let control = Arc::new(CopyControl::default());
+        self.copy_control = Some(Arc::clone(&control));
+        self.start_transfer_progress(true, cx);
         self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
             let results = if keep_both {
-                zone.move_to_audited_keep_both(&target, &CopyControl::default(), &audit)
+                zone.move_to_audited_keep_both(&target, &control, &audit)
             } else {
-                zone.move_to_audited(&target, &CopyControl::default(), &audit)
+                zone.move_to_audited(&target, &control, &audit)
             };
             let moved = results.iter().filter(|(_, result)| result.is_ok()).count();
             let failed = results.len() - moved;
@@ -838,6 +850,8 @@ impl Explorer {
                     }
                 }
                 this.operation_busy = false;
+                this.copy_in_progress = false;
+                this.copy_control = None;
                 this.load_directory(target, true, cx);
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
@@ -1092,7 +1106,7 @@ impl Explorer {
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {
         if let Some(control) = &self.copy_control {
             control.cancel();
-            self.status = "Отмена запрошена: недокопированные файлы не появятся в папке назначения".into();
+            self.status = "Отмена запрошена. Уже завершённые действия сохраняются.".into();
         } else {
             self.status = "Копирование не выполняется".into();
         }
