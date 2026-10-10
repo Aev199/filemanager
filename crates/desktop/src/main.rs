@@ -957,7 +957,6 @@ impl Explorer {
     fn control(label: &'static str, id: &'static str, click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
         div().id(id).flex_none().whitespace_nowrap().px_3().py_2().rounded_md()
             .bg(rgb(0x333F50))
-            .transitions(|transition| transition.bg(Duration::from_millis(140)))
             .hover(|style| style.bg(rgb(0x43566C)))
             .active(|style| style.bg(rgb(0x526980)))
             .text_color(rgb(0xF1F5F9))
@@ -981,8 +980,7 @@ impl Explorer {
             if !path.is_dir() { continue; }
             side = side.child(
                 div().id(format!("place-{i}")).p_2().rounded_md()
-                    .transitions(|transition| transition.bg(Duration::from_millis(140)))
-                    .hover(|style| style.bg(rgb(0x2C4054)))
+                            .hover(|style| style.bg(rgb(0x2C4054)))
                     .cursor_pointer().child(name)
                     .on_click(cx.listener(move |this, _, _, cx| this.go_to(path.clone(), Side::Left, cx)))
             );
@@ -1105,7 +1103,6 @@ impl Explorer {
         div().id(format!("row-{}", path.display()))
             .w_full().h(px(31.)).px_3().flex().items_center()
             .bg(rgb(if active { 0x344F69 } else { 0x222C3A }))
-            .transitions(|transition| transition.bg(Duration::from_millis(120)))
             .hover(|style| style.bg(rgb(0x344657)))
             .text_color(rgb(0xDFEAF4)).cursor_pointer()
             .child(label)
@@ -1549,8 +1546,7 @@ impl Render for Explorer {
                     .overflow_hidden().whitespace_nowrap()
                     .px_3().py_2().rounded_md()
                     .bg(rgb(if active { 0x3A4D60 } else { 0x273544 }))
-                    .transitions(|transition| transition.bg(Duration::from_millis(140)))
-                    .hover(|style| style.bg(rgb(0x3A4B60)))
+                            .hover(|style| style.bg(rgb(0x3A4B60)))
                     .text_color(rgb(0xE9EFF7)).cursor_pointer().child(tab.title.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.browser.active_tab = i;
