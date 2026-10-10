@@ -237,6 +237,8 @@ impl Explorer {
             Ok(()) => {
                 self.selected = None;
                 self.selected_history_event = None;
+                self.confirm_recycle = None;
+                self.context_menu = None;
                 "Folder opened".to_owned()
             }
             Err(e) => format!("Navigation failed: {e}"),

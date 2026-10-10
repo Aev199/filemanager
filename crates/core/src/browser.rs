@@ -36,15 +36,26 @@ impl Pane {
     }
 
     pub fn back(&mut self) -> bool {
-        let Some(path) = self.back.pop() else { return false; };
-        self.forward.push(std::mem::replace(&mut self.path, path));
-        true
+        // Navigation history can outlive removable drives, renamed folders
+        // and deleted paths. Skip invalid entries without losing the
+        // currently accessible location or mixing pane histories.
+        while let Some(path) = self.back.pop() {
+            let Ok(folder) = canonical_directory(&path) else { continue };
+            if folder == self.path { continue; }
+            self.forward.push(std::mem::replace(&mut self.path, folder));
+            return true;
+        }
+        false
     }
 
     pub fn forward(&mut self) -> bool {
-        let Some(path) = self.forward.pop() else { return false; };
-        self.back.push(std::mem::replace(&mut self.path, path));
-        true
+        while let Some(path) = self.forward.pop() {
+            let Ok(folder) = canonical_directory(&path) else { continue };
+            if folder == self.path { continue; }
+            self.back.push(std::mem::replace(&mut self.path, folder));
+            return true;
+        }
+        false
     }
 
     pub fn columns(&self, max_columns: usize) -> Vec<PathBuf> {
@@ -236,6 +247,29 @@ mod tests {
         browser.active_mut().toggle_split();
         browser.active_mut().navigate(tmp.path()).unwrap();
         assert_eq!(browser.active().left.path, fs::canonicalize(&sub).unwrap());
+    }
+
+    #[test]
+    fn missing_folder_history_is_skipped_without_losing_current_location() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        let mut pane = Pane::new(temp.path()).unwrap();
+        pane.navigate(&a).unwrap();
+        pane.navigate(&b).unwrap();
+        fs::remove_dir(&a).unwrap();
+
+        assert!(pane.back(), "Skip removed folder a and return to root");
+        assert_eq!(pane.path, fs::canonicalize(temp.path()).unwrap());
+        assert!(pane.forward());
+        assert_eq!(pane.path, fs::canonicalize(&b).unwrap());
+
+        fs::remove_dir(&b).unwrap();
+        assert!(pane.back());
+        assert!(!pane.forward(), "Unavailable forward location is discarded");
+        assert_eq!(pane.path, fs::canonicalize(temp.path()).unwrap());
     }
 
     #[test]
