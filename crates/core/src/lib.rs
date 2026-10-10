@@ -1,4 +1,5 @@
 //! Native filesystem core for Filemanager. No GUI dependencies.
+pub mod directory_watch;
 pub mod browser;
 pub mod history;
 pub mod operations;
@@ -29,3 +30,6 @@ pub mod clipboard;
 pub mod recycle_bin;
 
 pub mod thumbnail;
+
+mod undo_snapshot;
+mod native_copy;

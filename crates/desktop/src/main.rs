@@ -8,7 +8,8 @@ mod view;
 
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::clipboard;
-use filemanager_core::history::{Event, HistoryWatch, Journal};
+use filemanager_core::history::{Event, Journal};
+use filemanager_core::directory_watch::DirectoryWatch;
 use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue, Plan, Receipt};
 use filemanager_core::places::{self, Place};
 use filemanager_core::search;
@@ -27,7 +28,7 @@ use gpui_component::theme::{Theme, ThemeMode};
 use gpui_component::Root;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,20 +73,11 @@ struct Transfer {
 #[derive(Clone, Copy)]
 enum ConflictChoice { Skip, KeepBoth, Cancel }
 
-/// How to reverse one completed user action.
-enum UndoEntry {
-    /// Renames and moves: moved back, newest first.
-    Moves(Vec<Receipt>),
-    /// Copies and new folders: sent to the Recycle Bin.
-    Created(Vec<PathBuf>),
-    /// Items sent to the Recycle Bin at `at` (Unix seconds): restored.
-    Recycled { paths: Vec<PathBuf>, at: i64 },
-}
-
 struct Undo {
-    entry: UndoEntry,
+    receipts: Vec<Receipt>,
     /// Shown as "Отменить: …".
     label: String,
+    unavailable: bool,
 }
 
 const UNDO_LIMIT: usize = 50;
@@ -143,6 +135,7 @@ struct Explorer {
     inspector_path: Option<PathBuf>,
     inspector_request: u64,
     inspector_loading: bool,
+    inspector_dirty: bool,
     inspector_preview: Option<(String, String)>,
     /// Shell thumbnail (PNG in the cache) for the selected file, if any.
     inspector_thumbnail: Option<PathBuf>,
@@ -177,6 +170,7 @@ struct Explorer {
     undo_stack: Vec<Undo>,
     directory_cache: HashMap<PathBuf, Arc<browser::Listing>>,
     directory_loading: HashMap<PathBuf, u64>,
+    directory_dirty: HashSet<PathBuf>,
     directory_errors: HashMap<PathBuf, String>,
     directory_cache_order: VecDeque<PathBuf>,
     directory_request: u64,
@@ -186,7 +180,9 @@ struct Explorer {
     operation_journal: Option<Arc<OperationJournal>>,
     operation_review: bool,
     operation_alerts: Vec<InterruptedAction>,
-    watcher: Option<HistoryWatch>,
+    watcher: Option<DirectoryWatch>,
+    live_watch_started: bool,
+    live_watch_error: Option<String>,
     watched_root: Option<PathBuf>,
     /// Validated Recycle plans awaiting confirmation. Confirming submits
     /// exactly these plans, never re-prepared ones.
@@ -332,6 +328,7 @@ impl Explorer {
             inspector_path: None,
             inspector_request: 0,
             inspector_loading: false,
+            inspector_dirty: false,
             inspector_preview: None,
             inspector_thumbnail: None,
             inspector_history: Vec::new(),
@@ -370,16 +367,18 @@ impl Explorer {
             undo_stack: Vec::new(),
             directory_cache: HashMap::new(),
             directory_loading: HashMap::new(),
+            directory_dirty: HashSet::new(),
             directory_errors: HashMap::new(),
             directory_cache_order: VecDeque::new(),
             directory_request: 0,
             miller_mode,
             workspaces,
-            journal: Journal::open(Journal::default_path()).ok().map(Arc::new),
+            journal: None,
             operation_journal,
             operation_review: false,
             operation_alerts: Vec::new(),
-            watcher: None, watched_root: None, confirm_recycle: None,
+            watcher: None, live_watch_started: false, live_watch_error: None,
+            watched_root: None, confirm_recycle: None,
             status: operation_status,
             search_input, address_input, comment_input, author_input, search_query: String::new(),
             search_results: Vec::new(), search_root: None,
@@ -399,9 +398,10 @@ impl Explorer {
     /// A request number prevents a slow response for a previously selected
     /// file from overwriting the active inspector.
     fn load_selected_details(&mut self, cx: &mut Context<Self>) {
-        if self.inspector_path == self.selected {
+        if self.inspector_path == self.selected && (!self.inspector_dirty || self.inspector_loading) {
             return;
         }
+        self.inspector_dirty = false;
         self.inspector_request = self.inspector_request.wrapping_add(1);
         let request = self.inspector_request;
         self.inspector_path = self.selected.clone();
@@ -414,14 +414,23 @@ impl Explorer {
         };
         self.inspector_loading = true;
         let history_journal = self.journal.clone();
+        let observe_history = self.watched_root.is_some();
+        let selected_path = path.clone();
         let task = cx.background_spawn(async move {
             // Expensive network paths and a busy SQLite database may take
             // seconds. Neither can hold up GPUI painting or scrolling.
-            let preview = search::preview(&path, 1024)
-                .ok().map(|result| (result.kind.to_owned(), result.description));
-            let history = history_journal.as_ref()
-                .and_then(|journal| journal.events(&path, 8).ok())
-                .unwrap_or_default();
+            let preview = match search::preview(&path, 1024) {
+                Ok(result) => Some((result.kind.to_owned(), result.description)),
+                Err(error) => Some(("Файл недоступен".into(), format!("{}: {error}", path.display()))),
+            };
+            let history = match history_journal.as_ref() {
+                Some(journal) => {
+                    if observe_history {
+                        journal.observe(&path).and_then(|_| journal.events(&path, 8))
+                    } else { journal.events(&path, 8) }
+                }
+                None => Ok(Vec::new()),
+            };
             let thumbnail = wants_shell_thumbnail(&path)
                 .then(|| filemanager_core::thumbnail::thumbnail(&path, 320).ok())
                 .flatten();
@@ -430,12 +439,19 @@ impl Explorer {
         cx.spawn(async move |weak, cx| {
             let (preview, history, thumbnail) = task.await;
             let _ = weak.update(cx, |this, cx| {
-                if this.inspector_request != request {
+                if this.inspector_request != request || this.selected.as_ref() != Some(&selected_path) {
                     return;
                 }
                 this.inspector_preview = preview;
                 this.inspector_thumbnail = thumbnail;
-                this.inspector_history = history;
+                match history {
+                    Ok(history) => this.inspector_history = history,
+                    Err(error) => {
+                        let reason = format!("История недоступна: {error}");
+                        this.status = reason.clone();
+                        this.live_watch_error = Some(reason);
+                    }
+                }
                 this.inspector_loading = false;
                 cx.notify();
             });
@@ -734,8 +750,8 @@ impl Explorer {
             let first_error = results.iter().find_map(|(path, result)| {
                 result.as_ref().err().map(|error| format!("{}: {error}", path.display()))
             });
-            let created: Vec<PathBuf> = results.iter()
-                .filter_map(|(_, result)| result.as_ref().ok().and_then(|r| r.destination.clone()))
+            let created: Vec<Receipt> = results.iter()
+                .filter_map(|(_, result)| result.as_ref().ok().cloned())
                 .collect();
             (zone, target, ok, errors, first_error, created)
         });
@@ -769,14 +785,14 @@ impl Explorer {
                 this.copy_in_progress = false;
                 this.copy_control = None;
                 this.load_directory(target, true, cx);
-                if !created.is_empty() {
-                    let label = format!("копирование ({})", created.len());
-                    this.push_undo(UndoEntry::Created(created), label);
-                }
                 this.status = match first_error {
                     Some(details) => format!("Скопировано: {ok}, ошибок: {errors}. Первая ошибка: {details}"),
                     None => format!("Скопировано: {ok}. Ctrl+Z — отменить."),
                 };
+                if !created.is_empty() {
+                    let label = format!("копирование ({})", created.len());
+                    this.push_undo(created, label);
+                }
                 cx.notify();
             });
         }).detach();
@@ -826,6 +842,10 @@ impl Explorer {
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
                 }
+                this.status = match first_error {
+                    Some(details) => format!("Перемещено: {moved}, ошибок: {failed}. {details}"),
+                    None => format!("Перемещено: {moved}. Ctrl+Z — отменить."),
+                };
                 if moved > 0 {
                     this.selected = receipts.last().and_then(|receipt| receipt.destination.clone());
                     let label = if moved == 1 {
@@ -833,12 +853,8 @@ impl Explorer {
                     } else {
                         format!("перенос ({moved})")
                     };
-                    this.push_undo(UndoEntry::Moves(receipts), label);
+                    this.push_undo(receipts, label);
                 }
-                this.status = match first_error {
-                    Some(details) => format!("Перемещено: {moved}, ошибок: {failed}. {details}"),
-                    None => format!("Перемещено: {moved}. Ctrl+Z — отменить."),
-                };
                 cx.notify();
             });
         }).detach();
@@ -888,12 +904,12 @@ impl Explorer {
                         if let Some(ref dest) = receipt.destination {
                             this.refresh_parent_of(dest, cx);
                         }
+                        this.status = "Папка создана".into();
                         if let Some(dest) = receipt.destination.clone() {
                             let label = format!("создание папки «{}»", browser::display_name(&dest));
-                            this.push_undo(UndoEntry::Created(vec![dest]), label);
+                            this.push_undo(vec![receipt.clone()], label);
                         }
                         this.selected = receipt.destination;
-                        this.status = "Папка создана".into();
                     }
                     Err(error) => this.status = format!("Не удалось создать папку: {error}"),
                 }
@@ -969,9 +985,9 @@ impl Explorer {
                         }
                         this.selected = receipt.destination.clone();
                         let label = format!("переименование «{}»", browser::display_name(&receipt.source));
-                        this.push_undo(UndoEntry::Moves(vec![receipt]), label);
+                        this.status = "Переименовано. Ctrl+Z — отменить.".into();
+                        this.push_undo(vec![receipt], label);
                         this.renaming = false;
-                        this.status = "Переименовано. Отмена доступна до следующего действия.".into();
                     }
                     Err(error) => this.status = format!("Переименование отклонено: {error}"),
                 }
@@ -980,8 +996,15 @@ impl Explorer {
         }).detach();
     }
 
-    fn push_undo(&mut self, entry: UndoEntry, label: String) {
-        self.undo_stack.push(Undo { entry, label });
+    fn push_undo(&mut self, receipts: Vec<Receipt>, label: String) {
+        let all_reversible = receipts.iter().all(Receipt::can_undo);
+        let receipts: Vec<_> = receipts.into_iter().filter(Receipt::can_undo).collect();
+        if !all_reversible {
+            self.status = self.status.replace(". Ctrl+Z — отменить.", ".").replace(". Ctrl+Z — восстановить.", ".");
+            self.status.push_str(" Безопасная отмена доступна не для всех файлов. Проверьте их вручную; удалённые — в Корзине Windows.");
+        }
+        // Do not silently skip an operation without a safe Undo receipt.
+        self.undo_stack.push(Undo { receipts, label, unavailable: !all_reversible });
         if self.undo_stack.len() > UNDO_LIMIT {
             self.undo_stack.remove(0);
         }
@@ -1001,6 +1024,12 @@ impl Explorer {
             cx.notify();
             return;
         };
+        if undo.receipts.is_empty() && undo.unavailable {
+            self.status = format!("Безопасная отмена недоступна: {}. Проверьте результат вручную.", undo.label);
+            self.undo_stack.push(undo);
+            cx.notify();
+            return;
+        }
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.undo_stack.push(undo);
             self.status = "Отмена отклонена: журнал операций недоступен".into();
@@ -1013,54 +1042,48 @@ impl Explorer {
         let task = cx.background_spawn(async move {
             let mut touched: Vec<PathBuf> = Vec::new();
             let mut errors: Vec<String> = Vec::new();
-            match undo.entry {
-                UndoEntry::Moves(receipts) => {
-                    let queue = OperationQueue::default();
-                    for receipt in receipts.iter().rev() {
-                        match queue.undo_completed_audited(receipt, &audit) {
-                            Ok(()) => {
-                                touched.push(receipt.source.clone());
-                                touched.extend(receipt.destination.clone());
-                            }
-                            Err(error) => errors.push(format!("{}: {error}", browser::display_name(&receipt.source))),
-                        }
+            let mut warnings: Vec<String> = Vec::new();
+            let queue = OperationQueue::default();
+            let mut remaining = Vec::new();
+            for receipt in undo.receipts.iter().rev() {
+                match queue.undo_completed_audited(receipt, &audit) {
+                    Ok(outcome) => {
+                        touched.push(receipt.source.clone());
+                        touched.extend(receipt.destination.clone());
+                        touched.extend(outcome.restored_path);
+                        warnings.extend(outcome.warning);
                     }
-                }
-                UndoEntry::Created(paths) => {
-                    let mut queue = OperationQueue::default();
-                    for path in &paths {
-                        match Plan::prepare(Action::Recycle, path, None) {
-                            Ok(plan) => queue.submit(plan),
-                            Err(error) => errors.push(format!("{}: {error}", browser::display_name(path))),
-                        }
-                    }
-                    for (plan, result) in queue.run_all_audited(&CopyControl::default(), &audit) {
-                        match result {
-                            Ok(_) => touched.push(plan.source),
-                            Err(error) => errors.push(format!("{}: {error}", browser::display_name(&plan.source))),
-                        }
-                    }
-                }
-                UndoEntry::Recycled { paths, at } => {
-                    match filemanager_core::recycle_bin::restore(&paths, at) {
-                        Ok(_) => touched.extend(paths),
-                        Err(error) => errors.push(error.to_string()),
+                    Err(error) => {
+                        errors.push(format!("{}: {error}", browser::display_name(&receipt.source)));
+                        remaining.push(receipt.clone());
                     }
                 }
             }
-            (touched, errors)
+            // Original order, so another Ctrl+Z retries only failed items,
+            // in reverse execution order. Successful items are never replayed.
+            remaining.reverse();
+            (touched, errors, remaining, warnings, undo.unavailable)
         });
         cx.spawn(async move |weak, cx| {
-            let (touched, errors) = task.await;
+            let (touched, errors, remaining, warnings, unavailable) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 this.operation_busy = false;
                 for path in &touched {
                     this.refresh_parent_of(path, cx);
                 }
+                if !remaining.is_empty() || unavailable {
+                    this.undo_stack.push(Undo { receipts: remaining, label: label.clone(), unavailable });
+                }
                 this.status = match errors.first() {
                     None => format!("Отменено: {label}"),
                     Some(error) => format!("Отмена выполнена не полностью ({label}): {error}"),
                 };
+                if let Some(warning) = warnings.first() {
+                    this.status.push_str(&format!(". {warning}"));
+                }
+                if unavailable {
+                    this.status.push_str(". Для части файлов безопасная отмена недоступна — проверьте их вручную.");
+                }
                 cx.notify();
             });
         }).detach();
@@ -1122,7 +1145,6 @@ impl Explorer {
         };
         self.operation_busy = true;
         self.status = "Удаление в Корзину…".into();
-        let started = filemanager_core::recycle_bin::now();
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
             for (_, plan) in plans {
@@ -1141,7 +1163,7 @@ impl Explorer {
                     match result {
                         Ok(receipt) => {
                             done += 1;
-                            recycled.push(receipt.source.clone());
+                            recycled.push(receipt.clone());
                             this.refresh_parent_of(&receipt.source, cx);
                         }
                         Err(error) => {
@@ -1149,19 +1171,19 @@ impl Explorer {
                         }
                     }
                 }
-                if !recycled.is_empty() {
-                    let label = if recycled.len() == 1 {
-                        format!("удаление «{}»", browser::display_name(&recycled[0]))
-                    } else {
-                        format!("удаление ({})", recycled.len())
-                    };
-                    this.push_undo(UndoEntry::Recycled { paths: recycled, at: started }, label);
-                }
                 this.status = match first_error {
                     None if done == 1 => "Перемещено в Корзину. Ctrl+Z — восстановить.".into(),
                     None => format!("Перемещено в Корзину: {done}"),
                     Some(error) => format!("В Корзину: {done}, ошибка: {error}"),
                 };
+                if !recycled.is_empty() {
+                    let label = if recycled.len() == 1 {
+                        format!("удаление «{}»", browser::display_name(&recycled[0].source))
+                    } else {
+                        format!("удаление ({})", recycled.len())
+                    };
+                    this.push_undo(recycled, label);
+                }
                 cx.notify();
             });
         }).detach();
@@ -1436,25 +1458,94 @@ impl Explorer {
     }
 
     fn watch(&mut self, cx: &mut Context<Self>) {
-        if self.watcher.is_some() {
-            self.watcher = None;
+        if self.watched_root.is_some() {
             self.watched_root = None;
-            self.status = "Наблюдение остановлено".into();
-            cx.notify();
+            self.status = "Запись истории остановлена".into();
+        } else if self.journal.is_some() {
+            self.watched_root = Some(self.browser.active().active().path.clone());
+            self.inspector_dirty = true;
+            self.status = "История видимых папок записывается, пока окно открыто".into();
+        } else {
+            self.status = self.live_watch_error.clone()
+                .unwrap_or_else(|| "История ещё загружается".into());
+        }
+        self.configure_live_watch();
+        cx.notify();
+    }
+
+    fn configure_live_watch(&self) {
+        if let Some(watcher) = &self.watcher {
+            let folders = if self.search_active { Vec::new() } else { self.visible_directories() };
+            let journal = self.watched_root.as_ref().and(self.journal.clone());
+            watcher.configure(folders, journal);
+        }
+    }
+
+    fn ensure_live_watch(&mut self, cx: &mut Context<Self>) {
+        if self.live_watch_started {
+            self.configure_live_watch();
             return;
         }
-        let root = self.browser.active().active().path.clone();
-        if let Some(journal) = &self.journal {
-            match HistoryWatch::start(&root, journal.clone()) {
-                Ok(watch) => {
-                    self.watcher = Some(watch);
-                    self.watched_root = Some(root);
-                    self.status = "Наблюдение за папкой включено, пока окно открыто".into();
+        self.live_watch_started = true;
+        // SQLite startup and notify registration both happen off the UI.
+        let journal_task = cx.background_spawn(async { Journal::open(Journal::default_path()).map(Arc::new) });
+        cx.spawn(async move |weak, cx| {
+            let result = journal_task.await;
+            let _ = weak.update(cx, |this, cx| {
+                match result {
+                    Ok(journal) => { this.journal = Some(journal); this.inspector_dirty = true; }
+                    Err(error) => {
+                        let reason = format!("История недоступна: {error}");
+                        this.status = reason.clone();
+                        this.live_watch_error = Some(reason);
+                    }
                 }
-                Err(e) => self.status = format!("Ошибка наблюдения: {e}"),
+                cx.notify();
+            });
+        }).detach();
+        match DirectoryWatch::start(self.visible_directories(), None) {
+            Ok(watch) => self.watcher = Some(watch),
+            Err(error) => {
+                let reason = format!("Автообновление папок недоступно: {error}");
+                self.status = reason.clone();
+                self.live_watch_error = Some(reason);
+                return;
             }
         }
-        cx.notify();
+        cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_spawn(async { std::thread::sleep(Duration::from_millis(250)); }).await;
+                let running = weak.update(cx, |this, cx| {
+                    let Some(watcher) = &this.watcher else { return false; };
+                    let changes = watcher.drain();
+                    if let Some(error) = changes.error {
+                        let reason = format!("Автообновление: {error}");
+                        this.status = reason.clone();
+                        this.live_watch_error = Some(reason);
+                        cx.notify();
+                    }
+                    if changes.refresh_all || this.selected.as_ref().is_some_and(|selected| {
+                        changes.paths.iter().any(|path| selected == path || selected.starts_with(path))
+                    }) {
+                        this.inspector_dirty = true;
+                        cx.notify();
+                    }
+                    let visible = this.visible_directories();
+                    // Invalidating non-visible cache entries prevents an old
+                    // listing reappearing when the user navigates back.
+                    let dirty = if changes.refresh_all { visible.clone() } else { changes.directories.into_iter().collect() };
+                    for folder in dirty {
+                        this.directory_cache.remove(&folder);
+                        this.folder_views.remove(&folder);
+                        if visible.contains(&folder) && !this.search_active {
+                            this.load_directory(folder, true, cx);
+                        }
+                    }
+                    true
+                }).unwrap_or(false);
+                if !running { break; }
+            }
+        }).detach();
     }
 
     /// Only currently visible columns are requested. Directory enumeration
@@ -1475,6 +1566,12 @@ impl Explorer {
             || self.directory_errors.contains_key(&folder)) {
             return;
         }
+        if force && self.directory_loading.contains_key(&folder) {
+            // Keep the event until the in-flight scan finishes. A scan can
+            // otherwise overwrite the invalidation with a stale snapshot.
+            self.directory_dirty.insert(folder);
+            return;
+        }
         // A monotonically increasing request ID prevents a slower, outdated
         // result from replacing a user-requested refresh.
         self.directory_request = self.directory_request.wrapping_add(1);
@@ -1493,6 +1590,10 @@ impl Explorer {
                     return;
                 }
                 this.directory_loading.remove(&folder);
+                if this.directory_dirty.remove(&folder) {
+                    this.load_directory(folder, true, cx);
+                    return;
+                }
                 match result {
                     Ok(listing) => {
                         this.directory_cache_order.retain(|old| old != &folder);

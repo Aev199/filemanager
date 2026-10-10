@@ -819,6 +819,7 @@ impl Explorer {
                 let (icon_path, tint) = entry_icon(entry);
                 (entry.name.clone(), icon_path, tint)
             }
+            None if self.selected.is_some() => (browser::display_name(self.selected.as_ref().unwrap()), "fm/file.svg", TEXT_DIM),
             None => (browser::display_name(&current), "fm/folder-fill.svg", FOLDER),
         };
         panel = panel.child(
@@ -859,6 +860,18 @@ impl Explorer {
                     );
                 }
                 panel = panel.child(self.preview_section(entry));
+            }
+            None if self.selected.is_some() => {
+                let selected = self.selected.as_ref().unwrap();
+                panel = panel.child(Self::property("Выбранный путь", selected.display().to_string()));
+                let message = if self.inspector_loading || selected.parent().is_some_and(|parent| self.directory_loading.contains_key(parent)) {
+                    "Проверяем выбранный путь…".to_owned()
+                } else {
+                    self.inspector_preview.as_ref().filter(|(kind, _)| kind == "Файл недоступен")
+                        .map(|(_, reason)| reason.clone())
+                        .unwrap_or_else(|| "Выбранного пути нет в списке. Файл мог быть удалён или перемещён.".into())
+                };
+                panel = panel.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(message));
             }
             None => {
                 let count = self.folder_view(&current).map(|(_, indices)| indices.len());
@@ -921,13 +934,17 @@ impl Explorer {
         let mut section = div().flex().flex_col().gap_2().pt_2().border_t_1().border_color(rgb(BORDER))
             .child(div().flex().items_center().justify_between()
                 .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ИСТОРИЯ ИЗМЕНЕНИЙ"))
-                .child(text_button("watch-toggle", if watching { "Остановить" } else { "Следить за папкой" },
+                .child(text_button("watch-toggle", if watching { "Остановить" } else { "Записывать историю" },
                     ButtonKind::Ghost).text_size(px(12.))
                     .on_click(cx.listener(|this, _, _, cx| this.watch(cx)))));
-        if let Some(root) = &self.watched_root {
-            section = section.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(SUCCESS))
-                .child(small_icon("fm/eye-watch.svg", SUCCESS))
-                .child(div().flex_1().min_w_0().truncate().child(format!("Наблюдение: {}", root.display()))));
+        if self.watched_root.is_some() {
+            let tint = if self.live_watch_error.is_some() { DANGER } else { SUCCESS };
+            section = section.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(tint))
+                .child(small_icon("fm/eye-watch.svg", tint))
+                .child(div().flex_1().min_w_0().truncate().child("История видимых папок")));
+        }
+        if let Some(reason) = &self.live_watch_error {
+            section = section.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(reason.clone()));
         }
         if self.selected.is_none() || self.journal.is_none() {
             return section.into_any_element();
@@ -1325,6 +1342,7 @@ impl Render for Explorer {
             self.search_query.clear();
             self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
         }
+        self.ensure_live_watch(cx);
         // Do not compete with SQLite search for I/O while displaying results.
         if !self.search_active {
             self.load_visible_directories(cx);

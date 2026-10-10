@@ -1,5 +1,4 @@
 //! Change log only: NEVER stores file data, deltas or backup copies.
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::io;
@@ -97,6 +96,14 @@ impl Journal {
         base.join("Filemanager").join("native-history.sqlite3")
     }
 
+    pub(crate) fn is_database_path(&self, path: &Path) -> bool {
+        path == self.database || ["-journal", "-wal", "-shm"].iter().any(|suffix| {
+            let mut sidecar = self.database.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            path.as_os_str() == sidecar
+        })
+    }
+
     fn connect(&self) -> io::Result<Connection> {
         let conn = Connection::open(&self.database).map_err(sqlite_error)?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(sqlite_error)?;
@@ -106,7 +113,7 @@ impl Journal {
     /// Called on filesystem events; a repeated notification with unchanged
     /// size and modification time produces no additional history entry.
     pub fn observe(&self, path: &Path) -> io::Result<bool> {
-        if ignored(path) || path == self.database { return Ok(false); }
+        if ignored(path) || self.is_database_path(path) { return Ok(false); }
         let metadata = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return self.mark_missing(path),
@@ -220,24 +227,17 @@ impl Journal {
     }
 }
 
-pub struct HistoryWatch { _watcher: RecommendedWatcher }
+/// Metadata-only history for the explicitly watched directory, while the
+/// owning application is open. Uses the same bounded worker as listings.
+pub struct HistoryWatch { watcher: crate::directory_watch::DirectoryWatch }
 
 impl HistoryWatch {
-    /// Runs only while the application is open. An editor's save should be
-    /// detected even when the file is modified outside Filemanager.
     pub fn start(root: &Path, journal: Arc<Journal>) -> notify::Result<Self> {
-        let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            if let Ok(event) = result {
-                for path in event.paths {
-                    if let Err(error) = journal.observe(&path) {
-                        eprintln!("History observation failed for {}: {}", path.display(), error);
-                    }
-                }
-            }
-        })?;
-        watcher.watch(root, RecursiveMode::Recursive)?;
-        Ok(Self { _watcher: watcher })
+        crate::directory_watch::DirectoryWatch::start(vec![root.to_path_buf()], Some(journal))
+            .map(|watcher| Self { watcher }).map_err(notify::Error::io)
     }
+
+    pub fn drain(&self) -> crate::directory_watch::WatchChanges { self.watcher.drain() }
 }
 
 #[cfg(test)]

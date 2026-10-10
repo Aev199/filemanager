@@ -117,9 +117,8 @@ impl OperationJournal {
              VALUES(?1,?2,?3,?4,?4,'queued')",
             params![
                 format!("undo_{}", action_name(receipt.action)),
-                receipt.destination.as_ref().map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                receipt.source.to_string_lossy().as_ref(),
+                receipt.undo_source(),
+                receipt.undo_destination(),
                 clock_ms(),
             ],
         ).map_err(sql_error)?;
@@ -152,6 +151,23 @@ impl OperationJournal {
         if changed != 1 {
             return Err(io::Error::other("Operation completed, but journal status could not be saved"));
         }
+        Ok(())
+    }
+
+    pub fn finish_undo(&self, id: i64, result: &io::Result<crate::operations::UndoOutcome>) -> io::Result<()> {
+        let status = if result.is_ok() { "done" } else { "failed" };
+        let note = match result {
+            Ok(outcome) => outcome.warning.clone(),
+            Err(error) => Some(error.to_string()),
+        }.map(|message| message.chars().take(1200).collect::<String>());
+        let restored = result.as_ref().ok().and_then(|outcome| outcome.restored_path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned());
+        let changed = self.connection()?.execute(
+            "UPDATE operation_jobs SET status=?2,error=?3,updated_ms=?4,destination=COALESCE(?5,destination)
+             WHERE id=?1 AND status='running'",
+            params![id, status, note, clock_ms(), restored],
+        ).map_err(sql_error)?;
+        if changed != 1 { return Err(io::Error::other("Undo completed, but journal status could not be saved")); }
         Ok(())
     }
 

@@ -1,112 +1,142 @@
-//! Restoring items this app sent to the Recycle Bin (undo of a delete).
+//! Exact Recycle Bin receipts. Never guess an item from its display name or time.
+use std::{
+    ffi::OsString,
+    io,
+    path::{Path, PathBuf},
+};
 
-use std::io;
-use std::path::PathBuf;
-
-/// Seconds since the Unix epoch, as the Recycle Bin records deletions.
-pub fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_default()
+#[derive(Clone, Debug)]
+pub(crate) struct RecycleToken {
+    pub(crate) id: OsString,
+    pub(crate) original: PathBuf,
 }
 
-/// Puts back the newest Recycle Bin entries for `paths` deleted at or
-/// after `since`. Never overwrites: an occupied original path is an error
-/// and nothing is restored. Returns how many items came back.
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
-pub fn restore(paths: &[PathBuf], since: i64) -> io::Result<usize> {
-    let items = trash::os_limited::list().map_err(|e| io::Error::other(e.to_string()))?;
-    let mut chosen: Vec<trash::TrashItem> = Vec::new();
-    for path in paths {
-        let newest = items.iter()
-            // Clock granularity differs between platforms; allow 2 s slack.
-            .filter(|item| is_entry_for(&item.original_parent, &item.name, path) && item.time_deleted >= since - 2)
-            .max_by_key(|item| item.time_deleted);
-        match newest {
-            Some(item) => {
-                // The trash crate restores under the listed *display* name,
-                // which on Windows lacks hidden extensions; restore under
-                // the real file name instead.
-                let mut item = item.clone();
-                if let Some(name) = path.file_name() {
-                    item.name = name.to_os_string();
-                }
-                chosen.push(item);
-            }
-            None => return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{} is no longer in the Recycle Bin", path.display()),
-            )),
+pub(crate) fn recycle(path: &Path) -> io::Result<Option<RecycleToken>> {
+    platform::recycle(path)
+}
+
+pub(crate) fn restore(token: &RecycleToken) -> io::Result<PathBuf> {
+    match std::fs::symlink_metadata(&token.original) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Original path was occupied; restore refused",
+            ));
         }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
-    if let Some(occupied) = paths.iter().find(|path| std::fs::symlink_metadata(path).is_ok()) {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("{}: Original path was occupied", occupied.display()),
-        ));
-    }
-    let count = chosen.len();
-    trash::os_limited::restore_all(chosen).map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(count)
+    platform::restore(token)
 }
 
-/// Whether a Recycle Bin entry (parent folder + display name) is `path`.
-/// Windows reports the *display* name, which hides the extension of known
-/// file types by default ("отчёт" for "отчёт.pdf"), and compares paths
-/// case-insensitively.
-fn is_entry_for(parent: &std::path::Path, name: &std::ffi::OsStr, path: &std::path::Path) -> bool {
-    let same = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| {
-        if cfg!(windows) {
-            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
-        } else {
-            a == b
+#[cfg(all(unix, not(target_os = "macos")))]
+mod platform {
+    use super::*;
+    use std::collections::HashSet;
+    fn list() -> io::Result<Vec<trash::TrashItem>> {
+        trash::os_limited::list().map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(super) fn recycle(path: &Path) -> io::Result<Option<RecycleToken>> {
+        let before: HashSet<_> = list()?.into_iter().map(|item| item.id).collect();
+        trash::delete(path).map_err(|error| io::Error::other(error.to_string()))?;
+        // Deletion has already succeeded. A failed capture disables Undo rather
+        // than misreporting a mutation as an untouched/automatically retryable job.
+        let Ok(after) = list() else { return Ok(None) };
+        let candidates: Vec<_> = after
+            .into_iter()
+            .filter(|item| !before.contains(&item.id) && item.original_path() == path)
+            .collect();
+        if candidates.len() != 1 {
+            return Ok(None);
         }
-    };
-    let Some(expected_parent) = path.parent() else { return false };
-    let parents_match = same(parent.as_os_str(), expected_parent.as_os_str());
-    let name_matches = path.file_name().is_some_and(|file| same(name, file))
-        || (cfg!(windows) && path.file_stem().is_some_and(|stem| same(name, stem)));
-    parents_match && name_matches
+        Ok(Some(RecycleToken {
+            id: candidates[0].id.clone(),
+            original: path.to_owned(),
+        }))
+    }
+    pub(super) fn restore(token: &RecycleToken) -> io::Result<PathBuf> {
+        let item = list()?
+            .into_iter()
+            .find(|item| item.id == token.id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "The original Recycle Bin item is no longer available",
+                )
+            })?;
+        if item.original_path() != token.original {
+            return Err(io::Error::other(
+                "Recycle Bin identity does not match the receipt",
+            ));
+        }
+        trash::os_limited::restore_all([item])
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(token.original.clone())
+    }
 }
+
+#[cfg(windows)]
+#[path = "recycle_bin_windows.rs"]
+mod platform;
 
 #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
-pub fn restore(_paths: &[PathBuf], _since: i64) -> io::Result<usize> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Restoring from the trash is not supported here"))
+mod platform {
+    use super::*;
+    pub(super) fn recycle(_: &Path) -> io::Result<Option<RecycleToken>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Safe recycling is not supported here",
+        ))
+    }
+    pub(super) fn restore(_: &RecycleToken) -> io::Result<PathBuf> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Safe restoration is not supported here",
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn deleted_file_comes_back() {
-        // The system trash must be reachable; skip where it is not.
-        let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else { return };
-        let dir = tempfile::tempdir_in(home).unwrap();
-        let file = dir.path().join("вернуть меня.txt");
-        std::fs::write(&file, b"data").unwrap();
-        let since = now();
-        if trash::delete(&file).is_err() {
-            return;
-        }
-        assert!(!file.exists());
-        assert_eq!(restore(std::slice::from_ref(&file), since).unwrap(), 1);
-        assert_eq!(std::fs::read(&file).unwrap(), b"data");
+    fn exact_receipt_roundtrip_preserves_unicode_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("вернуть меня.txt");
+        std::fs::write(&path, b"data").unwrap();
+        let token = recycle(&path)
+            .unwrap()
+            .expect("Recycle identity must be captured");
+        assert!(!path.exists());
+        restore(&token).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"data");
     }
-
     #[test]
-    fn entries_match_by_folder_and_name() {
-        let path = std::path::Path::new("/work/отчёт.pdf");
-        assert!(is_entry_for(std::path::Path::new("/work"), std::ffi::OsStr::new("отчёт.pdf"), path));
-        assert!(!is_entry_for(std::path::Path::new("/other"), std::ffi::OsStr::new("отчёт.pdf"), path));
-        // Windows shows "отчёт" when extensions of known types are hidden.
-        assert_eq!(is_entry_for(std::path::Path::new("/work"), std::ffi::OsStr::new("отчёт"), path), cfg!(windows));
+    fn restore_refuses_occupied_path_and_retains_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("report.txt");
+        std::fs::write(&path, b"old").unwrap();
+        let token = recycle(&path).unwrap().unwrap();
+        std::fs::write(&path, b"new").unwrap();
+        assert!(restore(&token).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_file(&path).unwrap();
+        restore(&token).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
     }
-
     #[test]
-    fn missing_entry_is_an_error() {
-        let path = std::env::temp_dir().join("filemanager-never-deleted-7f3a.txt");
-        assert!(restore(&[path], now()).is_err());
+    fn same_stem_different_extensions_get_different_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let pdf = temp.path().join("отчёт.pdf");
+        let doc = temp.path().join("отчёт.docx");
+        std::fs::write(&pdf, b"pdf contents").unwrap();
+        std::fs::write(&doc, b"doc contents").unwrap();
+        let pdf_token = recycle(&pdf).unwrap().unwrap();
+        let doc_token = recycle(&doc).unwrap().unwrap();
+        assert_ne!(pdf_token.id, doc_token.id);
+        restore(&pdf_token).unwrap();
+        restore(&doc_token).unwrap();
+        assert_eq!(std::fs::read(pdf).unwrap(), b"pdf contents");
+        assert_eq!(std::fs::read(doc).unwrap(), b"doc contents");
     }
 }

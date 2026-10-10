@@ -1,7 +1,11 @@
 //! Filesystem actions are explicit and never overwrite an existing destination.
 //! Move/rename are reversible if neither path has been changed after the action.
 use std::fs::{self};
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(not(windows))]
+use std::io::Read;
+#[cfg(any(not(windows), test))]
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tempfile::Builder;
 use std::collections::VecDeque;
@@ -10,6 +14,12 @@ use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action { Copy, Move, Rename, Recycle, CreateFolder }
+
+#[derive(Debug, Default)]
+pub struct UndoOutcome {
+    pub restored_path: Option<PathBuf>,
+    pub warning: Option<String>,
+}
 
 /// Cooperative cancellation and byte progress shared with the UI worker.
 #[derive(Default, Debug)]
@@ -23,6 +33,10 @@ impl CopyControl {
     pub fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Relaxed) }
     pub fn bytes_copied(&self) -> u64 { self.copied_bytes.load(Ordering::Relaxed) }
     pub fn total_bytes(&self) -> u64 { self.total_bytes.load(Ordering::Relaxed) }
+    #[cfg(windows)]
+    pub(crate) fn add_copied_bytes(&self, delta: u64) {
+        self.copied_bytes.fetch_add(delta, Ordering::Relaxed);
+    }
     pub(crate) fn set_total_bytes(&self, bytes: u64) {
         self.total_bytes.store(bytes, Ordering::Relaxed);
     }
@@ -33,6 +47,7 @@ impl CopyControl {
     }
 }
 
+#[cfg(not(windows))]
 pub(crate) fn copy_stream(
     input: &mut impl Read,
     output: &mut impl Write,
@@ -88,6 +103,8 @@ pub struct Receipt {
     pub size: u64,
     /// Metadata of the published target; checked again before undo.
     completed_stamp: Option<SourceStamp>,
+    created_snapshot: Option<crate::undo_snapshot::Snapshot>,
+    recycled: Option<crate::recycle_bin::RecycleToken>,
 }
 
 /// Serial execution boundary between the user interface and filesystem changes.
@@ -101,13 +118,13 @@ impl OperationQueue {
         if !self.pending.is_empty() {
             return Err(io::Error::other("Finish the pending queue before undo"));
         }
-        receipt.undo()
+        receipt.undo().map(|_| ())
     }
     pub fn undo_completed_audited(
         &self,
         receipt: &Receipt,
         journal: &crate::operation_journal::OperationJournal,
-    ) -> io::Result<()> {
+    ) -> io::Result<UndoOutcome> {
         if !self.pending.is_empty() {
             return Err(io::Error::other("Finish the pending queue before undo"));
         }
@@ -119,9 +136,7 @@ impl OperationQueue {
         let result = receipt.undo();
         // Do not turn a successful filesystem Undo into an operation failure
         // if only the final SQLite status update fails.
-        let logged_result = result.as_ref().map(|_| receipt.clone())
-            .map_err(|error| io::Error::new(error.kind(), error.to_string()));
-        if let Err(error) = journal.finish(id, &logged_result) {
+        if let Err(error) = journal.finish_undo(id, &result) {
             eprintln!("Filemanager: could not persist Undo result: {error}");
         }
         result
@@ -298,11 +313,13 @@ impl Plan {
         }
         let size = meta.len();
         let destination = self.destination.clone();
+        let mut created_snapshot = None;
+        let mut recycled = None;
         match self.action {
             Action::Copy => {
                 let dest = destination.as_ref().unwrap();
                 if meta.is_dir() {
-                    crate::folder_copy::copy_folder(&self.source, dest, control)?;
+                    let snapshot = crate::folder_copy::copy_folder(&self.source, dest, control)?;
                     // Finish reading the destination before moving its
                     // owning Option<PathBuf> into the Receipt (Rust E0505).
                     // The copy is already published. A transient metadata
@@ -316,6 +333,7 @@ impl Plan {
                     return Ok(Receipt {
                         action: self.action, source: self.source.clone(),
                         destination, modified, size, completed_stamp,
+                        created_snapshot: Some(snapshot), recycled: None,
                     });
                 }
                 if !meta.is_file() { return Err(invalid("Unsupported source type")); }
@@ -325,7 +343,16 @@ impl Plan {
                 // A same-directory temporary file is auto-removed on ordinary
                 // failure; persist_noclobber atomically publishes without replace.
                 let parent = dest.parent().ok_or_else(|| invalid("Missing destination folder"))?;
-                let mut input = fs::File::open(&self.source)?;
+                let mut source_options = fs::OpenOptions::new();
+                source_options.read(true);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    // Keep the source stable while CopyFileExW opens it again.
+                    // Sharing reads only rejects active/future writers and renames.
+                    source_options.share_mode(1);
+                }
+                let input = source_options.open(&self.source)?;
                 let opened_meta = input.metadata()?;
                 if !opened_meta.is_file() {
                     return Err(invalid("Source is not a regular file"));
@@ -337,6 +364,23 @@ impl Plan {
                         "Source changed between preflight and opening its handle; copy refused"
                     ));
                 }
+                #[cfg(windows)]
+                {
+                    let staging = Builder::new().prefix(".filemanager-copy-")
+                        .suffix(".fm-partial").tempdir_in(parent)?;
+                    let payload = staging.path().join("payload");
+                    crate::native_copy::copy_file(&self.source, &payload, control)?;
+                    if SourceStamp::read(&fs::metadata(&self.source)?) != self.stamp {
+                        return Err(io::Error::other("Source changed while copying; destination was not published"));
+                    }
+                    control.check()?;
+                    created_snapshot = crate::undo_snapshot::Snapshot::capture(&payload).ok();
+                    control.check()?;
+                    safe_rename(&payload, dest)?;
+                }
+                #[cfg(not(windows))]
+                {
+                let mut input = input;
                 let mut staging = Builder::new()
                     .prefix(".filemanager-copy-")
                     .suffix(".fm-partial")
@@ -360,7 +404,10 @@ impl Plan {
                 staging.as_file_mut().sync_all()?;
                 staging.as_file().set_permissions(opened_meta.permissions())?;
                 control.check()?;
+                created_snapshot = crate::undo_snapshot::Snapshot::capture(staging.path()).ok();
+                control.check()?;
                 staging.persist_noclobber(dest).map_err(|e| e.error)?;
+                }
             }
             Action::Move | Action::Rename => {
                 let dest = destination.as_ref().unwrap();
@@ -369,13 +416,15 @@ impl Plan {
                 safe_rename(&self.source, dest)?;
             }
             Action::Recycle => {
-                trash::delete(&self.source).map_err(|err| io::Error::other(err.to_string()))?;
+                recycled = crate::recycle_bin::recycle(&self.source)?;
             }
             Action::CreateFolder => {
                 let dest = destination.as_ref().ok_or_else(|| invalid("Missing new folder path"))?;
                 // create_dir never replaces an existing path; safe if a
                 // competing process claims the name after preflight.
                 fs::create_dir(dest)?;
+                created_snapshot = crate::undo_snapshot::Snapshot::capture(dest).ok()
+                    .filter(|snapshot| snapshot.is_empty_directory());
             }
         }
         let last_metadata = if let Some(ref dest) = destination { fs::metadata(dest).ok() } else { None };
@@ -384,15 +433,55 @@ impl Plan {
             modified: last_metadata.as_ref().and_then(|m| m.modified().ok()),
             size: last_metadata.as_ref().map_or(size, |m| m.len()),
             completed_stamp: last_metadata.as_ref().map(SourceStamp::read),
+            created_snapshot, recycled,
         })
     }
 }
 
 impl Receipt {
-    /// Undo only reversible renames and moves and only for an unchanged target.
-    fn undo(&self) -> io::Result<()> {
-        if self.action != Action::Move && self.action != Action::Rename {
-            return Err(invalid("Undo is available only for moves and renames"));
+    pub fn can_undo(&self) -> bool {
+        match self.action {
+            Action::Copy | Action::CreateFolder => self.created_snapshot.is_some(),
+            Action::Recycle => self.recycled.is_some(),
+            Action::Move | Action::Rename => self.completed_stamp.is_some(),
+        }
+    }
+
+    pub(crate) fn undo_destination(&self) -> Option<String> {
+        match self.action {
+            Action::Copy | Action::CreateFolder => None,
+            _ => Some(self.source.to_string_lossy().into_owned()),
+        }
+    }
+    pub(crate) fn undo_source(&self) -> String {
+        if self.action == Action::Recycle {
+            self.recycled.as_ref().map(|token| token.id.to_string_lossy().into_owned()).unwrap_or_default()
+        } else {
+            self.destination.as_ref().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default()
+        }
+    }
+
+    /// Guard created objects, and restore only the exact recycled object.
+    fn undo(&self) -> io::Result<UndoOutcome> {
+        if self.action == Action::Recycle {
+            let token = self.recycled.as_ref().ok_or_else(|| invalid("Recycle Bin identity unavailable; restore manually in Explorer"))?;
+            let restored_path = crate::recycle_bin::restore(token)?;
+            let different = crate::path_utils::normalize_extended_path(&restored_path)
+                != crate::path_utils::normalize_extended_path(&self.source);
+            let warning = different.then(|| format!(
+                "Исходное имя заняли во время восстановления. Файл сохранён: {}", restored_path.display()
+            ));
+            return Ok(UndoOutcome { restored_path: Some(restored_path), warning });
+        }
+        if self.action == Action::Copy || self.action == Action::CreateFolder {
+            let dest = self.destination.as_ref().ok_or_else(|| invalid("Missing destination"))?;
+            let snapshot = self.created_snapshot.as_ref().ok_or_else(|| invalid("Original identity unavailable; undo refused"))?;
+            snapshot.verify(dest)?;
+            // The caller holds the same audited executor lock as all other actions.
+            let plan = Plan::prepare(Action::Recycle, dest, None)?;
+            snapshot.verify(dest)?;
+            plan.execute()?;
+            return Ok(UndoOutcome::default());
         }
         let dest = self.destination.as_ref().ok_or_else(|| invalid("Missing destination"))?;
         if occupied(&self.source)? {
@@ -403,7 +492,8 @@ impl Receipt {
         if self.completed_stamp.as_ref() != Some(&SourceStamp::read(&meta)) {
             return Err(invalid("Destination changed or was replaced; undo refused"));
         }
-        safe_rename(dest, &self.source)
+        safe_rename(dest, &self.source)?;
+        Ok(UndoOutcome::default())
     }
 }
 
@@ -553,6 +643,115 @@ pub fn free_destination(target: &Path, name: &Path, reserved: &[PathBuf]) -> Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recycle_undo_requires_executor_lock_and_a_valid_journal_then_can_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("report.txt");
+        fs::write(&path, b"original").unwrap();
+        let receipt = Plan::prepare(Action::Recycle, &path, None).unwrap().execute().unwrap();
+        assert!(receipt.can_undo());
+        let db = temp.path().join("jobs.sqlite");
+        let journal = crate::operation_journal::OperationJournal::open(&db).unwrap();
+        let other_window = crate::operation_journal::OperationJournal::open(&db).unwrap();
+        let guard = other_window.lock_executor().unwrap();
+        let queue = OperationQueue::default();
+        assert!(queue.undo_completed_audited(&receipt, &journal).is_err());
+        assert!(!path.exists());
+        drop(guard);
+        fs::write(&db, b"corrupt sqlite").unwrap();
+        assert!(queue.undo_completed_audited(&receipt, &journal).is_err());
+        assert!(!path.exists());
+        fs::remove_file(&db).unwrap();
+        let journal = crate::operation_journal::OperationJournal::open(&db).unwrap();
+        let outcome = queue.undo_completed_audited(&receipt, &journal).unwrap();
+        assert_eq!(outcome.restored_path, Some(path.clone()));
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let (action, status, source, destination): (String, String, String, String) = conn.query_row(
+            "SELECT action,status,source,destination FROM operation_jobs ORDER BY id DESC LIMIT 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        ).unwrap();
+        assert_eq!(action, "undo_recycle");
+        assert_eq!(status, "done");
+        assert_eq!(destination, receipt.source.to_string_lossy());
+        assert!(!source.is_empty());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn copied_folder_undo_refuses_new_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("copy");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file.txt"), b"original").unwrap();
+        let receipt = Plan::prepare(Action::Copy, &source, Some(&target)).unwrap().execute().unwrap();
+        fs::write(target.join("new work.txt"), b"preserve").unwrap();
+        assert!(receipt.undo().is_err());
+        assert_eq!(fs::read(target.join("new work.txt")).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn unchanged_copy_can_be_undone_through_audited_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("source.txt");
+        let dst = temp.path().join("copy.txt");
+        fs::write(&src, b"original").unwrap();
+        let journal = crate::operation_journal::OperationJournal::open(temp.path().join("jobs.sqlite")).unwrap();
+        let mut queue = OperationQueue::default();
+        queue.submit(Plan::prepare(Action::Copy, &src, Some(&dst)).unwrap());
+        let receipt = queue.run_all_audited(&CopyControl::default(), &journal).remove(0).1.unwrap();
+        OperationQueue::default().undo_completed_audited(&receipt, &journal).unwrap();
+        assert!(!dst.exists());
+        assert_eq!(fs::read(src).unwrap(), b"original");
+    }
+
+    #[test]
+    fn undo_copy_refuses_external_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("source.txt");
+        let dst = temp.path().join("copy.txt");
+        fs::write(&src, b"original").unwrap();
+        let receipt = Plan::prepare(Action::Copy, &src, Some(&dst)).unwrap().execute().unwrap();
+        fs::write(&dst, b"new work must survive").unwrap();
+        assert!(receipt.undo().is_err());
+        assert_eq!(fs::read(dst).unwrap(), b"new work must survive");
+    }
+
+    #[test]
+    fn unchanged_new_folder_can_be_undone() {
+        let temp = tempfile::tempdir().unwrap();
+        let dst = temp.path().join("new folder");
+        let receipt = Plan::prepare(Action::CreateFolder, temp.path(), Some(&dst)).unwrap().execute().unwrap();
+        receipt.undo().unwrap();
+        assert!(!dst.exists());
+    }
+
+    #[test]
+    fn undo_new_folder_refuses_new_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let dst = temp.path().join("new folder");
+        let receipt = Plan::prepare(Action::CreateFolder, temp.path(), Some(&dst)).unwrap().execute().unwrap();
+        fs::write(dst.join("new document.txt"), b"new work").unwrap();
+        assert!(receipt.undo().is_err());
+        assert_eq!(fs::read(dst.join("new document.txt")).unwrap(), b"new work");
+    }
+
+    #[test]
+    fn recycle_receipt_restores_exact_original_not_newest_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("report.txt");
+        fs::write(&src, b"old report").unwrap();
+        let original = Plan::prepare(Action::Recycle, &src, None).unwrap().execute().unwrap();
+        fs::write(&src, b"new report").unwrap();
+        let newer = Plan::prepare(Action::Recycle, &src, None).unwrap().execute().unwrap();
+        original.undo().unwrap();
+        assert_eq!(fs::read(&src).unwrap(), b"old report");
+        fs::remove_file(&src).unwrap();
+        newer.undo().unwrap();
+        assert_eq!(fs::read(&src).unwrap(), b"new report");
+    }
 
     #[test]
     fn zone_reports_and_drops_conflicts() {

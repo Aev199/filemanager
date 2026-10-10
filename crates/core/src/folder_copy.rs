@@ -4,9 +4,9 @@
 //! We intentionally reject symbolic links, Windows junctions and reparse points.
 //! This does not promise a snapshot if another process deliberately rewrites
 //! files while preserving all observed metadata.
-use crate::operations::{CopyControl, copy_stream, safe_rename};
-use std::fs::{self, Metadata, OpenOptions};
-use std::io::{self, Write};
+use crate::operations::{CopyControl, safe_rename};
+use std::fs::{self, Metadata};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tempfile::Builder;
@@ -100,45 +100,33 @@ fn copy_one(source: &Path, target: &Path, item: &Item, control: &CopyControl) ->
     if item.stamp.is_dir {
         fs::create_dir(target)?;
     } else {
-        let mut input = fs::File::open(source)?;
+        let mut source_options = fs::OpenOptions::new();
+        source_options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            source_options.share_mode(1);
+        }
+        let input = source_options.open(source)?;
         if Stamp::from(&input.metadata()?) != item.stamp {
             return Err(io::Error::other(
                 "Folder entry was changed between preflight and opening its handle"
             ));
         }
-        let mut output = OpenOptions::new().write(true).create_new(true).open(target)?;
-        // All output stays in the temporary unpublished directory.
-        // A short read also refuses publication; do not trust only timestamps.
-        let result = copy_stream(&mut input, &mut output, control)
-            .and_then(|bytes| {
-                if bytes != item.stamp.size {
-                    return Err(io::Error::other(
-                        "Folder file length changed while copying"
-                    ));
-                }
-                output.flush()?;
-                output.sync_all()
-            });
-        if let Err(error) = result {
-            drop(output);
-            return Err(error);
+        crate::native_copy::copy_file(source, target, control)?;
+        if fs::metadata(target)?.len() != item.stamp.size {
+            return Err(io::Error::other("Folder file length changed while copying"));
         }
         if Stamp::from(&fs::symlink_metadata(source)?) != item.stamp {
             return Err(io::Error::other("Source changed during folder copy"));
         }
-        if let Some(modified) = item.stamp.modified {
-            filetime::set_file_handle_times(
-                &output, None, Some(filetime::FileTime::from_system_time(modified)),
-            )?;
-        }
-        output.set_permissions(before.permissions())?;
     }
     Ok(())
 }
 
 /// Publish a complete directory atomically on Windows (same-volume MoveFileW).
 /// A destination occupied during copying is never replaced.
-pub(crate) fn copy_folder(source: &Path, destination: &Path, control: &CopyControl) -> io::Result<()> {
+pub(crate) fn copy_folder(source: &Path, destination: &Path, control: &CopyControl) -> io::Result<crate::undo_snapshot::Snapshot> {
     reject_link(source)?;
     if !fs::metadata(source)?.is_dir() {
         return Err(invalid("Source is not a directory"));
@@ -180,9 +168,11 @@ pub(crate) fn copy_folder(source: &Path, destination: &Path, control: &CopyContr
         fs::set_permissions(&output_dir, fs::metadata(source.join(&item.relative))?.permissions())?;
     }
     // MoveFileW fails if a competing process created the destination.
+    let undo_snapshot = crate::undo_snapshot::Snapshot::capture(staging.path())?;
+    control.check()?;
     safe_rename(staging.path(), destination)?;
     // The old path no longer exists; drop(tempdir) cannot remove the published tree.
-    Ok(())
+    Ok(undo_snapshot)
 }
 
 #[cfg(test)]

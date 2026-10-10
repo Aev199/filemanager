@@ -73,11 +73,16 @@ fn run() -> io::Result<()> {
         "watch" => {
             let root = path(&mut args, "folder")?.canonicalize()?;
             let journal = Arc::new(Journal::open(Journal::default_path())?);
-            let _watcher = HistoryWatch::start(&root, journal)
+            let watcher = HistoryWatch::start(&root, journal)
                 .map_err(io::Error::other)?;
             println!("Watching {}. Keep this terminal open. Ctrl+C to stop.", root.display());
             io::stdout().flush()?;
-            loop { std::thread::sleep(Duration::from_secs(60)); }
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                if let Some(error) = watcher.drain().error {
+                    eprintln!("Watching/history unavailable: {error}");
+                }
+            }
         }
         "index" => {
             let root = path(&mut args, "folder")?;
