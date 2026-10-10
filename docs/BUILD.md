@@ -20,6 +20,19 @@ If the build is red, open its failed step logs. Do not test file operations
 against irreplaceable files. EXE remains an untested development build until
 a Windows test verifies navigation, safe copy and Recycle Bin behavior.
 
+## Скриншот реального GPUI-окна
+
+Ручной workflow дополнительно пытается **запустить собранный EXE** в
+одноразовом Windows runner и сохранить снимок окна в отдельный
+`Filemanager-UI-Screenshot` artifact (`Filemanager-UI.png`).
+Это реальный снимок запущенного приложения, **не нарисованный макет**.
+
+На некоторых GitHub-hosted runner графический сеанс недоступен:
+тогда снимок не появится и в логе будет предупреждение, но сборка
+`Filemanager-Windows-x64` останется доступной. Успешный снимок
+не доказывает работоспособность файловых операций — нужен отдельный
+безопасный smoke-test из `SMOKE_TEST.md`.
+
 ## Local development (optional)
 
 Needs Rust stable, Windows SDK/MSVC C++ Build Tools, and network access for

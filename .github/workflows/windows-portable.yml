@@ -46,6 +46,92 @@ jobs:
           Set-Content -Path "dist/SHA256.txt" -Value "$sha  Filemanager.exe"
           Compress-Archive -Path "dist/Filemanager.exe", "dist/SHA256.txt" -DestinationPath "Filemanager-win64.zip" -Force
 
+      # Runs only on manually dispatched CI, not on every commit.
+      # Some hosted runners do not expose a visible desktop; do not fail
+      # the binary build merely because screenshot capture is unavailable.
+      - name: Capture native GPUI window (best effort)
+        continue-on-error: true
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class FilemanagerWindowCapture {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct Rect {
+                  public int Left;
+                  public int Top;
+                  public int Right;
+                  public int Bottom;
+              }
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowRect(IntPtr handle, out Rect rectangle);
+              [DllImport("user32.dll")]
+              public static extern bool SetForegroundWindow(IntPtr handle);
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr handle, int command);
+          }
+          '@
+          $exe = (Resolve-Path "dist/Filemanager.exe").Path
+          $app = Start-Process -FilePath $exe -WorkingDirectory (Resolve-Path "dist").Path -PassThru
+          try {
+              for ($attempt = 0; $attempt -lt 30; $attempt++) {
+                  Start-Sleep -Milliseconds 500
+                  $app.Refresh()
+                  if ($app.HasExited) {
+                      throw "Filemanager exited before a window could be captured (exit $($app.ExitCode))"
+                  }
+                  if ($app.MainWindowHandle -ne [IntPtr]::Zero) { break }
+              }
+              if ($app.MainWindowHandle -eq [IntPtr]::Zero) {
+                  throw "No visible GPUI window on this runner; portable build is still available."
+              }
+              [void][FilemanagerWindowCapture]::ShowWindow($app.MainWindowHandle, 5)
+              [void][FilemanagerWindowCapture]::SetForegroundWindow($app.MainWindowHandle)
+              Start-Sleep -Seconds 2
+              $rectangle = New-Object FilemanagerWindowCapture+Rect
+              if (-not [FilemanagerWindowCapture]::GetWindowRect($app.MainWindowHandle, [ref]$rectangle)) {
+                  throw "Could not locate GPUI window rectangle."
+              }
+              $width = $rectangle.Right - $rectangle.Left
+              $height = $rectangle.Bottom - $rectangle.Top
+              if ($width -lt 200 -or $height -lt 150 -or $width -gt 8000 -or $height -gt 8000) {
+                  throw "Invalid GPUI window dimensions: $width x $height"
+              }
+              $bitmap = [System.Drawing.Bitmap]::new($width, $height)
+              try {
+                  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+                  try {
+                      $graphics.CopyFromScreen(
+                          $rectangle.Left, $rectangle.Top, 0, 0,
+                          [System.Drawing.Size]::new($width, $height)
+                      )
+                  } finally {
+                      $graphics.Dispose()
+                  }
+                  $bitmap.Save(
+                      (Join-Path (Resolve-Path "dist").Path "Filemanager-UI.png"),
+                      [System.Drawing.Imaging.ImageFormat]::Png
+                  )
+              } finally {
+                  $bitmap.Dispose()
+              }
+          } finally {
+              $app.Refresh()
+              if (-not $app.HasExited) {
+                  Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+              }
+          }
+
+      - name: Upload native UI screenshot when available
+        uses: actions/upload-artifact@v4
+        with:
+          name: Filemanager-UI-Screenshot
+          path: dist/Filemanager-UI.png
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
