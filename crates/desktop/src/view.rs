@@ -10,7 +10,7 @@ use filemanager_core::format::{format_size, format_time, items_label, kind_label
 use filemanager_core::places::{containing_place, Place, PlaceKind};
 use filemanager_core::sort::SortKey;
 use gpui::{
-    anchored, deferred, div, rgb_to_hsla, ease_out_quint, prelude::*, px, rgb, rgba, svg, uniform_list,
+    anchored, deferred, div, img, rgb_to_hsla, ObjectFit, ease_out_quint, prelude::*, px, rgb, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
     ExternalPaths, MouseButton, MouseDownEvent, SharedString, Stateful, Window,
 };
@@ -820,7 +820,7 @@ impl Explorer {
                             .on_click(cx.listener(|this, _, _, cx| this.undo_move(cx)))
                     );
                 }
-                panel = panel.child(self.preview_section());
+                panel = panel.child(self.preview_section(entry));
             }
             None => {
                 let count = self.folder_view(&current).map(|(_, indices)| indices.len());
@@ -833,7 +833,22 @@ impl Explorer {
         panel.into_any_element()
     }
 
-    fn preview_section(&self) -> AnyElement {
+    fn preview_section(&self, entry: &Entry) -> AnyElement {
+        // Images are decoded by GPUI off the UI thread and cached; very
+        // large files are skipped so a 500 MB TIFF cannot eat memory.
+        const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
+        let is_image = matches!(entry.extension().as_deref(),
+            Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "tif" | "tiff"));
+        if is_image && entry.size <= IMAGE_LIMIT {
+            return div().flex().flex_col().gap_1()
+                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ПРЕДПРОСМОТР · ИЗОБРАЖЕНИЕ"))
+                .child(div().w_full().h(px(220.)).p_1().rounded_md().bg(rgb(SURFACE))
+                    .border_1().border_color(rgb(BORDER)).flex().items_center().justify_center()
+                    .child(img(entry.path.clone()).size_full().object_fit(ObjectFit::Contain)
+                        .with_fallback(|| div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
+                            .child("Не удалось показать изображение").into_any_element())))
+                .into_any_element();
+        }
         if self.inspector_loading {
             return div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Загрузка предпросмотра…").into_any_element();
         }
