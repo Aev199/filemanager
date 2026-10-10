@@ -424,9 +424,11 @@ impl Explorer {
                         listing.entries.iter().any(|entry| &entry.path == selected && entry.is_directory)
                     })
             });
-        // A selected subfolder is previewed as the last column; the trail
+        // As many columns as fit at a readable width (at least two). A
+        // selected subfolder is previewed as the last column; the trail
         // gives up its oldest column so the total stays readable.
-        let trail = if preview.is_some() { MILLER_COLUMNS - 1 } else { MILLER_COLUMNS };
+        let fit = ((self.pane_width / 210.) as usize).clamp(2, MILLER_COLUMNS);
+        let trail = if preview.is_some() { fit - 1 } else { fit };
         let mut columns: Vec<PathBuf> = path.ancestors().take(trail).map(Path::to_path_buf).collect();
         columns.reverse();
         columns.extend(preview);
@@ -440,18 +442,20 @@ impl Explorer {
         let body = if self.miller_mode {
             let folders = self.pane_columns(side);
             let group_id = format!(
-                "miller-{}-{}-{}",
+                "miller-{}-{}-{}-{}",
                 self.browser.active_tab,
                 if side == Side::Left { "l" } else { "r" },
                 folders.len(),
+                self.pane_width as u32 / 40,
             );
-            let minimum_width = px(200. * folders.len() as f32);
+            let minimum_width = px(180. * folders.len() as f32);
             let mut group = h_resizable(group_id);
             for (index, folder) in folders.iter().enumerate() {
                 // The folder of the next column is highlighted as the trail.
                 let trail = folders.get(index + 1).cloned();
                 let column = self.column(folder.clone(), side, trail, cx);
-                group = group.child(resizable_panel().size(px(250.)).size_range(px(180.)..px(900.)).child(column));
+                let width = (self.pane_width / folders.len() as f32).max(180.);
+                group = group.child(resizable_panel().size(px(width)).size_range(px(160.)..px(900.)).child(column));
             }
             div().id(if side == Side::Left { "columns-left" } else { "columns-right" })
                 .flex_1().min_h_0().overflow_x_scrollbar()
