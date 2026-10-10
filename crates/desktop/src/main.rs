@@ -292,6 +292,76 @@ impl Explorer {
         }).detach();
     }
 
+    /// Move staged paths to the active pane only on the same volume.
+    /// Each item is prepared again and journaled before any disk change.
+    fn move_staged(&mut self, cx: &mut Context<Self>) {
+        if self.copy_in_progress || self.operation_busy {
+            self.status = "Another file operation is running. Wait for it to finish.".into();
+            cx.notify();
+            return;
+        }
+        if self.zone.items().is_empty() {
+            self.status = "Drop Zone is empty".into();
+            cx.notify();
+            return;
+        }
+        let Some(audit) = self.operation_journal.as_ref().cloned() else {
+            self.status = "Move refused: operation journal unavailable".into();
+            cx.notify();
+            return;
+        };
+        let target = self.browser.active().active().path.clone();
+        let mut zone = std::mem::take(&mut self.zone);
+        self.operation_busy = true;
+        self.status = "Moving staged items on the same volume...".into();
+        let task = cx.background_spawn(async move {
+            let results = zone.move_to_audited(&target, &CopyControl::default(), &audit);
+            let moved = results.iter().filter(|(_, result)| result.is_ok()).count();
+            let failed = results.len() - moved;
+            let first_error = results.iter().find_map(|(path, result)| {
+                result.as_ref().err().map(|error| format!("{}: {error}", path.display()))
+            });
+            let sources = results.iter()
+                .filter(|(_, result)| result.is_ok())
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            // A single atomic rename has safe Undo. Batch undo is not yet
+            // implemented: never promise it for partially successful batches.
+            let undo = if results.len() == 1 {
+                results[0].1.as_ref().ok().cloned()
+            } else {
+                None
+            };
+            (zone, target, moved, failed, first_error, sources, undo)
+        });
+        cx.spawn(async move |weak, cx| {
+            let (zone, target, moved, failed, first_error, sources, undo) = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                for path in zone.items() {
+                    if let Err(error) = this.zone.add(path) {
+                        this.status = format!("Cannot restore staged path: {error}");
+                    }
+                }
+                this.operation_busy = false;
+                this.load_directory(target, true, cx);
+                for source in &sources {
+                    this.refresh_parent_of(source, cx);
+                }
+                if moved > 0 {
+                    this.last_move = undo;
+                    this.selected = this.last_move.as_ref()
+                        .and_then(|receipt| receipt.destination.clone());
+                }
+                this.status = match first_error {
+                    Some(details) => format!("{moved} moved, {failed} failed; failed items remain in Drop Zone. {details}"),
+                    None if moved == 1 => "Moved safely. Undo available in the inspector.".into(),
+                    None => format!("{moved} items moved safely. Batch Undo is not available."),
+                };
+                cx.notify();
+            });
+        }).detach();
+    }
+
     fn create_folder(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
             self.status = "Wait for the active operation to finish".into();
@@ -1421,6 +1491,7 @@ impl Render for Explorer {
             })))
             .child(Self::control("Stage", "stage", cx.listener(|this, _, _, cx| this.stage(cx))))
             .child(Self::control("Copy here", "paste", cx.listener(|this, _, _, cx| this.paste(cx))))
+            .child(Self::control("Move here", "move-here", cx.listener(|this, _, _, cx| this.move_staged(cx))))
             .child(Self::control("Cancel copy", "cancel-copy", cx.listener(|this, _, _, cx| {
                 this.cancel_copy(cx);
             })))

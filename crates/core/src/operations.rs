@@ -405,17 +405,29 @@ impl DropZone {
         control: &CopyControl,
         journal: &crate::operation_journal::OperationJournal,
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
-        self.copy_with_optional_journal(target, control, Some(journal))
+        self.transfer_with_optional_journal(Action::Copy, target, control, Some(journal))
+    }
+
+    /// Move staged items within one volume through the same durable audit
+    /// boundary as Copy. Windows MoveFileW refuses cross-volume moves and
+    /// occupied targets; never silently fall back to copy-then-delete.
+    pub fn move_to_audited(
+        &mut self,
+        target: &Path,
+        control: &CopyControl,
+        journal: &crate::operation_journal::OperationJournal,
+    ) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        self.transfer_with_optional_journal(Action::Move, target, control, Some(journal))
     }
 
     pub fn copy_to_with_control(
         &mut self, target: &Path, control: &CopyControl
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
-        self.copy_with_optional_journal(target, control, None)
+        self.transfer_with_optional_journal(Action::Copy, target, control, None)
     }
 
-    fn copy_with_optional_journal(
-        &mut self, target: &Path, control: &CopyControl,
+    fn transfer_with_optional_journal(
+        &mut self, action: Action, target: &Path, control: &CopyControl,
         journal: Option<&crate::operation_journal::OperationJournal>,
     ) -> Vec<(PathBuf, io::Result<Receipt>)> {
         let mut results = Vec::new();
@@ -423,7 +435,7 @@ impl DropZone {
         let mut queue = OperationQueue::default();
         for source in &sources {
             let destination = target.join(source.file_name().unwrap_or_default());
-            match Plan::prepare(Action::Copy, source, Some(&destination)) {
+            match Plan::prepare(action, source, Some(&destination)) {
                 Ok(plan) => queue.submit(plan),
                 Err(error) => {
                     self.sources.push(source.clone());
@@ -686,6 +698,80 @@ mod tests {
         assert!(result[0].1.is_err());
         assert_eq!(fs::read(&dst).unwrap(), b"existing");
         assert_eq!(fs::read(&src).unwrap(), b"original");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn drop_zone_move_is_audited_and_one_item_can_be_undone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_dir = tmp.path().join("source");
+        let target_dir = tmp.path().join("target");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&target_dir).unwrap();
+        let original = source_dir.join("project.txt");
+        let target = target_dir.join("project.txt");
+        fs::write(&original, b"preserve this document").unwrap();
+        let journal = crate::operation_journal::OperationJournal::open(
+            tmp.path().join("jobs.sqlite3")
+        ).unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&original).unwrap();
+
+        let mut outcomes = zone.move_to_audited(&target_dir, &CopyControl::default(), &journal);
+        let receipt = outcomes.remove(0).1.unwrap();
+        assert_eq!(receipt.action, Action::Move);
+        assert_eq!(fs::read(&target).unwrap(), b"preserve this document");
+        assert!(!original.exists());
+        assert!(zone.items().is_empty());
+        assert!(journal.unresolved(10).unwrap().is_empty());
+
+        OperationQueue::default().undo_completed_audited(&receipt, &journal).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"preserve this document");
+        assert!(!target.exists());
+        assert!(journal.unresolved(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn staged_move_collision_preserves_both_files_and_keeps_failed_item() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_dir = tmp.path().join("source");
+        let target_dir = tmp.path().join("target");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&target_dir).unwrap();
+        let original = source_dir.join("same.txt");
+        let target = target_dir.join("same.txt");
+        fs::write(&original, b"original").unwrap();
+        fs::write(&target, b"do not overwrite").unwrap();
+        let journal = crate::operation_journal::OperationJournal::open(
+            tmp.path().join("jobs.sqlite3")
+        ).unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&original).unwrap();
+        let result = zone.move_to_audited(&target_dir, &CopyControl::default(), &journal);
+        assert!(result[0].1.is_err());
+        assert_eq!(fs::read(&original).unwrap(), b"original");
+        assert_eq!(fs::read(&target).unwrap(), b"do not overwrite");
+        assert_eq!(zone.items(), &[fs::canonicalize(&original).unwrap()]);
+    }
+
+    #[test]
+    fn staged_move_refuses_to_run_without_writable_journal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("source.txt");
+        let target_dir = tmp.path().join("target");
+        fs::create_dir(&target_dir).unwrap();
+        fs::write(&original, b"safe").unwrap();
+        let db = tmp.path().join("jobs.sqlite3");
+        let journal = crate::operation_journal::OperationJournal::open(&db).unwrap();
+        fs::remove_file(&db).unwrap();
+        fs::write(&db, b"invalid sqlite bytes").unwrap();
+        let mut zone = DropZone::default();
+        zone.add(&original).unwrap();
+        let results = zone.move_to_audited(&target_dir, &CopyControl::default(), &journal);
+        assert!(results[0].1.is_err());
+        assert_eq!(fs::read(&original).unwrap(), b"safe");
+        assert!(!target_dir.join("source.txt").exists());
+        assert_eq!(zone.items().len(), 1);
     }
 
     #[test]
