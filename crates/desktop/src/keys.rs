@@ -81,10 +81,13 @@ impl Explorer {
     /// listing snapshot and sort change, never per frame.
     pub(crate) fn folder_view(&mut self, folder: &Path) -> Option<(Arc<browser::Listing>, Arc<Vec<usize>>)> {
         let listing = Arc::clone(self.directory_cache.get(folder)?);
+        // The quick filter applies to the focused pane's folder only.
+        let filter = if folder == self.pane_path(self.active_side()) { self.filter.clone() } else { String::new() };
         if let Some(view) = self.folder_views.get(folder) {
             if Arc::ptr_eq(&view.listing, &listing)
                 && view.spec == self.sort
                 && view.show_hidden == self.show_hidden
+                && view.filter == filter
             {
                 return Some((listing, Arc::clone(&view.indices)));
             }
@@ -93,11 +96,15 @@ impl Explorer {
         if !self.show_hidden {
             indices.retain(|&i| !listing.entries[i].hidden);
         }
+        if !filter.is_empty() {
+            indices.retain(|&i| listing.entries[i].name.to_lowercase().contains(&filter));
+        }
         let indices = Arc::new(indices);
         self.folder_views.insert(folder.to_path_buf(), FolderView {
             listing: Arc::clone(&listing),
             spec: self.sort,
             show_hidden: self.show_hidden,
+            filter,
             indices: Arc::clone(&indices),
         });
         Some((listing, indices))
@@ -125,6 +132,7 @@ impl Explorer {
                 return;
             }
             self.close_search();
+            self.clear_filter = !self.filter.is_empty();
         }
         self.anchor = select.clone();
         self.selected = select;
@@ -412,8 +420,10 @@ impl Explorer {
         self.address_editing = false;
         self.context_menu = None;
         self.confirm_recycle = None;
-        if self.search_active {
+        if self.search_active || !self.filter.is_empty() {
             self.close_search();
+            self.filter.clear();
+            self.search_query.clear();
             self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
             self.status = "Поиск закрыт".into();
         } else if had_popup {

@@ -573,7 +573,13 @@ impl Explorer {
                     div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
                         .text_color(rgb(TEXT_DIM)).text_size(px(12.))
                         .child(icon("fm/folder-fill.svg", BORDER_STRONG))
-                        .child(if listing.entries.is_empty() { "Папка пуста" } else { "Только скрытые файлы" })
+                        .child(if listing.entries.is_empty() {
+                            "Папка пуста".to_string()
+                        } else if !self.filter.is_empty() && folder == self.pane_path(self.active_side()) {
+                            format!("Нет имён, содержащих «{}». Enter — искать во вложенных папках", self.filter)
+                        } else {
+                            "Только скрытые файлы".to_string()
+                        })
                 ).into_any_element();
             }
             let handle = self.scroll_handle(&folder);
@@ -975,6 +981,10 @@ impl Explorer {
             .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
             .when_some(count, |this, count| this.child(items_label(count)))
+            .when(!self.filter.is_empty(), |this| this.child(
+                div().flex().items_center().gap_1().text_color(rgb(ACCENT))
+                    .child(small_icon("fm/search.svg", ACCENT))
+                    .child(format!("фильтр «{}» · Enter — во вложенных папках", self.filter))))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
             .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
                 .child(crate::messages::localize(&self.status)));
@@ -1299,6 +1309,12 @@ impl Explorer {
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.clear_filter {
+            self.clear_filter = false;
+            self.filter.clear();
+            self.search_query.clear();
+            self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
         // Do not compete with SQLite search for I/O while displaying results.
         if !self.search_active {
             self.load_visible_directories(cx);

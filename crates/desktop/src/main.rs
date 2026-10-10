@@ -115,6 +115,7 @@ struct FolderView {
     listing: Arc<browser::Listing>,
     spec: SortSpec,
     show_hidden: bool,
+    filter: String,
     indices: Arc<Vec<usize>>,
 }
 
@@ -176,6 +177,10 @@ struct Explorer {
     /// Fixed end of a Shift range.
     anchor: Option<PathBuf>,
     typeahead: String,
+    /// Lower-case name filter for the focused folder ("" = none).
+    filter: String,
+    /// Set when navigation should reset the filter at the next render.
+    clear_filter: bool,
     workspace_names: Vec<String>,
     workspace_input: Entity<InputState>,
     saving_workspace: bool,
@@ -209,7 +214,7 @@ impl Explorer {
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск в папке…"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр · Enter — поиск глубже"));
         let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Комментарий к сохранению…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фактический автор (необязательно)…"));
@@ -260,11 +265,23 @@ impl Explorer {
                     window.focus(&handle, cx);
             }
         });
+        // Typing filters the current folder instantly; Enter searches the
+        // indexed subfolders as well.
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.search_query = input.read(cx).value().to_string();
-                this.search_active = !this.search_query.trim().is_empty();
-                this.update_search(cx);
+            match event {
+                InputEvent::Change => {
+                    this.search_query = input.read(cx).value().to_string();
+                    this.filter = this.search_query.trim().to_lowercase();
+                    if this.filter.is_empty() && this.search_active {
+                        this.close_search();
+                    }
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } if !this.search_query.trim().is_empty() => {
+                    this.search_active = true;
+                    this.update_search(cx);
+                }
+                _ => {}
             }
         });
         let operation_journal = OperationJournal::open(OperationJournal::default_path())
@@ -318,6 +335,8 @@ impl Explorer {
             marked: Vec::new(),
             anchor: None,
             typeahead: String::new(),
+            filter: String::new(),
+            clear_filter: false,
             workspace_names: Vec::new(),
             workspace_input,
             saving_workspace: false,
