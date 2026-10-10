@@ -8,6 +8,7 @@ use filemanager_core::operation_journal::{InterruptedAction, OperationJournal};
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{actions, div, uniform_list, prelude::*, px, rgb, AnyElement, App, Context, Entity, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, WindowOptions};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::Root;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -915,7 +916,7 @@ impl Explorer {
             ("Downloads", home.join("Downloads")),
             ("Desktop", home.join("Desktop")),
         ];
-        let mut side = div().w(px(175.)).h_full().flex().flex_col().p_3().gap_2()
+        let mut side = div().w_full().h_full().min_h_0().overflow_y_scroll().flex().flex_col().p_3().gap_2()
             .bg(rgb(0x1A2230)).text_color(rgb(0xCFD9E5)).child("PLACES");
         for (i, (name, path)) in destinations.into_iter().enumerate() {
             if !path.is_dir() { continue; }
@@ -1196,7 +1197,7 @@ impl Explorer {
 
     fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.operation_review {
-            let mut view = div().id("operation-review").w(px(320.)).h_full()
+            let mut view = div().id("operation-review").w_full().h_full()
                 .min_h_0().overflow_y_scroll().flex().flex_col().gap_2()
                 .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
                 .child("UNFINISHED FILE OPERATIONS")
@@ -1220,7 +1221,7 @@ impl Explorer {
             }
             return view.into_any_element();
         }
-        let mut box_ = div().id("inspector-panel").w(px(260.)).h_full().min_h_0()
+        let mut box_ = div().id("inspector-panel").w_full().h_full().min_h_0()
             .overflow_y_scroll().flex().flex_col().gap_2()
             .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
             .child("PREVIEW & HISTORY");
@@ -1535,17 +1536,35 @@ impl Render for Explorer {
                     cx.listener(|this, _, _, cx| this.create_folder(cx))))
         } else { searchbar };
 
-        let mut body = div().flex_1().flex().overflow_hidden()
-            .child(self.sidebar(cx));
+        // Native GPUI divider handles; no filesystem IO runs while resizing.
+        // Each slot keeps its own width as tabs and split mode change.
+        let mut panels = h_resizable("filemanager-main-panels")
+            .child(
+                resizable_panel().size(px(175.)).size_range(px(135.)..px(340.))
+                    .flex_none().child(self.sidebar(cx))
+            );
         if self.search_active {
-            body = body.child(self.search_results_panel(cx));
+            panels = panels.child(
+                resizable_panel().size_range(px(300.)..px(2600.))
+                    .child(self.search_results_panel(cx))
+            );
         } else {
-            body = body.child(self.pane(Side::Left, cx));
+            panels = panels.child(
+                resizable_panel().size_range(px(260.)..px(2600.))
+                    .child(self.pane(Side::Left, cx))
+            );
             if self.browser.active().right.is_some() {
-                body = body.child(self.pane(Side::Right, cx));
+                panels = panels.child(
+                    resizable_panel().size_range(px(260.)..px(2600.))
+                        .child(self.pane(Side::Right, cx))
+                );
             }
         }
-        body = body.child(self.inspector(cx));
+        panels = panels.child(
+            resizable_panel().size(px(270.)).size_range(px(215.)..px(540.))
+                .flex_none().child(self.inspector(cx))
+        );
+        let body = div().flex_1().min_h_0().overflow_hidden().child(panels);
         let mut root = div().relative().size_full().flex().flex_col().bg(rgb(0x222C3A))
             .text_size(px(13.))
             .key_context("Filemanager")
