@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find, AddressBar, NextTab, RenameSelected, NewFolder]);
+actions!(filemanager, [Back, Up, NewTab, CloseTab, Split, Refresh, Stage, Find, AddressBar, NextTab, RenameSelected, NewFolder, DismissOverlay]);
 
 #[derive(Clone, Copy)]
 enum Side { Left, Right }
@@ -1470,6 +1470,26 @@ impl Explorer {
         cx.notify();
     }
 
+    /// Escape never submits a filesystem change or silently cancels a copy.
+    /// It only dismisses transient GUI state and pending Recycle approval.
+    fn key_dismiss_overlay(
+        &mut self, _: &DismissOverlay, _: &mut Window, cx: &mut Context<Self>
+    ) {
+        let had_popup = self.renaming || self.creating_folder
+            || self.context_menu.is_some() || self.confirm_recycle.is_some();
+        self.renaming = false;
+        self.creating_folder = false;
+        self.context_menu = None;
+        self.confirm_recycle = None;
+        if self.search_active {
+            self.close_search();
+            self.status = "Search closed".into();
+        } else if had_popup {
+            self.status = "Action dismissed; no files were changed".into();
+        }
+        cx.notify();
+    }
+
     fn key_address(&mut self, _: &AddressBar, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_address(window, cx);
     }
@@ -1692,6 +1712,7 @@ impl Render for Explorer {
             .text_size(px(13.))
             .key_context("Filemanager")
             .on_action(cx.listener(Self::key_address))
+            .on_action(cx.listener(Self::key_dismiss_overlay))
             .on_action(cx.listener(Self::key_next_tab))
             .on_action(cx.listener(Self::key_rename))
             .on_action(cx.listener(Self::key_new_folder))
@@ -1720,6 +1741,7 @@ fn main() {
             KeyBinding::new("ctrl-t", NewTab, Some("Filemanager")),
             KeyBinding::new("ctrl-f", Find, Some("Filemanager")),
             KeyBinding::new("ctrl-l", AddressBar, Some("Filemanager")),
+            KeyBinding::new("escape", DismissOverlay, Some("Filemanager")),
             KeyBinding::new("ctrl-tab", NextTab, Some("Filemanager")),
             KeyBinding::new("f2", RenameSelected, Some("Filemanager")),
             KeyBinding::new("ctrl-shift-n", NewFolder, Some("Filemanager")),
