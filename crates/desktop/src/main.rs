@@ -853,7 +853,7 @@ impl Explorer {
 
     fn search_results_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut rows = div().id("search-results").flex_1().min_w_0().min_h_0()
-            .flex().flex_col().overflow_y_scroll().p_3().gap_1()
+            .flex().flex_col().overflow_y_scrollbar().p_3().gap_1()
             .bg(rgb(0x222C3A))
             .child(div().p_2().text_color(rgb(0xE9EFF7))
                 .child(format!("Filename search · {}", self.search_query)));
@@ -976,7 +976,7 @@ impl Explorer {
             ("Downloads", home.join("Downloads")),
             ("Desktop", home.join("Desktop")),
         ];
-        let mut side = div().w_full().h_full().min_h_0().overflow_y_scroll().flex().flex_col().p_3().gap_2()
+        let mut side = div().w_full().h_full().min_h_0().overflow_y_scrollbar().flex().flex_col().p_3().gap_2()
             .bg(rgb(0x1A2230)).text_color(rgb(0xCFD9E5)).child("PLACES");
         for (i, (name, path)) in destinations.into_iter().enumerate() {
             if !path.is_dir() { continue; }
@@ -1094,7 +1094,7 @@ impl Explorer {
         cx.notify();
     }
 
-    fn directory_row(&self, entry: &browser::Entry, side: Side, cx: &mut Context<Self>) -> gpui::Div {
+    fn directory_row(&self, entry: &browser::Entry, side: Side, cx: &mut Context<Self>) -> AnyElement {
         let path = entry.path.clone();
         let label = if entry.is_directory {
             format!("▸ {}", entry.name)
@@ -1136,6 +1136,7 @@ impl Explorer {
                     this.select_or_open(path.clone(), side, cx);
                 }
             }))
+            .into_any_element()
     }
 
     fn column(&self, folder: PathBuf, side: Side, cx: &mut Context<Self>) -> AnyElement {
@@ -1165,7 +1166,7 @@ impl Explorer {
                     .child(
                         uniform_list(
                             id, count,
-                            cx.processor(move |this, range, _window, cx| {
+                            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                                 range.map(|index| {
                                     this.directory_row(&listing.entries[index], side, cx)
                                 }).collect::<Vec<_>>()
@@ -1192,7 +1193,7 @@ impl Explorer {
         };
         let mut columns = div()
             .id(format!("columns-{}", if matches!(side, Side::Left) { "left" } else { "right" }))
-            .flex_1().min_h_0().flex().overflow_x_scroll();
+            .flex_1().min_h_0().flex().overflow_x_scrollbar();
         if self.miller_mode {
             let folders = pane.columns(3);
             // Scroll horizontally on narrow windows, instead of squeezing
@@ -1298,7 +1299,7 @@ impl Explorer {
     fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.operation_review {
             let mut view = div().id("operation-review").w_full().h_full()
-                .min_h_0().overflow_y_scroll().flex().flex_col().gap_2()
+                .min_h_0().overflow_y_scrollbar().flex().flex_col().gap_2()
                 .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
                 .child("UNFINISHED FILE OPERATIONS")
                 .child("Do not retry blindly. Verify source and destination in Windows Explorer.")
@@ -1322,7 +1323,7 @@ impl Explorer {
             return view.into_any_element();
         }
         let mut box_ = div().id("inspector-panel").w_full().h_full().min_h_0()
-            .overflow_y_scroll().flex().flex_col().gap_2()
+            .overflow_y_scrollbar().flex().flex_col().gap_2()
             .p_3().bg(rgb(0x1A2230)).text_color(rgb(0xE6EDF6))
             .child("PREVIEW & HISTORY")
             .child(Self::control("Refresh details", "refresh-inspector",
@@ -1370,7 +1371,7 @@ impl Explorer {
                 if let Some((kind, description)) = &self.inspector_preview {
                     box_ = box_.child(format!("{kind} preview:"))
                         .child(div().id("preview-scroll").max_h(px(170.))
-                            .overflow_y_scroll().child(description.clone()));
+                            .overflow_y_scrollbar().child(description.clone()));
                 }
                 if self.journal.is_some() {
                     let history = &self.inspector_history;
@@ -1438,7 +1439,8 @@ impl Explorer {
         self.address_input.update(cx, |input, cx| {
             input.set_value(path, window, cx);
         });
-        window.focus(&self.address_input.focus_handle(cx));
+        let focus = self.address_input.focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -1512,12 +1514,14 @@ impl Explorer {
 
     fn key_new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
         self.creating_folder = true;
-        window.focus(&self.folder_input.focus_handle(cx));
+        let focus = self.folder_input.focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
     fn key_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.search_input.focus_handle(cx));
+        let focus = self.search_input.focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -1560,7 +1564,7 @@ impl Render for Explorer {
         // Tabs and toolbar actions stay reachable on small windows.
         // Scrolling is preferable to letting controls disappear off-screen.
         let mut tabs = div().w_full().flex().gap_2().p_2()
-            .overflow_x_scroll().bg(rgb(0x141C27));
+            .overflow_x_scrollbar().bg(rgb(0x141C27));
         for (i, tab) in self.browser.tabs.iter().enumerate() {
             let active = i == self.browser.active_tab;
             tabs = tabs.child(
@@ -1583,7 +1587,7 @@ impl Render for Explorer {
         }
         tabs = tabs.child(Self::control("+", "add-tab", cx.listener(|this, _, _, cx| this.add_tab(cx))));
         let toolbar = div().w_full().flex().gap_2().p_2()
-            .overflow_x_scroll().bg(rgb(0x273241))
+            .overflow_x_scrollbar().bg(rgb(0x273241))
             .child(Self::control("Close tab", "close-tab", cx.listener(|this, _, _, cx| {
                 let index = this.browser.active_tab;
                 this.browser.close_tab(index);
