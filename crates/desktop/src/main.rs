@@ -1564,7 +1564,9 @@ impl Render for Explorer {
         self.load_selected_details(cx);
         // Tabs and toolbar actions stay reachable on small windows.
         // Scrolling is preferable to letting controls disappear off-screen.
-        let mut tabs = div().w_full().flex().gap_2().p_2()
+        // The scrollbar wrapper is size_full by default; a fixed height keeps
+        // these bars from taking the space of the file list.
+        let mut tabs = div().w_full().h(px(48.)).flex_none().flex().items_center().gap_2().px_2()
             .overflow_x_scrollbar().bg(rgb(0x141C27));
         for (i, tab) in self.browser.tabs.iter().enumerate() {
             let active = i == self.browser.active_tab;
@@ -1587,7 +1589,7 @@ impl Render for Explorer {
             );
         }
         tabs = tabs.child(Self::control("+", "add-tab", cx.listener(|this, _, _, cx| this.add_tab(cx))));
-        let toolbar = div().w_full().flex().gap_2().p_2()
+        let toolbar = div().w_full().h(px(48.)).flex_none().flex().items_center().gap_2().px_2()
             .overflow_x_scrollbar().bg(rgb(0x273241))
             .child(Self::control("Close tab", "close-tab", cx.listener(|this, _, _, cx| {
                 let index = this.browser.active_tab;

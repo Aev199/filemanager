@@ -1,7 +1,7 @@
 //! Durable filename index. Only paths and names enter SQLite: no file bytes,
 //! document content, old file versions or hashes of contents are persisted.
 use crate::search::subsequence_score;
-use crate::path_utils::normalize_extended_path;
+use crate::path_utils::{canonicalize_parent, normalize_extended_path};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::io;
@@ -67,6 +67,8 @@ impl PersistentIndex {
     pub fn open(database: impl AsRef<Path>) -> io::Result<Self> {
         let database = database.as_ref().to_path_buf();
         if let Some(parent) = database.parent() { fs::create_dir_all(parent)?; }
+        // Compared against walked paths, which descend from a canonical root.
+        let database = canonicalize_parent(&database);
         let index = Self { database };
         index.connection()?.execute_batch("
             PRAGMA foreign_keys = ON;
@@ -195,7 +197,7 @@ impl PersistentIndex {
             io::Error::new(io::ErrorKind::NotFound, "Index root was not initialized")
         })?;
         let mut ordered: Vec<PathBuf> = changed.iter()
-            .map(|path| normalize_extended_path(path))
+            .map(|path| canonicalize_parent(path))
             .filter(|path| path.starts_with(root_path) && path.as_path() != root_path)
             .filter(|path| {
                 let relative = path.strip_prefix(root_path).ok();
@@ -375,7 +377,7 @@ mod tests {
         let index = PersistentIndex::open(&db).unwrap();
         assert_eq!(index.refresh(&root, 100).unwrap().entries, 1);
         let reopened = PersistentIndex::open(&db).unwrap();
-        assert_eq!(reopened.query(&root, "расмод", 10).unwrap(), vec![path]);
+        assert_eq!(reopened.query(&root, "расмод", 10).unwrap(), vec![canonicalize_parent(&path)]);
         assert!(!fs::read(db).unwrap().windows(31)
             .any(|bytes| bytes == b"PRIVATE_DOCUMENT_CONTENT_MARKER"));
     }
@@ -503,7 +505,7 @@ mod tests {
         fs::write(&path, b"content").unwrap();
         let absolute = fs::canonicalize(&path).unwrap();
         index.reconcile_paths(&root, &[absolute], 100).unwrap();
-        assert_eq!(index.query(&root, "мод", 10).unwrap(), vec![path]);
+        assert_eq!(index.query(&root, "мод", 10).unwrap(), vec![canonicalize_parent(&path)]);
     }
 
     #[test]
