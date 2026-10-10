@@ -834,10 +834,10 @@ impl Explorer {
                         .child(text_button("inspector-copy-path", "Копировать путь", ButtonKind::Ghost)
                             .on_click(cx.listener(move |this, _, _, cx| this.copy_path(&copy_target, cx))))
                 );
-                if self.last_move.is_some() {
+                if let Some(undo) = self.undo_stack.last() {
                     panel = panel.child(
-                        text_button("undo-move", "Отменить последнее переименование", ButtonKind::Ghost)
-                            .on_click(cx.listener(|this, _, _, cx| this.undo_move(cx)))
+                        text_button("undo-last", format!("Отменить: {}", undo.label), ButtonKind::Ghost)
+                            .on_click(cx.listener(|this, _, _, cx| this.undo_last(cx)))
                     );
                 }
                 panel = panel.child(self.preview_section(entry));
@@ -1090,6 +1090,15 @@ impl Explorer {
                 let copy_target = folder.clone();
                 let tab_target = folder.clone();
                 let (f1, f2, f3, f4) = (folder.clone(), folder.clone(), folder.clone(), folder.clone());
+                if let Some(undo) = self.undo_stack.last() {
+                    list = list
+                        .child(Self::menu_item("m-undo", "fm/undo.svg", format!("Отменить: {}", undo.label), "Ctrl+Z", false, true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.context_menu = None;
+                                this.undo_last(cx);
+                            })))
+                        .child(Self::separator());
+                }
                 list = list
                     .child(Self::menu_item("m-new-folder", "fm/folder-plus.svg", "Новая папка", "Ctrl+Shift+N", false, true)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -1371,6 +1380,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::key_clipboard_copy))
             .on_action(cx.listener(Self::key_clipboard_cut))
             .on_action(cx.listener(Self::key_clipboard_paste))
+            .on_action(cx.listener(Self::key_undo))
             .on_action(cx.listener(Self::key_extend_next))
             .on_action(cx.listener(Self::key_extend_prev))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {

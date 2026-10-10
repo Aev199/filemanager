@@ -72,6 +72,24 @@ struct Transfer {
 #[derive(Clone, Copy)]
 enum ConflictChoice { Skip, KeepBoth, Cancel }
 
+/// How to reverse one completed user action.
+enum UndoEntry {
+    /// Renames and moves: moved back, newest first.
+    Moves(Vec<Receipt>),
+    /// Copies and new folders: sent to the Recycle Bin.
+    Created(Vec<PathBuf>),
+    /// Items sent to the Recycle Bin at `at` (Unix seconds): restored.
+    Recycled { paths: Vec<PathBuf>, at: i64 },
+}
+
+struct Undo {
+    entry: UndoEntry,
+    /// Shown as "Отменить: …".
+    label: String,
+}
+
+const UNDO_LIMIT: usize = 50;
+
 /// Internal name of the session restored at startup.
 const SESSION_WORKSPACE: &str = "Default";
 
@@ -136,7 +154,7 @@ struct Explorer {
     folder_input: Entity<InputState>,
     creating_folder: bool,
     renaming: bool,
-    last_move: Option<Receipt>,
+    undo_stack: Vec<Undo>,
     directory_cache: HashMap<PathBuf, Arc<browser::Listing>>,
     directory_loading: HashMap<PathBuf, u64>,
     directory_errors: HashMap<PathBuf, String>,
@@ -302,7 +320,7 @@ impl Explorer {
             rename_input, folder_input,
             renaming: false,
             creating_folder: false,
-            last_move: None,
+            undo_stack: Vec::new(),
             directory_cache: HashMap::new(),
             directory_loading: HashMap::new(),
             directory_errors: HashMap::new(),
@@ -664,7 +682,10 @@ impl Explorer {
             let first_error = results.iter().find_map(|(path, result)| {
                 result.as_ref().err().map(|error| format!("{}: {error}", path.display()))
             });
-            (zone, target, ok, errors, first_error)
+            let created: Vec<PathBuf> = results.iter()
+                .filter_map(|(_, result)| result.as_ref().ok().and_then(|r| r.destination.clone()))
+                .collect();
+            (zone, target, ok, errors, first_error, created)
         });
         // UI heartbeat reads atomic byte progress without touching source
         // files and without blocking the rendering thread.
@@ -685,7 +706,7 @@ impl Explorer {
             }
         }).detach();
         cx.spawn(async move |weak, cx| {
-            let (zone, target, ok, errors, first_error) = task.await;
+            let (zone, target, ok, errors, first_error, created) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 // Failed Drop Zone items stay staged; staging done meanwhile is kept.
                 for pending in zone.items().iter().filter(|_| restore_failed) {
@@ -696,9 +717,13 @@ impl Explorer {
                 this.copy_in_progress = false;
                 this.copy_control = None;
                 this.load_directory(target, true, cx);
+                if !created.is_empty() {
+                    let label = format!("копирование ({})", created.len());
+                    this.push_undo(UndoEntry::Created(created), label);
+                }
                 this.status = match first_error {
                     Some(details) => format!("Скопировано: {ok}, ошибок: {errors}. Первая ошибка: {details}"),
-                    None => format!("Скопировано: {ok}"),
+                    None => format!("Скопировано: {ok}. Ctrl+Z — отменить."),
                 };
                 cx.notify();
             });
@@ -730,17 +755,14 @@ impl Explorer {
                 .filter(|(_, result)| result.is_ok())
                 .map(|(path, _)| path.clone())
                 .collect::<Vec<_>>();
-            // A single atomic rename has safe Undo. Batch undo is not yet
-            // implemented: never promise it for partially successful batches.
-            let undo = if results.len() == 1 {
-                results[0].1.as_ref().ok().cloned()
-            } else {
-                None
-            };
-            (zone, target, moved, failed, first_error, sources, undo)
+            // Every completed move can be reversed, newest first.
+            let receipts: Vec<Receipt> = results.iter()
+                .filter_map(|(_, result)| result.as_ref().ok().cloned())
+                .collect();
+            (zone, target, moved, failed, first_error, sources, receipts)
         });
         cx.spawn(async move |weak, cx| {
-            let (zone, target, moved, failed, first_error, sources, undo) = task.await;
+            let (zone, target, moved, failed, first_error, sources, receipts) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 for path in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(path) {
@@ -753,14 +775,17 @@ impl Explorer {
                     this.refresh_parent_of(source, cx);
                 }
                 if moved > 0 {
-                    this.last_move = undo;
-                    this.selected = this.last_move.as_ref()
-                        .and_then(|receipt| receipt.destination.clone());
+                    this.selected = receipts.last().and_then(|receipt| receipt.destination.clone());
+                    let label = if moved == 1 {
+                        format!("перенос «{}»", browser::display_name(&receipts[0].source))
+                    } else {
+                        format!("перенос ({moved})")
+                    };
+                    this.push_undo(UndoEntry::Moves(receipts), label);
                 }
                 this.status = match first_error {
                     Some(details) => format!("Перемещено: {moved}, ошибок: {failed}. {details}"),
-                    None if moved == 1 => "Перемещено. Отмена доступна в панели сведений.".into(),
-                    None => format!("Перемещено: {moved}. Пакетная отмена пока недоступна."),
+                    None => format!("Перемещено: {moved}. Ctrl+Z — отменить."),
                 };
                 cx.notify();
             });
@@ -810,6 +835,10 @@ impl Explorer {
                         this.creating_folder = false;
                         if let Some(ref dest) = receipt.destination {
                             this.refresh_parent_of(dest, cx);
+                        }
+                        if let Some(dest) = receipt.destination.clone() {
+                            let label = format!("создание папки «{}»", browser::display_name(&dest));
+                            this.push_undo(UndoEntry::Created(vec![dest]), label);
                         }
                         this.selected = receipt.destination;
                         this.status = "Папка создана".into();
@@ -886,7 +915,8 @@ impl Explorer {
                             this.refresh_parent_of(dest, cx);
                         }
                         this.selected = receipt.destination.clone();
-                        this.last_move = Some(receipt);
+                        let label = format!("переименование «{}»", browser::display_name(&receipt.source));
+                        this.push_undo(UndoEntry::Moves(vec![receipt]), label);
                         this.renaming = false;
                         this.status = "Переименовано. Отмена доступна до следующего действия.".into();
                     }
@@ -897,47 +927,87 @@ impl Explorer {
         }).detach();
     }
 
-    fn undo_move(&mut self, cx: &mut Context<Self>) {
+    fn push_undo(&mut self, entry: UndoEntry, label: String) {
+        self.undo_stack.push(Undo { entry, label });
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// Ctrl+Z: reverses the newest action. Moves go back through the
+    /// audited queue (refused if anything changed since), copies and new
+    /// folders go to the Recycle Bin, deletions come back from it.
+    fn undo_last(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
         }
-        let Some(receipt) = self.last_move.take() else {
+        let Some(undo) = self.undo_stack.pop() else {
             self.status = "Нечего отменять".into();
             cx.notify();
             return;
         };
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.last_move = Some(receipt);
+            self.undo_stack.push(undo);
             self.status = "Отмена отклонена: журнал операций недоступен".into();
             cx.notify();
             return;
         };
         self.operation_busy = true;
+        self.status = format!("Отмена: {}…", undo.label);
+        let label = undo.label.clone();
         let task = cx.background_spawn(async move {
-            let queue = OperationQueue::default();
-            let result = queue.undo_completed_audited(&receipt, &audit);
-            (receipt, result)
-        });
-        cx.spawn(async move |weak, cx| {
-            let (receipt, result) = task.await;
-            let _ = weak.update(cx, |this, cx| {
-                this.operation_busy = false;
-                match result {
-                    Ok(()) => {
-                        this.refresh_parent_of(&receipt.source, cx);
-                        if let Some(ref dest) = receipt.destination {
-                            this.refresh_parent_of(dest, cx);
+            let mut touched: Vec<PathBuf> = Vec::new();
+            let mut errors: Vec<String> = Vec::new();
+            match undo.entry {
+                UndoEntry::Moves(receipts) => {
+                    let queue = OperationQueue::default();
+                    for receipt in receipts.iter().rev() {
+                        match queue.undo_completed_audited(receipt, &audit) {
+                            Ok(()) => {
+                                touched.push(receipt.source.clone());
+                                touched.extend(receipt.destination.clone());
+                            }
+                            Err(error) => errors.push(format!("{}: {error}", browser::display_name(&receipt.source))),
                         }
-                        this.selected = Some(receipt.source);
-                        this.status = "Действие отменено".into();
-                    }
-                    Err(error) => {
-                        this.status = format!("Отмена отклонена: {error}");
-                        this.last_move = Some(receipt);
                     }
                 }
+                UndoEntry::Created(paths) => {
+                    let mut queue = OperationQueue::default();
+                    for path in &paths {
+                        match Plan::prepare(Action::Recycle, path, None) {
+                            Ok(plan) => queue.submit(plan),
+                            Err(error) => errors.push(format!("{}: {error}", browser::display_name(path))),
+                        }
+                    }
+                    for (plan, result) in queue.run_all_audited(&CopyControl::default(), &audit) {
+                        match result {
+                            Ok(_) => touched.push(plan.source),
+                            Err(error) => errors.push(format!("{}: {error}", browser::display_name(&plan.source))),
+                        }
+                    }
+                }
+                UndoEntry::Recycled { paths, at } => {
+                    match filemanager_core::recycle_bin::restore(&paths, at) {
+                        Ok(_) => touched.extend(paths),
+                        Err(error) => errors.push(error.to_string()),
+                    }
+                }
+            }
+            (touched, errors)
+        });
+        cx.spawn(async move |weak, cx| {
+            let (touched, errors) = task.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.operation_busy = false;
+                for path in &touched {
+                    this.refresh_parent_of(path, cx);
+                }
+                this.status = match errors.first() {
+                    None => format!("Отменено: {label}"),
+                    Some(error) => format!("Отмена выполнена не полностью ({label}): {error}"),
+                };
                 cx.notify();
             });
         }).detach();
@@ -999,6 +1069,7 @@ impl Explorer {
         };
         self.operation_busy = true;
         self.status = "Удаление в Корзину…".into();
+        let started = filemanager_core::recycle_bin::now();
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
             for (_, plan) in plans {
@@ -1012,10 +1083,12 @@ impl Explorer {
                 this.operation_busy = false;
                 let mut done = 0;
                 let mut first_error = None;
+                let mut recycled = Vec::new();
                 for (plan, result) in &results {
                     match result {
                         Ok(receipt) => {
                             done += 1;
+                            recycled.push(receipt.source.clone());
                             this.refresh_parent_of(&receipt.source, cx);
                         }
                         Err(error) => {
@@ -1023,8 +1096,16 @@ impl Explorer {
                         }
                     }
                 }
+                if !recycled.is_empty() {
+                    let label = if recycled.len() == 1 {
+                        format!("удаление «{}»", browser::display_name(&recycled[0]))
+                    } else {
+                        format!("удаление ({})", recycled.len())
+                    };
+                    this.push_undo(UndoEntry::Recycled { paths: recycled, at: started }, label);
+                }
                 this.status = match first_error {
-                    None if done == 1 => "Перемещено в Корзину".into(),
+                    None if done == 1 => "Перемещено в Корзину. Ctrl+Z — восстановить.".into(),
                     None => format!("Перемещено в Корзину: {done}"),
                     Some(error) => format!("В Корзину: {done}, ошибка: {error}"),
                 };

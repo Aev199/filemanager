@@ -15,7 +15,7 @@ actions!(filemanager, [
     AddressBar, RenameSelected, NewFolder, DismissOverlay, SelectNext, SelectPrev,
     SelectFirst, SelectLast, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
-    CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste,
+    CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -59,6 +59,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-c", ClipboardCopy, Some(CONTEXT)),
         KeyBinding::new("ctrl-x", ClipboardCut, Some(CONTEXT)),
         KeyBinding::new("ctrl-v", ClipboardPaste, Some(CONTEXT)),
+        KeyBinding::new("ctrl-z", UndoLast, Some(CONTEXT)),
     ]);
 }
 
@@ -429,6 +430,14 @@ impl Explorer {
     pub(crate) fn key_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(true), cx); }
 
     pub(crate) fn key_open(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+        // Enter confirms an open Recycle dialog instead of opening a file.
+        if self.confirm_recycle.is_some() {
+            self.recycle(cx);
+            return;
+        }
+        if self.pending_transfer.is_some() {
+            return;
+        }
         if let Some(entry) = self.selected_entry() {
             let side = self.active_side();
             self.open_entry(entry.path, entry.is_directory, side, cx);
@@ -505,6 +514,8 @@ impl Explorer {
     pub(crate) fn key_clipboard_copy(&mut self, _: &ClipboardCopy, _: &mut Window, cx: &mut Context<Self>) { self.clipboard_put(false, cx); }
     pub(crate) fn key_clipboard_cut(&mut self, _: &ClipboardCut, _: &mut Window, cx: &mut Context<Self>) { self.clipboard_put(true, cx); }
     pub(crate) fn key_clipboard_paste(&mut self, _: &ClipboardPaste, _: &mut Window, cx: &mut Context<Self>) { self.clipboard_paste(cx); }
+
+    pub(crate) fn key_undo(&mut self, _: &UndoLast, _: &mut Window, cx: &mut Context<Self>) { self.undo_last(cx); }
 
     pub(crate) fn key_extend_next(&mut self, _: &ExtendNext, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(1, cx); }
     pub(crate) fn key_extend_prev(&mut self, _: &ExtendPrev, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(-1, cx); }
