@@ -21,7 +21,7 @@ pub fn restore(paths: &[PathBuf], since: i64) -> io::Result<usize> {
     for path in paths {
         let newest = items.iter()
             // Clock granularity differs between platforms; allow 2 s slack.
-            .filter(|item| item.original_path() == *path && item.time_deleted >= since - 2)
+            .filter(|item| is_entry_for(&item.original_parent, &item.name, path) && item.time_deleted >= since - 2)
             .max_by_key(|item| item.time_deleted);
         match newest {
             Some(item) => chosen.push(item.clone()),
@@ -40,6 +40,25 @@ pub fn restore(paths: &[PathBuf], since: i64) -> io::Result<usize> {
     let count = chosen.len();
     trash::os_limited::restore_all(chosen).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(count)
+}
+
+/// Whether a Recycle Bin entry (parent folder + display name) is `path`.
+/// Windows reports the *display* name, which hides the extension of known
+/// file types by default ("отчёт" for "отчёт.pdf"), and compares paths
+/// case-insensitively.
+fn is_entry_for(parent: &std::path::Path, name: &std::ffi::OsStr, path: &std::path::Path) -> bool {
+    let same = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| {
+        if cfg!(windows) {
+            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        } else {
+            a == b
+        }
+    };
+    let Some(expected_parent) = path.parent() else { return false };
+    let parents_match = same(parent.as_os_str(), expected_parent.as_os_str());
+    let name_matches = path.file_name().is_some_and(|file| same(name, file))
+        || (cfg!(windows) && path.file_stem().is_some_and(|stem| same(name, stem)));
+    parents_match && name_matches
 }
 
 #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
@@ -65,6 +84,15 @@ mod tests {
         assert!(!file.exists());
         assert_eq!(restore(std::slice::from_ref(&file), since).unwrap(), 1);
         assert_eq!(std::fs::read(&file).unwrap(), b"data");
+    }
+
+    #[test]
+    fn entries_match_by_folder_and_name() {
+        let path = std::path::Path::new("/work/отчёт.pdf");
+        assert!(is_entry_for(std::path::Path::new("/work"), std::ffi::OsStr::new("отчёт.pdf"), path));
+        assert!(!is_entry_for(std::path::Path::new("/other"), std::ffi::OsStr::new("отчёт.pdf"), path));
+        // Windows shows "отчёт" when extensions of known types are hidden.
+        assert_eq!(is_entry_for(std::path::Path::new("/work"), std::ffi::OsStr::new("отчёт"), path), cfg!(windows));
     }
 
     #[test]
