@@ -1069,9 +1069,10 @@ impl Explorer {
     }
 
     fn column(&self, folder: PathBuf, side: Side, cx: &mut Context<Self>) -> AnyElement {
+        // The containing GPUI resizable panel owns Miller column widths.
+        // In list mode the file list simply fills its available pane.
         let mut column = div()
-            .w(px(if self.miller_mode { 235. } else { 750. }))
-            .h_full().min_h_0().flex().flex_col()
+            .w_full().h_full().min_h_0().flex().flex_col()
             .border_r_1().border_color(rgb(0x364252))
             .child(div().p_3().bg(rgb(0x293544))
                 .text_color(rgb(0xF5F7F9))
@@ -1119,10 +1120,34 @@ impl Explorer {
             Side::Left => &tab.left,
             Side::Right => tab.right.as_ref().unwrap_or(&tab.left),
         };
-        let mut columns = div().id(format!("columns-{}", if matches!(side, Side::Left) { "left" } else { "right" })).flex_1().flex().overflow_x_scroll();
-        let folders = if self.miller_mode { pane.columns(3) } else { vec![pane.path.clone()] };
-        for folder in folders {
-            columns = columns.child(self.column(folder, side, cx));
+        let mut columns = div()
+            .id(format!("columns-{}", if matches!(side, Side::Left) { "left" } else { "right" }))
+            .flex_1().min_h_0().flex().overflow_x_scroll();
+        if self.miller_mode {
+            let folders = pane.columns(3);
+            // Scroll horizontally on narrow windows, instead of squeezing
+            // all columns below their readable minimum. Resizing is handled
+            // entirely in GPUI and does not invalidate directory snapshots.
+            let minimum_width = px(200. * folders.len() as f32);
+            let group_id = format!(
+                "miller-columns-{}-{}",
+                self.browser.active_tab,
+                if matches!(side, Side::Left) { "left" } else { "right" },
+            );
+            let mut group = h_resizable(group_id);
+            for folder in folders {
+                group = group.child(
+                    resizable_panel()
+                        .size(px(235.))
+                        .size_range(px(200.)..px(1100.))
+                        .child(self.column(folder, side, cx))
+                );
+            }
+            columns = columns.child(
+                div().w_full().min_w(minimum_width).h_full().child(group)
+            );
+        } else {
+            columns = columns.child(self.column(pane.path.clone(), side, cx));
         }
         div().flex_1().h_full().flex().flex_col().overflow_hidden()
             .child(div().p_2().bg(rgb(0x202A37)).text_color(rgb(0xA9C0DA))
