@@ -303,11 +303,14 @@ impl Plan {
                 let dest = destination.as_ref().unwrap();
                 if meta.is_dir() {
                     crate::folder_copy::copy_folder(&self.source, dest, control)?;
-                    let modified = fs::metadata(dest)?.modified().ok();
+                    // Finish reading the destination before moving its
+                    // owning Option<PathBuf> into the Receipt (Rust E0505).
+                    let published_meta = fs::symlink_metadata(dest)?;
+                    let modified = published_meta.modified().ok();
+                    let completed_stamp = Some(SourceStamp::read(&published_meta));
                     return Ok(Receipt {
                         action: self.action, source: self.source.clone(),
-                        destination, modified, size,
-                        completed_stamp: fs::symlink_metadata(dest).ok().as_ref().map(SourceStamp::read),
+                        destination, modified, size, completed_stamp,
                     });
                 }
                 if !meta.is_file() { return Err(invalid("Unsupported source type")); }
