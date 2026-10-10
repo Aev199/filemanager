@@ -299,7 +299,7 @@ impl Explorer {
                 let side = this.active_side();
                 this.navigate_side(side, &path, None, cx);
             }))
-            .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_path(&data.path, cx)))
+            .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -349,7 +349,7 @@ impl Explorer {
         let mut zone = div().id("drop-zone").mx_3().mt_1().p_2().rounded_lg().flex().flex_col().gap_1()
             .border_1().border_dashed().border_color(rgb(BORDER_STRONG)).bg(rgb(SURFACE))
             .drag_over::<FileDragInfo>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
-            .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_path(&data.path, cx)));
+            .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)));
         if items.is_empty() {
             zone = zone.child(
                 div().py_2().flex().flex_col().items_center().gap_1().text_color(rgb(TEXT_DIM))
@@ -564,7 +564,7 @@ impl Explorer {
     fn row(&self, entry: &Entry, folder: &Path, side: Side, on_trail: bool, list_mode: bool, cx: &mut Context<Self>) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
-        let selected = self.selected.as_ref() == Some(&path);
+        let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
         let (icon_path, tint) = entry_icon(entry);
         let bg = if selected && focused_pane {
@@ -598,19 +598,28 @@ impl Explorer {
         let column_folder = folder.to_path_buf();
         let menu_path = path.clone();
         let menu_folder = folder.to_path_buf();
-        row.on_drag(FileDragInfo { path: path.clone() }, |info: &FileDragInfo, position, _, cx| {
-                cx.new(|_| FileDragPreview { name: browser::display_name(&info.path), position })
+        // Dragging a selected row carries the whole selection.
+        let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
+        row.on_drag(FileDragInfo { paths: drag_paths }, |info: &FileDragInfo, position, _, cx| {
+                let name = match info.paths.as_slice() {
+                    [single] => browser::display_name(single),
+                    many => format!("{} элементов", many.len()),
+                };
+                cx.new(|_| FileDragPreview { name, position })
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.navigate_side(side, &menu_folder, Some(menu_path.clone()), cx);
+                // Right-click inside the selection keeps it for batch actions.
+                if !this.is_selected(&menu_path) {
+                    this.navigate_side(side, &menu_folder, Some(menu_path.clone()), cx);
+                }
                 this.open_menu(event.position, MenuTarget::Entry(menu_path.clone()), cx);
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if event.click_count() >= 2 {
                     this.open_entry(path.clone(), is_dir, side, cx);
                 } else {
-                    this.navigate_side(side, &column_folder, Some(path.clone()), cx);
+                    this.click_entry(side, &column_folder, path.clone(), event.modifiers(), cx);
                 }
             }))
             .into_any_element()
@@ -684,6 +693,33 @@ impl Explorer {
             return panel.into_any_element();
         }
 
+        if self.marked.len() > 1 {
+            let marked = self.marked.clone();
+            let mut files = 0usize;
+            let mut folders = 0usize;
+            let mut bytes = 0u64;
+            if let Some(folder) = marked[0].parent().map(Path::to_path_buf) {
+                if let Some((listing, _)) = self.folder_view(&folder) {
+                    for entry in listing.entries.iter().filter(|e| marked.contains(&e.path)) {
+                        if entry.is_directory { folders += 1 } else { files += 1; bytes += entry.size; }
+                    }
+                }
+            }
+            return panel
+                .child(div().flex().flex_col().items_center().gap_2().pt_2()
+                    .child(svg().path("fm/layers.svg").size(px(56.)).text_color(rgb(ACCENT)))
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Выбрано: {}", marked.len()))))
+                .child(div().flex().flex_col().gap_1p5()
+                    .child(Self::property("Файлов", files.to_string()))
+                    .child(Self::property("Папок", folders.to_string()))
+                    .child(Self::property("Размер", format!("{} (без папок)", format_size(bytes)))))
+                .child(div().flex().gap_2()
+                    .child(text_button("group-stage", "В Drop Zone", ButtonKind::Primary).flex_1()
+                        .on_click(cx.listener(|this, _, _, cx| this.stage(cx))))
+                    .child(text_button("group-recycle", "В Корзину", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, _, cx| this.recycle(cx)))))
+                .into_any_element();
+        }
         let selected_entry = self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
             let (listing, _) = self.folder_view(&folder)?;
@@ -829,14 +865,15 @@ impl Explorer {
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.pane_path(self.active_side());
         let count = self.folder_view(&current).map(|(_, indices)| indices.len());
-        let selection = self.selected.clone().and_then(|selected| {
+        let marked = self.marked.len();
+        let selection = if marked > 1 { Some(format!("Выбрано: {marked}")) } else { self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
             let (listing, _) = self.folder_view(&folder)?;
             listing.entries.iter().find(|entry| entry.path == selected).map(|entry| {
                 if entry.is_directory { format!("Выбрано: {}", entry.name) }
                 else { format!("Выбрано: {} · {}", entry.name, format_size(entry.size)) }
             })
-        });
+        }) };
         let mut bar = div().w_full().h(px(28.)).flex_none().px_3().flex().items_center().gap_4()
             .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
@@ -929,7 +966,8 @@ impl Explorer {
                             })));
                 }
                 let copy_target = path.clone();
-                let stage_target = path.clone();
+                let stage_target = self.selection();
+                let count = stage_target.len();
                 list = list.child(Self::separator())
                     .child(Self::menu_item("m-rename", "fm/pencil.svg", "Переименовать", "F2", false, true)
                         .on_click(cx.listener(|this, _, window, cx| this.begin_rename(window, cx))))
@@ -938,13 +976,15 @@ impl Explorer {
                             this.context_menu = None;
                             this.copy_path(&copy_target, cx);
                         })))
-                    .child(Self::menu_item("m-stage", "fm/inbox.svg", "Добавить в Drop Zone", "Ctrl+Shift+S", false, true)
+                    .child(Self::menu_item("m-stage", "fm/inbox.svg",
+                        if count > 1 { format!("Добавить в Drop Zone ({count})") } else { "Добавить в Drop Zone".into() }, "Ctrl+Shift+S", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
-                            this.stage_path(&stage_target, cx);
+                            this.stage_paths(&stage_target, cx);
                         })))
                     .child(Self::separator())
-                    .child(Self::menu_item("m-recycle", "fm/trash.svg", "Удалить в Корзину", "Del", true, true)
+                    .child(Self::menu_item("m-recycle", "fm/trash.svg",
+                        if count > 1 { format!("Удалить в Корзину ({count})") } else { "Удалить в Корзину".into() }, "Del", true, true)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.context_menu = None;
                             this.recycle(cx);
@@ -1040,9 +1080,14 @@ impl Explorer {
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child(format!("В папке: {}", self.pane_path(self.active_side()).display())))
                 .child(Input::new(&self.folder_input)).into_any_element(), "Создать", ButtonKind::Primary)
-        } else if let Some((path, _)) = &self.confirm_recycle {
+        } else if let Some(plans) = &self.confirm_recycle {
+            let what = match plans.as_slice() {
+                [(path, _)] => format!("«{}»", browser::display_name(path)),
+                many => format!("Элементов: {} («{}» и другие)", many.len(),
+                    many.first().map(|(p, _)| browser::display_name(p)).unwrap_or_default()),
+            };
             ("Удалить в Корзину?", div().flex().flex_col().gap_1().text_size(px(13.))
-                .child(div().text_color(rgb(TEXT)).child(format!("«{}»", browser::display_name(path))))
+                .child(div().text_color(rgb(TEXT)).child(what))
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child("Объект можно будет восстановить из Корзины Windows."))
                 .into_any_element(), "В Корзину", ButtonKind::Danger)
@@ -1170,6 +1215,22 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::key_view_list))
             .on_action(cx.listener(Self::key_view_columns))
             .on_action(cx.listener(Self::key_copy_path))
+            .on_action(cx.listener(Self::key_select_all))
+            .on_action(cx.listener(Self::key_extend_next))
+            .on_action(cx.listener(Self::key_extend_prev))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                // Only when the file panes have focus, never inside inputs.
+                let modifiers = event.keystroke.modifiers;
+                if !this.focus_handle.is_focused(window)
+                    || modifiers.control || modifiers.alt || modifiers.platform {
+                    return;
+                }
+                if let Some(text) = event.keystroke.key_char.as_deref()
+                    .filter(|t| t.chars().count() == 1 && t.chars().all(|c| !c.is_control() && c != ' '))
+                {
+                    this.type_ahead(text, cx);
+                }
+            }))
             .child(self.title_bar(cx))
             .child(self.toolbar(cx))
             .child(div().flex_1().min_h_0().overflow_hidden().child(panels))

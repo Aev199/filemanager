@@ -313,11 +313,11 @@ mod tests {
         let mut browser = Browser::new(tmp.path()).unwrap();
         browser.active_mut().navigate(&sub).unwrap();
         assert!(browser.active_mut().active_mut().back());
-        assert_eq!(browser.active().active().path, fs::canonicalize(tmp.path()).unwrap());
+        assert_eq!(browser.active().active().path, crate::path_utils::normalize_extended_path(&fs::canonicalize(tmp.path()).unwrap()));
         browser.new_tab(&sub).unwrap();
         browser.active_mut().toggle_split();
         browser.active_mut().navigate(tmp.path()).unwrap();
-        assert_eq!(browser.active().left.path, fs::canonicalize(&sub).unwrap());
+        assert_eq!(browser.active().left.path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&sub).unwrap()));
     }
 
     #[test]
@@ -333,14 +333,14 @@ mod tests {
         fs::remove_dir(&a).unwrap();
 
         assert!(pane.back(), "Skip removed folder a and return to root");
-        assert_eq!(pane.path, fs::canonicalize(temp.path()).unwrap());
+        assert_eq!(pane.path, crate::path_utils::normalize_extended_path(&fs::canonicalize(temp.path()).unwrap()));
         assert!(pane.forward());
-        assert_eq!(pane.path, fs::canonicalize(&b).unwrap());
+        assert_eq!(pane.path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&b).unwrap()));
 
         fs::remove_dir(&b).unwrap();
         assert!(pane.back());
         assert!(!pane.forward(), "Unavailable forward location is discarded");
-        assert_eq!(pane.path, fs::canonicalize(temp.path()).unwrap());
+        assert_eq!(pane.path, crate::path_utils::normalize_extended_path(&fs::canonicalize(temp.path()).unwrap()));
     }
 
     #[test]

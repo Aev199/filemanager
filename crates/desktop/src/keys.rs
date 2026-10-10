@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use filemanager_core::browser;
+use filemanager_core::selection;
 use filemanager_core::sort::sorted_indices;
 use gpui::{actions, App, Context, Focusable, KeyBinding, ScrollStrategy, Window};
 
@@ -14,7 +15,7 @@ actions!(filemanager, [
     AddressBar, RenameSelected, NewFolder, DismissOverlay, SelectNext, SelectPrev,
     SelectFirst, SelectLast, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
-    CopyPath,
+    CopyPath, SelectAll, ExtendNext, ExtendPrev,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -52,6 +53,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-1", ViewList, Some(CONTEXT)),
         KeyBinding::new("ctrl-2", ViewColumns, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-c", CopyPath, Some(CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("shift-down", ExtendNext, Some(CONTEXT)),
+        KeyBinding::new("shift-up", ExtendPrev, Some(CONTEXT)),
     ]);
 }
 
@@ -118,12 +122,92 @@ impl Explorer {
             }
             self.close_search();
         }
+        self.anchor = select.clone();
         self.selected = select;
+        self.marked.clear();
         self.selected_history_event = None;
         self.confirm_recycle = None;
         self.context_menu = None;
         self.reveal_selected();
         cx.notify();
+    }
+
+    /// Everything selected, in display order.
+    pub(crate) fn selection(&self) -> Vec<PathBuf> {
+        if self.marked.is_empty() {
+            self.selected.iter().cloned().collect()
+        } else {
+            self.marked.clone()
+        }
+    }
+
+    pub(crate) fn is_selected(&self, path: &Path) -> bool {
+        self.selected.as_deref() == Some(path) || self.marked.iter().any(|p| p == path)
+    }
+
+    /// Paths of `folder` in display order.
+    fn ordered_paths(&mut self, folder: &Path) -> Vec<PathBuf> {
+        self.folder_view(folder)
+            .map(|(listing, indices)| indices.iter().map(|&i| listing.entries[i].path.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Mouse selection: plain click selects one item, Ctrl toggles, Shift
+    /// selects the range from the anchor.
+    pub(crate) fn click_entry(
+        &mut self,
+        side: Side,
+        folder: &Path,
+        path: PathBuf,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let same_folder = self.anchor.as_deref().and_then(Path::parent) == Some(folder)
+            && side == self.active_side();
+        if modifiers.shift && same_folder {
+            let anchor = self.anchor.clone().unwrap_or_else(|| path.clone());
+            let order = self.ordered_paths(folder);
+            self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &path);
+            self.selected = Some(path);
+        } else if (modifiers.control || modifiers.platform) && same_folder {
+            if self.marked.is_empty() {
+                self.marked.extend(self.selected.clone());
+            }
+            selection::toggle(&mut self.marked, &path);
+            // Keep display order for batch operations.
+            let order = self.ordered_paths(folder);
+            self.marked.sort_by_key(|p| order.iter().position(|o| o == p));
+            self.selected = Some(path.clone());
+            self.anchor = Some(path);
+        } else {
+            self.navigate_side(side, folder, Some(path), cx);
+            return;
+        }
+        self.selected_history_event = None;
+        self.confirm_recycle = None;
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    /// Type-ahead: letters typed within a second jump to the first name
+    /// starting with them.
+    pub(crate) fn type_ahead(&mut self, text: &str, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        if self.typeahead_at.is_none_or(|at| now.duration_since(at).as_millis() > 1000) {
+            self.typeahead.clear();
+        }
+        self.typeahead_at = Some(now);
+        self.typeahead.push_str(&text.to_lowercase());
+        let side = self.active_side();
+        let folder = self.pane_path(side);
+        let Some((listing, indices)) = self.folder_view(&folder) else { return };
+        let needle = self.typeahead.clone();
+        let found = indices.iter().map(|&i| &listing.entries[i])
+            .find(|entry| entry.name.to_lowercase().starts_with(&needle))
+            .map(|entry| entry.path.clone());
+        if let Some(path) = found {
+            self.navigate_side(side, &folder, Some(path), cx);
+        }
     }
 
     /// Scrolls the list holding the selection so it is visible.
@@ -142,6 +226,26 @@ impl Explorer {
         let folder = selected.parent()?.to_path_buf();
         let (listing, _) = self.folder_view(&folder)?;
         listing.entries.iter().find(|entry| entry.path == selected).cloned()
+    }
+
+    fn extend_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let side = self.active_side();
+        let folder = self.pane_path(side);
+        let order = self.ordered_paths(&folder);
+        if order.is_empty() { return; }
+        let current = self.selected.as_ref().and_then(|s| order.iter().position(|p| p == s));
+        let Some(current) = current else {
+            self.move_selection(delta, None, cx);
+            return;
+        };
+        let next = (current as isize + delta).clamp(0, order.len() as isize - 1) as usize;
+        let anchor = self.anchor.clone().filter(|a| a.parent() == Some(folder.as_path()))
+            .unwrap_or_else(|| order[current].clone());
+        self.marked = selection::range(order.iter().map(PathBuf::as_path), &anchor, &order[next]);
+        self.anchor = Some(anchor);
+        self.selected = Some(order[next].clone());
+        self.reveal_selected();
+        cx.notify();
     }
 
     fn move_selection(&mut self, delta: isize, edge: Option<bool>, cx: &mut Context<Self>) {
@@ -327,7 +431,7 @@ impl Explorer {
     }
 
     pub(crate) fn key_recycle(&mut self, _: &RecycleSelected, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected.is_some() { self.recycle(cx); }
+        if self.selected.is_some() || !self.marked.is_empty() { self.recycle(cx); }
     }
 
     pub(crate) fn key_toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
@@ -359,7 +463,28 @@ impl Explorer {
     pub(crate) fn key_view_columns(&mut self, _: &ViewColumns, _: &mut Window, cx: &mut Context<Self>) { self.set_miller(true, cx); }
 
     pub(crate) fn key_copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selection();
+        if paths.len() > 1 {
+            let text = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\r\n");
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            self.status = format!("Скопированы пути: {}", paths.len());
+            cx.notify();
+            return;
+        }
         let path = self.selected.clone().unwrap_or_else(|| self.pane_path(self.active_side()));
         self.copy_path(&path, cx);
     }
+
+    pub(crate) fn key_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        let folder = self.pane_path(self.active_side());
+        let order = self.ordered_paths(&folder);
+        if order.is_empty() { return; }
+        self.anchor = order.first().cloned();
+        self.selected = order.first().cloned();
+        self.marked = order;
+        cx.notify();
+    }
+
+    pub(crate) fn key_extend_next(&mut self, _: &ExtendNext, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(1, cx); }
+    pub(crate) fn key_extend_prev(&mut self, _: &ExtendPrev, _: &mut Window, cx: &mut Context<Self>) { self.extend_selection(-1, cx); }
 }

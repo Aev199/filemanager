@@ -34,7 +34,7 @@ enum Side { Left, Right }
 /// Internal drag-and-drop payload. Dropping only stages a path; no file
 /// operation takes place until the user explicitly clicks Copy here.
 #[derive(Clone)]
-struct FileDragInfo { path: PathBuf }
+struct FileDragInfo { paths: Vec<PathBuf> }
 
 struct FileDragPreview { name: String, position: Point<Pixels> }
 
@@ -125,7 +125,15 @@ struct Explorer {
     operation_alerts: Vec<InterruptedAction>,
     watcher: Option<HistoryWatch>,
     watched_root: Option<PathBuf>,
-    confirm_recycle: Option<(PathBuf, Plan)>,
+    /// Validated Recycle plans awaiting confirmation. Confirming submits
+    /// exactly these plans, never re-prepared ones.
+    confirm_recycle: Option<Vec<(PathBuf, Plan)>>,
+    /// Extra selected items (Ctrl/Shift); empty means only `selected`.
+    marked: Vec<PathBuf>,
+    /// Fixed end of a Shift range.
+    anchor: Option<PathBuf>,
+    typeahead: String,
+    typeahead_at: Option<std::time::Instant>,
     status: String,
     search_input: Entity<InputState>,
     address_input: Entity<InputState>,
@@ -242,6 +250,10 @@ impl Explorer {
             folder_views: HashMap::new(),
             scroll_handles: HashMap::new(),
             address_editing: false,
+            marked: Vec::new(),
+            anchor: None,
+            typeahead: String::new(),
+            typeahead_at: None,
             pane_width: 800.,
             select_first_when_loaded: false,
             rename_input, folder_input,
@@ -356,10 +368,17 @@ impl Explorer {
         cx.notify();
     }
 
-    fn stage_path(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        self.status = match self.zone.add(path) {
-            Ok(()) => format!("В Drop Zone: {}", self.zone.items().len()),
-            Err(error) => format!("Нельзя добавить в Drop Zone: {error}"),
+    fn stage_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut error = None;
+        for path in paths {
+            if self.zone.items().contains(path) { continue; }
+            if let Err(e) = self.zone.add(path) {
+                error.get_or_insert(format!("{}: {e}", browser::display_name(path)));
+            }
+        }
+        self.status = match error {
+            Some(error) => format!("Не всё добавлено в Drop Zone: {error}"),
+            None => format!("В Drop Zone: {}", self.zone.items().len()),
         };
         cx.notify();
     }
@@ -393,13 +412,8 @@ impl Explorer {
     }
 
     fn stage(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = &self.selected {
-            self.status = match self.zone.add(path) {
-                Ok(()) => format!("В Drop Zone: {}", self.zone.items().len()),
-                Err(e) => e.to_string(),
-            };
-        }
-        cx.notify();
+        let paths = self.selection();
+        self.stage_paths(&paths, cx);
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
@@ -730,58 +744,78 @@ impl Explorer {
 
     fn recycle(&mut self, cx: &mut Context<Self>) {
         if self.copy_in_progress || self.operation_busy {
-            self.status = "Дождитесь завершения копирования".into();
+            self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
             return;
         }
-        let Some(path) = self.selected.clone() else {
+        let paths = self.selection();
+        if paths.is_empty() {
             self.status = "Выберите файл".into();
             cx.notify();
             return;
-        };
+        }
 
-        // The first click validates and freezes the intended source. The
-        // second click submits that SAME plan, not a newly-prepared command
-        // which might point to a different file.
-        let plan = match self.confirm_recycle.take() {
-            Some((pending, plan)) if pending == path => plan,
+        // The first call validates and freezes the intended sources. The
+        // confirmation submits those SAME plans, not newly-prepared commands
+        // which might point to different files.
+        let plans = match self.confirm_recycle.take() {
+            Some(pending) if pending.iter().map(|(path, _)| path).eq(paths.iter()) => pending,
             _ => {
-                match Plan::prepare(Action::Recycle, &path, None) {
-                    Ok(plan) => {
-                        self.confirm_recycle = Some((path, plan));
-                        self.status = "Подтвердите удаление в Корзину".into();
+                let mut prepared = Vec::new();
+                for path in &paths {
+                    match Plan::prepare(Action::Recycle, path, None) {
+                        Ok(plan) => prepared.push((path.clone(), plan)),
+                        Err(error) => {
+                            self.status = format!("Удаление невозможно ({}): {error}", browser::display_name(path));
+                            cx.notify();
+                            return;
+                        }
                     }
-                    Err(error) => self.status = format!("Удаление невозможно: {error}"),
                 }
+                self.confirm_recycle = Some(prepared);
+                self.status = "Подтвердите удаление в Корзину".into();
                 cx.notify();
                 return;
             }
         };
         self.selected = None;
+        self.marked.clear();
         self.selected_history_event = None;
-        self.operation_busy = true;
-        self.status = "Удаление в Корзину…".into();
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
-            self.operation_busy = false;
             self.status = "Операция отклонена: журнал SQLite недоступен".into();
             cx.notify();
             return;
         };
+        self.operation_busy = true;
+        self.status = "Удаление в Корзину…".into();
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
-            queue.submit(plan);
-            queue.run_all_audited(&CopyControl::default(), &audit).remove(0).1
+            for (_, plan) in plans {
+                queue.submit(plan);
+            }
+            queue.run_all_audited(&CopyControl::default(), &audit)
         });
         cx.spawn(async move |weak, cx| {
-            let result = task.await;
+            let results = task.await;
             let _ = weak.update(cx, |this, cx| {
                 this.operation_busy = false;
-                this.status = match result {
-                    Ok(receipt) => {
-                        this.refresh_parent_of(&receipt.source, cx);
-                        "Перемещено в Корзину".into()
-                    },
-                    Err(error) => format!("Удаление отклонено: {error}"),
+                let mut done = 0;
+                let mut first_error = None;
+                for (plan, result) in &results {
+                    match result {
+                        Ok(receipt) => {
+                            done += 1;
+                            this.refresh_parent_of(&receipt.source, cx);
+                        }
+                        Err(error) => {
+                            first_error.get_or_insert(format!("{}: {error}", plan.source.display()));
+                        }
+                    }
+                }
+                this.status = match first_error {
+                    None if done == 1 => "Перемещено в Корзину".into(),
+                    None => format!("Перемещено в Корзину: {done}"),
+                    Some(error) => format!("В Корзину: {done}, ошибка: {error}"),
                 };
                 cx.notify();
             });

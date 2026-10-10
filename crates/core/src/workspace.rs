@@ -159,8 +159,8 @@ mod tests {
         assert!(miller);
         assert_eq!(restored.tabs.len(), 2);
         assert_eq!(restored.active_tab, 1);
-        assert_eq!(restored.active().left.path, fs::canonicalize(&two).unwrap());
-        assert_eq!(restored.active().right.as_ref().unwrap().path, fs::canonicalize(&one).unwrap());
+        assert_eq!(restored.active().left.path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&two).unwrap()));
+        assert_eq!(restored.active().right.as_ref().unwrap().path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&one).unwrap()));
     }
 
     #[test]
