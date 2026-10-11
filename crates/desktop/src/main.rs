@@ -169,6 +169,8 @@ struct Explorer {
     preview_launch_busy: bool,
     preview_launch_generation: u64,
     inspector_history: Vec<Event>,
+    /// Other files that are versions of the selected document, newest first.
+    inspector_versions: Vec<filemanager_core::versions::Member>,
     zone: DropZone,
     copy_in_progress: bool,
     operation_busy: bool,
@@ -350,7 +352,8 @@ impl Explorer {
                     "Внимание: незавершённых операций с файлами: {}. Проверьте затронутые пути, повтор не выполнялся.",
                     pending.len()
                 ),
-                Ok(_) => "Готово".into(),
+                // Nothing to report: an idle status bar stays quiet.
+                Ok(_) => String::new(),
                 Err(error) => format!("Диагностика операций недоступна: {error}"),
             },
             None => "Журнал операций недоступен: изменение файлов отключено".into(),
@@ -385,6 +388,7 @@ impl Explorer {
             preview_launch_busy: false,
             preview_launch_generation: 0,
             inspector_history: Vec::new(),
+            inspector_versions: Vec::new(),
             zone: DropZone::default(),
             copy_in_progress: false,
             operation_busy: false,
@@ -469,6 +473,7 @@ impl Explorer {
         self.inspector_preview = None;
         self.inspector_thumbnail = None;
         self.inspector_history.clear();
+        self.inspector_versions.clear();
         let Some(path) = self.selected.clone() else {
             self.inspector_loading = false;
             return;
@@ -489,15 +494,16 @@ impl Explorer {
             let history = match history_journal.as_ref() {
                 Some(journal) => {
                     if observe_history {
-                        journal.observe(&path).and_then(|_| journal.events(&path, 8))
-                    } else { journal.events(&path, 8) }
+                        journal.observe(&path).and_then(|_| journal.family_events(&path, 8))
+                    } else { journal.family_events(&path, 8) }
                 }
                 None => Ok(Vec::new()),
             };
-            (preview, history)
+            let versions = filemanager_core::versions::family(&path).unwrap_or_default();
+            (preview, history, versions)
         });
         cx.spawn(async move |weak, cx| {
-            let (preview, history) = task.await;
+            let (preview, history, versions) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 this.inspector_details_busy = false;
                 if this.inspector_request != request || this.selected.as_ref() != Some(&selected_path) {
@@ -507,6 +513,7 @@ impl Explorer {
                     return;
                 }
                 this.inspector_preview = preview;
+                this.inspector_versions = versions;
                 this.load_selected_thumbnail(cx);
                 match history {
                     Ok(history) => this.inspector_history = history,

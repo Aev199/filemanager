@@ -102,6 +102,11 @@ fn icon_button(
 }
 
 /// Text button for dialogs and panels.
+/// «Версия 1.6», or «Исходный» for the file without a suffix.
+fn version_label(version: &filemanager_core::versions::Version) -> String {
+    if version.number.is_empty() { "Исходный".into() } else { format!("Версия {}", version.label()) }
+}
+
 fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>, kind: ButtonKind) -> Stateful<Div> {
     let (bg, hover, fg) = match kind {
         ButtonKind::Primary => (ACCENT, 0x7AA0FF, 0xFFFFFF),
@@ -239,7 +244,7 @@ impl Explorer {
         let skip = if chain.len() > 6 { chain.len() - 4 } else { 0 };
         let mut crumbs = div().id("breadcrumbs").flex_1().min_w_0().h(px(30.)).px_1()
             .flex().items_center().gap_0p5().overflow_hidden().rounded_md()
-            .bg(rgb(SURFACE)).border_1().border_color(rgb(BORDER)).cursor_text()
+            .hover(|style| style.bg(rgb(HOVER))).cursor_text()
             .on_click(cx.listener(|this, _, window, cx| {
                 this.address_editing = true;
                 this.focus_address(window, cx);
@@ -688,7 +693,7 @@ impl Explorer {
                         range.map(|position| {
                             let entry = &listing.entries[indices[position]];
                             let on_trail = trail.as_ref() == Some(&entry.path);
-                            this.row(entry, &folder, side, on_trail, list_mode, cx)
+                            this.row(entry, &folder, side, on_trail, list_mode, list_mode && position % 2 == 1, cx)
                         }).collect::<Vec<_>>()
                     }}))
                     .track_scroll(&handle)
@@ -725,7 +730,7 @@ impl Explorer {
         column.into_any_element()
     }
 
-    fn row(&self, entry: &Entry, folder: &Path, side: Side, on_trail: bool, list_mode: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn row(&self, entry: &Entry, folder: &Path, side: Side, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
         let selected = self.is_selected(&path);
@@ -740,14 +745,16 @@ impl Explorer {
         } else {
             None
         };
+        let base = if striped { STRIPE } else { SURFACE };
         let text = if selected { SELECTION_TEXT } else if entry.hidden { TEXT_MUTED } else { TEXT };
         let metadata_text = if selected { SELECTION_TEXT } else { TEXT_MUTED };
         let tint = if selected { SELECTION_TEXT } else { tint };
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
             .w_full().h(px(ROW_HEIGHT)).pl(px(6.)).pr_2().flex().items_center().gap_2()
-            .border_l_2().border_color(rgb(if selected && focused_pane { ACCENT } else { bg.unwrap_or(SURFACE) }))
+            .border_l_2().border_color(rgb(if selected && focused_pane { ACCENT } else { bg.unwrap_or(base) }))
             .text_size(px(13.)).text_color(rgb(text)).cursor_pointer()
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
+            .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
             .child(icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)));
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
@@ -1017,15 +1024,47 @@ impl Explorer {
                     .when_some(count, |this, count| this.child(Self::property("Содержит", items_label(count)))));
             }
         }
+        panel = panel.child(self.versions_section(cx));
         panel = panel.child(self.history_section(cx));
         panel.into_any_element()
+    }
+
+    /// Other files saved as versions of the selected document
+    /// (`Отчёт_v_1_6.docx`), newest first; a click selects one.
+    fn versions_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.inspector_versions.is_empty() {
+            return div().into_any_element();
+        }
+        let mut section = div().flex().flex_col().gap_0p5().pt_2().border_t_1().border_color(rgb(BORDER))
+            .child(div().pb_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                .child(format!("Версии · {}", self.inspector_versions.len())));
+        for (index, member) in self.inspector_versions.iter().enumerate() {
+            let current = self.selected.as_ref() == Some(&member.path);
+            let path = member.path.clone();
+            section = section.child(
+                div().id(("version", index)).h(px(24.)).px_2().rounded_sm().flex().items_center().gap_2()
+                    .text_size(px(12.)).cursor_pointer()
+                    .when(current, |row| row.bg(rgb(TRAIL)))
+                    .when(!current, |row| row.hover(|style| style.bg(rgb(HOVER))))
+                    .child(div().w(px(64.)).flex_none().text_color(rgb(TEXT)).child(if member.version.number.is_empty() { "Исходный".to_owned() } else { member.version.label() }))
+                    .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_MUTED))
+                        .child(member.modified.map(format_time).unwrap_or_default()))
+                    .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(format_size(member.size)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected = Some(path.clone());
+                        this.marked.clear();
+                        cx.notify();
+                    }))
+            );
+        }
+        section.into_any_element()
     }
 
     fn preview_section(&self, entry: &Entry) -> AnyElement {
         // GPUI only decodes dimension-validated small PNGs from the helper.
         if let Some(thumbnail) = self.inspector_thumbnail.clone().filter(|_| self.inspector_path.as_ref() == Some(&entry.path)) {
             return div().flex().flex_col().gap_1()
-                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ПРЕДПРОСМОТР"))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
                 .child(div().w_full().h(px(240.)).p_1().rounded_md().bg(rgb(SURFACE))
                     .border_1().border_color(rgb(BORDER)).flex().items_center().justify_center()
                     .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)))
@@ -1035,12 +1074,12 @@ impl Explorer {
             return div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Загрузка предпросмотра…").into_any_element();
         }
         match &self.inspector_preview {
-            Some((kind, description)) if self.inspector_path == self.selected && kind != "folder" => div().flex().flex_col().gap_1()
-                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(match kind.as_str() {
-                    "text" => "ПРЕДПРОСМОТР · ТЕКСТ",
-                    "image" => "ПРЕДПРОСМОТР · ИЗОБРАЖЕНИЕ",
-                    "binary" => "ПРЕДПРОСМОТР · ДВОИЧНЫЙ ФАЙЛ",
-                    _ => "СВЕДЕНИЯ",
+            // Other kinds only restate the type and size shown above.
+            Some((kind, description)) if self.inspector_path == self.selected
+                && matches!(kind.as_str(), "text" | "Файл недоступен") => div().flex().flex_col().gap_1()
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(match kind.as_str() {
+                    "Файл недоступен" => "Файл недоступен",
+                    _ => "Предпросмотр",
                 }))
                 .child(div().id("preview-text").max_h(px(240.)).overflow_y_scrollbar().p_2().rounded_md()
                     .bg(rgb(SURFACE)).border_1().border_color(rgb(BORDER))
@@ -1072,13 +1111,17 @@ impl Explorer {
         }
         if self.inspector_history.is_empty() && !self.inspector_loading {
             section = section.child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
-                .child("Изменений не записано. Хранятся только метаданные, без копий файлов."));
+                .child("Изменений нет"));
         }
         for event in &self.inspector_history {
             let event_id = event.id;
             let saved_comment = event.comment.clone();
             let saved_author = event.author.clone().unwrap_or_default();
             let chosen = self.selected_history_event == Some(event_id);
+            // Family history mixes files; name the version an event belongs to.
+            let event_version = (!self.inspector_versions.is_empty()).then(|| event.path.file_name()
+                .map(|name| version_label(&filemanager_core::versions::parse(&name.to_string_lossy())))
+                .unwrap_or_default());
             section = section.child(
                 div().id(("history-event", event_id as usize)).p_2().rounded_md().cursor_pointer()
                     .flex().flex_col().gap_0p5().text_size(px(12.))
@@ -1086,6 +1129,8 @@ impl Explorer {
                     .border_1().border_color(rgb(if chosen { SELECTED_BORDER } else { BORDER }))
                     .hover(|style| style.border_color(rgb(BORDER_STRONG)))
                     .child(div().text_color(rgb(TEXT)).child(format!("{} · {}", event.kind_label(), event.display_time())))
+                    .when(event_version.is_some(), |this| this.child(
+                        div().text_color(rgb(ACCENT)).child(event_version.clone().unwrap_or_default())))
                     .child(div().text_color(rgb(TEXT_MUTED)).child(format!("Автор: {}",
                         event.author.as_deref().unwrap_or("не указан"))))
                     .child(div().text_color(rgb(TEXT_DIM)).child(format!("Учётная запись: {}", event.recorded_by)))
@@ -1101,9 +1146,9 @@ impl Explorer {
         }
         if self.selected_history_event.is_some() {
             section = section
-                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("АВТОР"))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Автор"))
                 .child(Input::new(&self.author_input))
-                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("КОММЕНТАРИЙ"))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Комментарий"))
                 .child(Input::new(&self.comment_input))
                 .child(text_button("save-comment", "Сохранить комментарий", ButtonKind::Primary)
                     .on_click(cx.listener(|this, _, _, cx| this.save_comment(cx))));

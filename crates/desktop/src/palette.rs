@@ -1,13 +1,15 @@
 //! Semantic colours used by rendering, without GPUI dependencies.
 
-pub const WINDOW: u32 = 0x0E0F12;
-pub const PANEL: u32 = 0x141519;
-pub const SURFACE: u32 = 0x18191E;
-pub const RAISED: u32 = 0x1F2127;
-pub const BORDER: u32 = 0x26282F;
-pub const BORDER_STRONG: u32 = 0x33363F;
-pub const HOVER: u32 = 0x292D35;
-pub const PRESSED: u32 = 0x2B2E36;
+pub const WINDOW: u32 = 0x101011;
+pub const PANEL: u32 = 0x131314;
+pub const SURFACE: u32 = 0x161618;
+pub const RAISED: u32 = 0x1F1F22;
+/// Every other row of the details list, as in Atlas.
+pub const STRIPE: u32 = 0x1A1A1C;
+pub const BORDER: u32 = 0x252528;
+pub const BORDER_STRONG: u32 = 0x333337;
+pub const HOVER: u32 = 0x252529;
+pub const PRESSED: u32 = 0x2C2C30;
 pub const SELECTED: u32 = 0x0069D9;
 pub const SELECTION_TEXT: u32 = 0xFFFFFF;
 pub const INACTIVE_SELECTED: u32 = 0x35465C;
@@ -17,11 +19,11 @@ pub const TRAIL: u32 = 0x24456B;
 pub const ACCENT: u32 = 0x5E8BFF;
 pub const ACCENT_SOFT: u32 = 0x1D2A47;
 
-pub const TEXT: u32 = 0xE3E5EA;
-pub const TEXT_MUTED: u32 = 0x989EAA;
-pub const TEXT_DIM: u32 = 0x89919F;
+pub const TEXT: u32 = 0xDEDEE2;
+pub const TEXT_MUTED: u32 = 0x9C9CA3;
+pub const TEXT_DIM: u32 = 0x8D8D94;
 
-pub const FOLDER: u32 = 0xA0AFC5;
+pub const FOLDER: u32 = 0xE6B54A;
 pub const DANGER: u32 = 0xEF6F7A;
 pub const WARNING: u32 = 0xE5BD62;
 pub const SUCCESS: u32 = 0x74C98A;
@@ -42,6 +44,7 @@ pub fn resolve(light: bool, color: u32) -> u32 {
             PANEL => 0xF3F5F9,
             SURFACE => 0xFFFFFF,
             RAISED => 0xFFFFFF,
+            STRIPE => 0xF5F6F8,
             BORDER => 0xDDE1E8,
             BORDER_STRONG => 0xBEC5D1,
             HOVER => 0xE9EDF5,
@@ -56,7 +59,7 @@ pub fn resolve(light: bool, color: u32) -> u32 {
             TEXT => 0x202631,
             TEXT_MUTED => 0x505B6D,
             TEXT_DIM => 0x626D80,
-            FOLDER => 0x526680,
+            FOLDER => 0xB9831B,
             DANGER => 0xBD3343,
             WARNING => 0x896000,
             SUCCESS => 0x24734A,
@@ -102,7 +105,11 @@ mod tests {
     }
     #[test]
     fn folder_icons_are_not_another_selection_accent() {
-        assert!((FOLDER & 255).abs_diff((FOLDER >> 16) & 255) <= 50);
+        // Yellow as in Explorer, never the blue of the selection.
+        for light in [false, true] {
+            let folder = resolve(light, FOLDER);
+            assert!((folder >> 16) & 255 > (folder & 255) + 80, "light={light}");
+        }
     }
     #[test]
     fn selection_hover_and_trail_have_distinct_surfaces() {

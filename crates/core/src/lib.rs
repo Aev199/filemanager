@@ -2,6 +2,7 @@
 pub mod directory_watch;
 pub mod browser;
 pub mod history;
+pub mod versions;
 pub mod operations;
 pub mod bulk_rename;
 pub mod search;

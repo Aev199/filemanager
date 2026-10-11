@@ -313,7 +313,24 @@ impl Explorer {
                         .rounded_md()
                         .bg(rgb(SURFACE))
                         .cursor_pointer()
-                        .child(format!("{}  {label}", if value { "☑" } else { "☐" }))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(16.))
+                                .flex_none()
+                                .rounded_sm()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(value, |b| b.bg(rgb(ACCENT)))
+                                .when(!value, |b| b.border_1().border_color(rgb(BORDER_STRONG)))
+                                .when(value, |b| {
+                                    b.child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT)))
+                                }),
+                        )
+                        .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) {
                                 let flag = match index {

@@ -29,6 +29,7 @@ impl Event {
             "observed" => "Обнаружен",
             "modified" => "Изменён",
             "missing" => "Удалён или перемещён",
+            "version" => "Новая версия",
             other => other,
         }
     }
@@ -130,7 +131,11 @@ impl Journal {
             params![path], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional().map_err(sqlite_error)?;
         if old == Some((size, modified)) { return Ok(false); }
-        let kind = if old.is_none() { "observed" } else { "modified" };
+        // `Отчёт_v_1_6.docx` next to `Отчёт_v_1_5.docx`: saved as a new version.
+        let new_version = old.is_none()
+            && Path::new(&path).file_name().is_some_and(|name| crate::versions::is_versioned(&name.to_string_lossy()))
+            && crate::versions::previous(Path::new(&path)).ok().flatten().is_some();
+        let kind = if new_version { "version" } else if old.is_none() { "observed" } else { "modified" };
         tx.execute("INSERT INTO observed(path,size,modified_ns) VALUES(?1,?2,?3)
                     ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ns=excluded.modified_ns",
             params![path, size, modified]).map_err(sqlite_error)?;
@@ -209,6 +214,38 @@ impl Journal {
         mapped.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)
     }
 
+    /// Events of every version of the document `path` belongs to
+    /// (`Отчёт.docx`, `Отчёт_v_1_6.docx`, …), including versions that were
+    /// since deleted, newest first.
+    pub fn family_events(&self, path: &Path, limit: usize) -> io::Result<Vec<Event>> {
+        let Some(folder) = path.parent() else { return self.events(path, limit) };
+        let mut prefix = folder.to_string_lossy().into_owned();
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let mut upper = prefix.clone();
+        upper.push(char::MAX);
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT id,path,kind,observed_ms,recorded_by,author,comment
+               FROM events WHERE path >= ?1 AND path < ?2 ORDER BY id DESC LIMIT 5000",
+        ).map_err(sqlite_error)?;
+        let mapped = statement.query_map(params![prefix, upper], |row| Ok(Event {
+            id: row.get(0)?, path: PathBuf::from(row.get::<_, String>(1)?),
+            kind: row.get(2)?, observed_ms: row.get(3)?, recorded_by: row.get(4)?,
+            author: row.get(5)?, comment: row.get(6)?,
+        })).map_err(sqlite_error)?;
+        let mut events = Vec::new();
+        for event in mapped {
+            let event = event.map_err(sqlite_error)?;
+            if event.path.parent() == Some(folder) && crate::versions::same_document(&event.path, path) {
+                events.push(event);
+                if events.len() == limit.min(1000) { break; }
+            }
+        }
+        Ok(events)
+    }
+
     /// Optional initial snapshot of metadata, limited to avoid a full-disk scan.
     pub fn establish_baseline(&self, root: &Path, max_files: usize) -> io::Result<usize> {
         if !root.is_dir() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "Not a folder")); }
@@ -243,6 +280,41 @@ impl HistoryWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saving_as_next_version_is_a_new_version_of_one_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Проект");
+        fs::create_dir(&folder).unwrap();
+        let journal = Journal::open(temp.path().join("meta.sqlite3")).unwrap();
+        let first = folder.join("Отчёт_v_1_5.docx");
+        let second = folder.join("Отчёт_v_1_6.docx");
+        let other = folder.join("Смета_v_1_6.xlsx");
+        fs::write(&first, b"one").unwrap();
+        journal.observe(&first).unwrap();
+        fs::write(&other, b"sheet").unwrap();
+        journal.observe(&other).unwrap();
+        fs::write(&second, b"two").unwrap();
+        journal.observe(&second).unwrap();
+        assert_eq!(journal.events(&first, 10).unwrap()[0].kind, "observed");
+        let latest = &journal.events(&second, 10).unwrap()[0];
+        assert_eq!((latest.kind.as_str(), latest.kind_label()), ("version", "Новая версия"));
+        fs::remove_file(&first).unwrap();
+        journal.observe(&first).unwrap();
+        let family: Vec<_> = journal.family_events(&second, 10).unwrap().into_iter()
+            .map(|event| (event.path.file_name().unwrap().to_string_lossy().into_owned(), event.kind)).collect();
+        assert_eq!(family, [
+            ("Отчёт_v_1_5.docx".to_owned(), "missing".to_owned()),
+            ("Отчёт_v_1_6.docx".to_owned(), "version".to_owned()),
+            ("Отчёт_v_1_5.docx".to_owned(), "observed".to_owned()),
+        ]);
+        // A folder whose name starts the same is not this folder.
+        let lookalike = temp.path().join("Проект 2").join("Отчёт_v_1_7.docx");
+        fs::create_dir(lookalike.parent().unwrap()).unwrap();
+        fs::write(&lookalike, b"three").unwrap();
+        journal.observe(&lookalike).unwrap();
+        assert_eq!(journal.family_events(&second, 10).unwrap().len(), 3);
+    }
+
     #[test]
     fn internal_folder_staging_does_not_pollute_history() {
         let temp = tempfile::tempdir().unwrap();
