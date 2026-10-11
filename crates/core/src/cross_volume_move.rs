@@ -327,10 +327,10 @@ mod tests {
         journal.start(id).unwrap();
         journal.checkpoint(id, "undo_recycling_copy").unwrap();
         journal.finish_undo(id, &Err(error)).unwrap();
-        assert_eq!(
-            journal.unresolved(10).unwrap()[0].destination.as_ref(),
-            Some(&source)
-        );
+        assert!(crate::path_utils::same_place(
+            journal.unresolved(10).unwrap()[0].destination.as_ref().unwrap(),
+            &source
+        ));
         assert_eq!(fs::read(&source).unwrap(), b"original data");
         assert!(target.exists());
         // A cloned GUI receipt must share the completed restoration phase.
