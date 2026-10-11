@@ -389,7 +389,7 @@ impl Explorer {
             );
         }
         side = side
-            .child(self.sidebar_action("save-workspace", "fm/plus.svg", "Сохранить вкладки как…",
+            .child(self.sidebar_action("save-workspace", "fm/plus.svg", "Сохранить вкладки",
                 cx.listener(|this, _, window, cx| this.begin_save_workspace(window, cx))))
             .child(self.sidebar_action("operation-review", "fm/history.svg", "Журнал операций",
                 cx.listener(|this, _, _, cx| this.toggle_operation_review(cx))));
