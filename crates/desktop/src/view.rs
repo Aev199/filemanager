@@ -975,13 +975,14 @@ impl Explorer {
                 let is_dir = entry.is_directory;
                 let copy_target = entry.path.clone();
                 panel = panel.child(
-                    div().flex().gap_2()
-                        .child(text_button("inspector-open", "Открыть", ButtonKind::Primary).flex_1()
+                    // Wraps instead of pushing «Копировать путь» past a narrow panel.
+                    div().flex().flex_wrap().gap_2()
+                        .child(text_button("inspector-open", "Открыть", ButtonKind::Primary).flex_grow(1.)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let side = this.active_side();
                                 this.open_entry(open_path.clone(), is_dir, side, cx);
                             })))
-                        .child(text_button("inspector-copy-path", "Копировать путь", ButtonKind::Ghost)
+                        .child(text_button("inspector-copy-path", "Копировать путь", ButtonKind::Ghost).flex_grow(1.)
                             .on_click(cx.listener(move |this, _, _, cx| this.copy_path(&copy_target, cx))))
                 );
                 if let Some(undo) = self.undo_stack.last() {
@@ -1556,7 +1557,7 @@ impl Render for Explorer {
         let group_id = format!("main-{}-{}-{}-{}", self.show_sidebar, self.show_inspector, pane_count, self.search_active);
         let mut panels = h_resizable(SharedString::from(group_id));
         if self.show_sidebar {
-            panels = panels.child(resizable_panel().size(px(sidebar_width)).size_range(px(160.)..px(360.))
+            panels = panels.child(resizable_panel().size(px(sidebar_width)).size_range(px(200.)..px(360.))
                 .child(self.sidebar(cx)));
         }
         if self.search_active {
