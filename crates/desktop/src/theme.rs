@@ -53,3 +53,20 @@ pub fn file_icon(extension: Option<&str>) -> (&'static str, u32) {
         _ => ("fm/file.svg", TEXT_MUTED),
     }
 }
+
+static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_light(light: bool) { LIGHT.store(light,std::sync::atomic::Ordering::Relaxed); }
+pub fn is_light() -> bool { LIGHT.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn rgb(color: u32) -> gpui::Rgba {
+    let color=if is_light() { match color {
+        WINDOW=>0xECEEF3,PANEL=>0xF3F5F9,SURFACE=>0xFFFFFF,RAISED=>0xFFFFFF,
+        BORDER=>0xDDE1E8,BORDER_STRONG=>0xBEC5D1,HOVER=>0xE9EDF5,PRESSED=>0xDCE3EF,
+        SELECTED=>0xDCE8FF,SELECTED_BORDER=>0x376AC9,TRAIL=>0xE7ECF4,ACCENT=>0x285DC7,
+        ACCENT_SOFT=>0xE3EBFC,TEXT=>0x202631,TEXT_MUTED=>0x505B6D,TEXT_DIM=>0x667286,
+        FOLDER=>0x3467C4,DANGER=>0xBD3343,WARNING=>0x896000,SUCCESS=>0x24734A,
+        KIND_IMAGE=>0x8643A4,KIND_DOCUMENT=>0x326AA8,KIND_SHEET=>0x277C51,
+        KIND_PDF=>0xB03F45,KIND_ARCHIVE=>0x856000,KIND_MEDIA=>0xA75524,
+        KIND_CODE=>0x23777B,KIND_APP=>0x637185,_=>color,
+    }} else { color };
+    gpui::rgb(color)
+}

@@ -39,11 +39,36 @@ impl WorkspaceStore {
                 left_path TEXT NOT NULL,
                 right_path TEXT,
                 focus_right INTEGER NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (workspace_name, position),
                 FOREIGN KEY (workspace_name) REFERENCES workspaces(name) ON DELETE CASCADE
             );
         ").map_err(db_error)?;
+        let conn = store.connection()?;
+        // BEGIN IMMEDIATE serializes migration across simultaneous app starts.
+        conn.execute_batch("BEGIN IMMEDIATE;").map_err(db_error)?;
+        let has_pin = {
+            let mut stmt = conn.prepare("PRAGMA table_info(workspace_tabs)").map_err(db_error)?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(db_error)?;
+            cols.collect::<Result<Vec<_>, _>>().map_err(db_error)?.iter().any(|name| name == "pinned")
+        };
+        if !has_pin { conn.execute_batch("ALTER TABLE workspace_tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;").map_err(db_error)?; }
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS interface_preferences (
+            id INTEGER PRIMARY KEY CHECK(id=1),light INTEGER NOT NULL,
+            show_hidden INTEGER NOT NULL,show_sidebar INTEGER NOT NULL,show_inspector INTEGER NOT NULL
+        ); COMMIT;").map_err(db_error)?;
         Ok(store)
+    }
+
+    /// Startup fallback retains diagnostics for both database-open and row errors.
+    pub fn open_with_preferences(path: impl AsRef<Path>) -> (Option<Self>, crate::interface::Preferences, Option<io::Error>) {
+        match Self::open(path) {
+            Ok(store) => match store.load_preferences() {
+                Ok(prefs) => (Some(store),prefs,None),
+                Err(error) => (Some(store),crate::interface::Preferences::default(),Some(error)),
+            },
+            Err(error) => (None,crate::interface::Preferences::default(),Some(error)),
+        }
     }
 
     fn connection(&self) -> io::Result<Connection> {
@@ -80,19 +105,45 @@ impl WorkspaceStore {
         for (position, tab) in browser.tabs.iter().enumerate() {
             transaction.execute(
                 "INSERT INTO workspace_tabs
-                 (workspace_name,position,left_path,right_path,focus_right)
-                 VALUES (?1,?2,?3,?4,?5)",
+                 (workspace_name,position,left_path,right_path,focus_right,pinned)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
                 params![
                     name,
                     position as i64,
                     tab.left.path.to_string_lossy().to_string(),
                     tab.right.as_ref().map(|p| p.path.to_string_lossy().to_string()),
-                    tab.focus_right
+                    tab.focus_right, tab.pinned
                 ],
             ).map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
         Ok(())
+    }
+
+    pub fn save_preferences(&self, prefs: &crate::interface::Preferences) -> io::Result<()> {
+        self.connection()?.execute("INSERT INTO interface_preferences VALUES(1,?1,?2,?3,?4)
+            ON CONFLICT(id) DO UPDATE SET light=excluded.light,show_hidden=excluded.show_hidden,
+            show_sidebar=excluded.show_sidebar,show_inspector=excluded.show_inspector",
+            params![prefs.light,prefs.show_hidden,prefs.show_sidebar,prefs.show_inspector]).map_err(db_error)?;
+        Ok(())
+    }
+    pub fn load_preferences(&self) -> io::Result<crate::interface::Preferences> {
+        let result = self.connection()?.query_row("SELECT light,show_hidden,show_sidebar,show_inspector
+            FROM interface_preferences WHERE id=1", [], |row| {
+                let mut flags = [false;4];
+                for (index, flag) in flags.iter_mut().enumerate() {
+                    *flag = match row.get::<_, i64>(index)? {
+                        0 => false, 1 => true,
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    };
+                }
+                Ok(crate::interface::Preferences { light:flags[0],show_hidden:flags[1],show_sidebar:flags[2],show_inspector:flags[3] })
+            });
+        match result {
+            Ok(prefs) => Ok(prefs),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(crate::interface::Preferences::default()),
+            Err(error) => Err(db_error(error)),
+        }
     }
 
     /// Saved workspace names, alphabetically.
@@ -130,22 +181,23 @@ impl WorkspaceStore {
         };
 
         let mut stmt = conn.prepare(
-            "SELECT left_path,right_path,focus_right
+            "SELECT left_path,right_path,focus_right,pinned
              FROM workspace_tabs WHERE workspace_name=?1 ORDER BY position"
         ).map_err(db_error)?;
         let rows = stmt.query_map(params![name], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
         }).map_err(db_error)?;
 
         let mut tabs = Vec::new();
         for row in rows {
-            let (left, right, focus_right) = row.map_err(db_error)?;
+            let (left, right, focus_right, pinned) = row.map_err(db_error)?;
             let Ok(mut tab) = Tab::new(&left) else { continue; };
             if let Some(right) = right {
                 // If right pane no longer exists, keep the left pane usable.
                 tab.right = Pane::new(&right).ok();
             }
             tab.focus_right = focus_right && tab.right.is_some();
+            tab.pinned = pinned;
             tabs.push(tab);
         }
 

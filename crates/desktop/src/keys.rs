@@ -5,13 +5,12 @@ use std::sync::Arc;
 
 use filemanager_core::browser;
 use filemanager_core::selection;
-use filemanager_core::sort::sorted_indices;
 use gpui::{actions, App, Context, Focusable, KeyBinding, ScrollStrategy, Window};
 
 use crate::{Explorer, FolderView, Side};
 
 actions!(filemanager, [
-    Back, Forward, Up, NewTab, CloseTab, NextTab, PrevTab, Split, Refresh, Stage, Find,
+    PaletteEnter, SettingsToggle, SettingsApply, OpenPalette, OpenSettings, Back, Forward, Up, NewTab, CloseTab, NextTab, PrevTab, Split, Refresh, Stage, Find,
     AddressBar, RenameSelected, NewFolder, DismissOverlay, SelectNext, SelectPrev,
     SelectFirst, SelectLast, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
@@ -22,6 +21,17 @@ const CONTEXT: &str = "Filemanager";
 
 pub fn bind(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("up", SelectPrev, Some("CommandPalette > Input")),
+        KeyBinding::new("down", SelectNext, Some("CommandPalette > Input")),
+        KeyBinding::new("enter", PaletteEnter, Some("CommandPalette > Input")),
+        KeyBinding::new("escape", DismissOverlay, Some("CommandPalette > Input")),
+        KeyBinding::new("up", SelectPrev, Some("SettingsOverlay")),
+        KeyBinding::new("down", SelectNext, Some("SettingsOverlay")),
+        KeyBinding::new("space", SettingsToggle, Some("SettingsOverlay")),
+        KeyBinding::new("enter", SettingsApply, Some("SettingsOverlay")),
+        KeyBinding::new("escape", DismissOverlay, Some("SettingsOverlay")),
+        KeyBinding::new("ctrl-k", OpenPalette, Some(CONTEXT)),
+        KeyBinding::new("ctrl-,", OpenSettings, Some(CONTEXT)),
         KeyBinding::new("alt-left", Back, Some(CONTEXT)),
         KeyBinding::new("alt-right", Forward, Some(CONTEXT)),
         KeyBinding::new("alt-up", Up, Some(CONTEXT)),
@@ -92,13 +102,7 @@ impl Explorer {
                 return Some((listing, Arc::clone(&view.indices)));
             }
         }
-        let mut indices = sorted_indices(&listing.entries, self.sort);
-        if !self.show_hidden {
-            indices.retain(|&i| !listing.entries[i].hidden);
-        }
-        if !filter.is_empty() {
-            indices.retain(|&i| listing.entries[i].name.to_lowercase().contains(&filter));
-        }
+        let indices = selection::visible_indices(&listing.entries,self.sort,self.show_hidden,&filter);
         let indices = Arc::new(indices);
         self.folder_views.insert(folder.to_path_buf(), FolderView {
             listing: Arc::clone(&listing),
@@ -123,6 +127,7 @@ impl Explorer {
         select: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        self.marquee=None;
         let tab = self.browser.active_mut();
         tab.focus_right = side == Side::Right && tab.right.is_some();
         if tab.active().path != folder {
@@ -313,6 +318,7 @@ impl Explorer {
     }
 
     pub(crate) fn switch_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.marquee=None;
         if index < self.browser.tabs.len() {
             self.browser.active_tab = index;
             self.selected = None;
@@ -325,6 +331,7 @@ impl Explorer {
     }
 
     pub(crate) fn close_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.browser.tabs.get(index).is_some_and(|tab|tab.pinned) { return; }
         self.browser.close_tab(index);
         self.selected = None;
         self.context_menu = None;
@@ -409,6 +416,8 @@ impl Explorer {
     /// Escape never submits a filesystem change or silently cancels a copy.
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
+        if self.escape_marquee(cx) {return;}
+        if self.dismiss_interface(window,cx) { return; }
         let had_popup = self.renaming || self.creating_folder || self.address_editing || self.saving_workspace
             || self.context_menu.is_some() || self.confirm_recycle.is_some() || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty();
         if self.pending_transfer.is_some() {
@@ -437,8 +446,8 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(1, None, cx); }
-    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(-1, None, cx); }
+    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(1,cx); } else if self.settings.is_some() {self.settings_move(1,cx);} else if !self.interface_modal() { self.move_selection(1, None, cx); } }
+    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(-1,cx); } else if self.settings.is_some() {self.settings_move(-1,cx);} else if !self.interface_modal() { self.move_selection(-1, None, cx); } }
     pub(crate) fn key_select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(false), cx); }
     pub(crate) fn key_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(true), cx); }
 

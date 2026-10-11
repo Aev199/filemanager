@@ -84,6 +84,7 @@ fn canonical_directory(path: impl AsRef<Path>) -> io::Result<PathBuf> {
 
 #[derive(Clone, Debug)]
 pub struct Tab {
+    pub pinned: bool,
     pub title: String,
     pub left: Pane,
     pub right: Option<Pane>,
@@ -93,7 +94,7 @@ pub struct Tab {
 impl Tab {
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
         let left = Pane::new(path)?;
-        Ok(Self { title: display_name(&left.path), left, right: None, focus_right: false })
+        Ok(Self { title: display_name(&left.path), left, right: None, focus_right: false, pinned: false })
     }
 
     pub fn active(&self) -> &Pane {
@@ -158,8 +159,19 @@ impl Browser {
         };
     }
 
+    pub fn toggle_pin(&mut self, index: usize) {
+        if let Some(tab) = self.tabs.get_mut(index) { tab.pinned = !tab.pinned; }
+    }
+    pub fn close_other_tabs(&mut self, keep: usize) {
+        if keep >= self.tabs.len() { return; }
+        let new_active = self.tabs[..keep].iter().filter(|t| t.pinned).count();
+        let mut index = 0;
+        self.tabs.retain(|tab| { let retain = index == keep || tab.pinned; index += 1; retain });
+        self.active_tab = new_active;
+    }
+
     pub fn close_tab(&mut self, index: usize) {
-        if self.tabs.len() <= 1 || index >= self.tabs.len() { return; }
+        if self.tabs.len() <= 1 || index >= self.tabs.len() || self.tabs[index].pinned { return; }
         self.tabs.remove(index);
         if self.active_tab >= self.tabs.len() { self.active_tab = self.tabs.len()-1; }
         else if index < self.active_tab { self.active_tab -= 1; }

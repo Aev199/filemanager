@@ -10,7 +10,7 @@ use filemanager_core::format::{format_size, format_time, items_label, kind_label
 use filemanager_core::places::{containing_place, Place, PlaceKind};
 use filemanager_core::sort::SortKey;
 use gpui::{
-    anchored, deferred, div, img, rgb_to_hsla, ObjectFit, ease_out_quint, prelude::*, px, rgb, rgba, svg, uniform_list,
+    anchored, deferred, div, img, rgb_to_hsla, ObjectFit, ease_out_quint, prelude::*, px, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
     ExternalPaths, MouseButton, MouseDownEvent, SharedString, Stateful, Window,
 };
@@ -45,8 +45,8 @@ pub fn apply_component_theme(cx: &mut App) {
     colors.accent = hsla(HOVER);
     colors.accent_foreground = hsla(TEXT);
     colors.scrollbar = rgb_to_hsla(rgba(0x00000000));
-    colors.scrollbar_thumb = rgb_to_hsla(rgba(0xFFFFFF22));
-    colors.scrollbar_thumb_hover = rgb_to_hsla(rgba(0xFFFFFF40));
+    colors.scrollbar_thumb = rgb_to_hsla(rgba(if crate::theme::is_light() { 0x00000033 } else { 0xFFFFFF22 }));
+    colors.scrollbar_thumb_hover = rgb_to_hsla(rgba(if crate::theme::is_light() { 0x00000055 } else { 0xFFFFFF40 }));
     // Re-project onto the base layer, which draws focus rings and scrollbars.
     Theme::sync_base(cx);
 }
@@ -133,7 +133,7 @@ impl Explorer {
             .gap_1().px_2().overflow_x_scroll();
         for (index, tab) in self.browser.tabs.iter().enumerate() {
             let active = index == self.browser.active_tab;
-            let closable = self.browser.tabs.len() > 1;
+            let closable = self.browser.tabs.len() > 1 && !tab.pinned;
             strip = strip.child(
                 div().id(("tab", index)).group("tab").flex_none().h(px(32.)).min_w(px(120.))
                     .max_w(px(220.)).pl_3().pr_1().flex().items_center().gap_2()
@@ -143,6 +143,7 @@ impl Explorer {
                     .when(!active, |this| this.text_color(rgb(TEXT_MUTED))
                         .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                     .child(small_icon("fm/folder-fill.svg", if active { FOLDER } else { TEXT_DIM }))
+                    .when(tab.pinned, |row| row.child(div().text_color(rgb(ACCENT)).child("●")))
                     .child(div().flex_1().min_w_0().truncate().child(tab.title.clone()))
                     .when(closable, |this| this.child(
                         div().id(("tab-close", index)).flex_none().size(px(20.)).rounded_sm()
@@ -273,6 +274,8 @@ impl Explorer {
                 .on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
             .child(icon_button("refresh", "fm/refresh.svg", "Обновить (F5)", false, true)
                 .on_click(cx.listener(|this, _, _, cx| this.refresh_visible_directories(cx))))
+            .child(icon_button("palette", "fm/search.svg", "Команды (Ctrl+K)", false, true)
+                .on_click(cx.listener(|this,_,window,cx|this.open_palette(window,cx))))
             .child(div().w_2())
             .child(self.breadcrumbs(cx))
             .child(div().w_2())
@@ -522,6 +525,7 @@ impl Explorer {
                 if tab.focus_right != target {
                     tab.focus_right = target;
                     this.selected = None;
+                    this.marked.clear(); this.anchor=None;
                 }
                 let handle = this.focus_handle.clone();
                 window.focus(&handle, cx);
@@ -585,6 +589,7 @@ impl Explorer {
             let handle = self.scroll_handle(&folder);
             let count = indices.len();
             let list_id = SharedString::from(format!("list-{}", folder.display()));
+            let background_marquee_folder=folder.clone();
             column = column.child(
                 div().flex_1().min_h_0().child(
                     uniform_list(list_id, count, cx.processor({ let listing = listing.clone(); move |this, range: Range<usize>, _, cx| {
@@ -596,7 +601,8 @@ impl Explorer {
                     }}))
                     .track_scroll(&handle)
                     .h_full()
-                    .px_1()
+                    .pl_1().pr(px(12.))
+                    .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
                 )
             );
             if listing.truncated {
@@ -704,6 +710,7 @@ impl Explorer {
                 this.open_menu(event.position, MenuTarget::Entry(menu_path.clone()), cx);
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if this.marquee.is_some() {cx.stop_propagation();return;}
                 if event.click_count() >= 2 {
                     this.open_entry(path.clone(), is_dir, side, cx);
                 } else {
@@ -1213,6 +1220,7 @@ impl Explorer {
             MenuTarget::Tab(index) => {
                 let index = *index;
                 let many = self.browser.tabs.len() > 1;
+                let closable = many && !self.browser.tabs[index].pinned;
                 list = list
                     .child(Self::menu_item("m-tab-new", "fm/plus.svg", "Новая вкладка", "Ctrl+T", false, true)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -1226,9 +1234,11 @@ impl Explorer {
                                 this.open_in_new_tab(&path, cx);
                             }
                         })))
+                    .child(Self::menu_item("m-tab-pin", "fm/folder-fill.svg", if self.browser.tabs[index].pinned { "Открепить вкладку" } else { "Закрепить вкладку" }, "", false, true)
+                        .on_click(cx.listener(move |this,_,_,cx| { this.browser.toggle_pin(index); this.context_menu=None; cx.notify(); })))
                     .child(Self::separator())
-                    .child(Self::menu_item("m-tab-close", "fm/x.svg", "Закрыть", "Ctrl+W", false, many)
-                        .when(many, |this| this.on_click(cx.listener(move |this, _, _, cx| this.close_tab_at(index, cx)))))
+                    .child(Self::menu_item("m-tab-close", "fm/x.svg", "Закрыть", "Ctrl+W", false, closable)
+                        .when(closable, |this| this.on_click(cx.listener(move |this, _, _, cx| this.close_tab_at(index, cx)))))
                     .child(Self::menu_item("m-tab-close-others", "fm/x.svg", "Закрыть другие", "", false, many)
                         .when(many, |this| this.on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
@@ -1411,6 +1421,8 @@ impl Explorer {
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.interface_focus_pending {self.interface_focus_pending=false;window.focus(&self.focus_handle,cx);}
+        self.validate_marquee(cx);
         if self.clear_filter {
             self.clear_filter = false;
             self.filter.clear();
@@ -1470,47 +1482,55 @@ impl Render for Explorer {
             .text_color(rgb(TEXT)).text_size(px(13.))
             .key_context("Filemanager")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::key_back))
-            .on_action(cx.listener(Self::key_forward))
-            .on_action(cx.listener(Self::key_up))
-            .on_action(cx.listener(Self::key_new_tab))
-            .on_action(cx.listener(Self::key_close_tab))
-            .on_action(cx.listener(Self::key_next_tab))
-            .on_action(cx.listener(Self::key_prev_tab))
-            .on_action(cx.listener(Self::key_split))
-            .on_action(cx.listener(Self::key_refresh))
-            .on_action(cx.listener(Self::key_stage))
-            .on_action(cx.listener(Self::key_find))
-            .on_action(cx.listener(Self::key_address))
-            .on_action(cx.listener(Self::key_rename))
-            .on_action(cx.listener(Self::key_new_folder))
-            .on_action(cx.listener(Self::key_dismiss))
-            .on_action(cx.listener(Self::key_select_next))
-            .on_action(cx.listener(Self::key_select_prev))
-            .on_action(cx.listener(Self::key_select_first))
-            .on_action(cx.listener(Self::key_select_last))
-            .on_action(cx.listener(Self::key_open))
-            .on_action(cx.listener(Self::key_column_left))
-            .on_action(cx.listener(Self::key_column_right))
-            .on_action(cx.listener(Self::key_recycle))
-            .on_action(cx.listener(Self::key_toggle_hidden))
-            .on_action(cx.listener(Self::key_switch_pane))
-            .on_action(cx.listener(Self::key_toggle_sidebar))
-            .on_action(cx.listener(Self::key_toggle_inspector))
-            .on_action(cx.listener(Self::key_view_list))
-            .on_action(cx.listener(Self::key_view_columns))
-            .on_action(cx.listener(Self::key_copy_path))
-            .on_action(cx.listener(Self::key_select_all))
-            .on_action(cx.listener(Self::key_clipboard_copy))
-            .on_action(cx.listener(Self::key_clipboard_cut))
-            .on_action(cx.listener(Self::key_clipboard_paste))
-            .on_action(cx.listener(Self::key_undo))
-            .on_action(cx.listener(Self::key_extend_next))
-            .on_action(cx.listener(Self::key_extend_prev))
+            .on_action(cx.listener(|this,_: &keys::PaletteEnter,window,cx|this.palette_enter(window,cx)))
+            .on_action(cx.listener(|this,_: &keys::SettingsToggle,_,cx|this.settings_toggle(cx)))
+            .on_action(cx.listener(|this,_: &keys::SettingsApply,_,cx|this.apply_settings(cx)))
+            .on_mouse_move(cx.listener(|this,event,cx_window,cx| {let _=cx_window;this.move_marquee(event,cx);}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx|this.finish_marquee(cx)))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx|this.finish_marquee(cx)))
+            .on_action(cx.listener(|this,_: &keys::OpenPalette,window,cx|this.open_palette(window,cx)))
+            .on_action(cx.listener(|this,_: &keys::OpenSettings,window,cx|this.open_settings(window,cx)))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_back(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_forward(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_up(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_new_tab(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_close_tab(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_next_tab(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_prev_tab(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_split(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_refresh(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_stage(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_find(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_address(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_rename(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_new_folder(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { Self::key_dismiss(this,event,window,cx); }))
+            .on_action(cx.listener(|this,event,window,cx| { Self::key_select_next(this,event,window,cx); }))
+            .on_action(cx.listener(|this,event,window,cx| { Self::key_select_prev(this,event,window,cx); }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_first(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_last(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_open(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_column_left(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_column_right(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_recycle(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_hidden(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_switch_pane(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_sidebar(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_inspector(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_view_list(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_view_columns(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_copy_path(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_all(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_clipboard_copy(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_clipboard_cut(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_clipboard_paste(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_undo(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_extend_next(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_extend_prev(this,event,window,cx); } }))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 // Only when the file panes have focus, never inside inputs.
                 let modifiers = event.keystroke.modifiers;
-                if !this.focus_handle.is_focused(window)
+                if this.interface_modal() || !this.focus_handle.is_focused(window)
                     || modifiers.control || modifiers.alt || modifiers.platform {
                     return;
                 }
@@ -1534,6 +1554,8 @@ impl Render for Explorer {
             root = root.child(dialog);
         }
         if let Some(dialog) = self.bulk_rename_dialog(cx) { root = root.child(dialog); }
+        if let Some(rect)=self.marquee_rectangle() {root=root.child(rect);}
+        if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
         root
     }
 }

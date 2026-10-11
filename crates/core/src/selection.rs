@@ -26,6 +26,27 @@ pub fn toggle(marked: &mut Vec<PathBuf>, path: &Path) {
     }
 }
 
+/// Display order for a folder snapshot under the effective filter.
+pub fn visible_indices(entries: &[crate::browser::Entry], sort: crate::sort::SortSpec, show_hidden: bool, filter: &str) -> Vec<usize> {
+    let filter=filter.to_lowercase();
+    let mut indices=crate::sort::sorted_indices(entries,sort);
+    indices.retain(|&i| (show_hidden || !entries[i].hidden) && (filter.is_empty() || entries[i].name.to_lowercase().contains(&filter)));
+    indices
+}
+
+/// Rows intersecting a vertical marquee, clipped to the list viewport.
+/// Scroll is positive distance from the content top; touching an edge is not intersection.
+pub fn marquee_rows(count: usize, row_height: f32, start_y: f32, end_y: f32, viewport_height: f32, scroll_y: f32) -> std::ops::Range<usize> {
+    if [row_height,start_y,end_y,viewport_height,scroll_y].iter().any(|v| !v.is_finite())
+        || row_height<=0. || viewport_height<=0. || scroll_y<0. { return 0..0; }
+    let low=start_y.min(end_y).clamp(0.,viewport_height);
+    let high=start_y.max(end_y).clamp(0.,viewport_height);
+    if low>=high { return 0..0; }
+    let start=((low as f64+scroll_y as f64)/row_height as f64).floor() as usize;
+    let end=((high as f64+scroll_y as f64)/row_height as f64).ceil() as usize;
+    start.min(count)..end.min(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

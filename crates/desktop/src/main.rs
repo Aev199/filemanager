@@ -7,6 +7,7 @@ mod theme;
 mod view;
 mod bulk_rename;
 mod inspector;
+mod interface;
 
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::clipboard;
@@ -21,13 +22,14 @@ use filemanager_core::index_watch::IndexWatch;
 use filemanager_core::operation_journal::{InterruptedAction, OperationJournal};
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Bounds, Context, Entity, FocusHandle, Focusable,
+    div, prelude::*, px, size, App, Bounds, Context, Entity, FocusHandle, Focusable,
     IntoElement, Pixels, Point, Render, Subscription, TitlebarOptions, UniformListScrollHandle,
     Window, WindowBounds, WindowOptions,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::theme::{Theme, ThemeMode};
 use gpui_component::Root;
+use theme::rgb;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -131,6 +133,10 @@ struct FolderView {
 }
 
 struct Explorer {
+    interface_focus_pending: bool,
+    marquee: Option<interface::Marquee>,
+    palette: Option<interface::Palette>,
+    settings: Option<interface::Settings>,
     browser: Browser,
     selected: Option<PathBuf>,
     // Inspector data is loaded off the UI thread, never during Render.
@@ -330,7 +336,8 @@ impl Explorer {
         };
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
-        let workspaces = WorkspaceStore::open(WorkspaceStore::default_path()).ok();
+        let (workspaces,prefs,prefs_error)=WorkspaceStore::open_with_preferences(WorkspaceStore::default_path());
+        let prefs_error=prefs_error.map(|error|format!("Настройки не прочитаны: {error}"));
         let (browser, miller_mode) = workspaces.as_ref()
             .and_then(|store| store.load(SESSION_WORKSPACE).ok().flatten())
             .unwrap_or_else(|| (
@@ -338,7 +345,11 @@ impl Explorer {
                     .expect("No starting directory"),
                 true
             ));
+        theme::set_light(prefs.light);
+        Theme::change(if prefs.light { ThemeMode::Light } else { ThemeMode::Dark },Some(window),cx);
+        view::apply_component_theme(cx);
         Self {
+            interface_focus_pending:false,marquee:None,palette:None,settings:None,
             browser,
             selected: None,
             inspector_path: None,
@@ -364,9 +375,9 @@ impl Explorer {
             drives: places::drives(),
             drive_space: HashMap::new(),
             sort: SortSpec::default(),
-            show_hidden: false,
-            show_sidebar: true,
-            show_inspector: true,
+            show_hidden: prefs.show_hidden,
+            show_sidebar: prefs.show_sidebar,
+            show_inspector: prefs.show_inspector,
             folder_views: HashMap::new(),
             scroll_handles: HashMap::new(),
             address_editing: false,
@@ -402,7 +413,7 @@ impl Explorer {
             operation_alerts: Vec::new(),
             watcher: None, live_watch_started: false, live_watch_error: None,
             watched_root: None, confirm_recycle: None,
-            status: operation_status,
+            status: prefs_error.unwrap_or(operation_status),
             search_input, address_input, comment_input, author_input, search_query: String::new(),
             search_results: Vec::new(), search_root: None,
             index_watch: None, index_watch_root: None,
@@ -580,13 +591,8 @@ impl Explorer {
     }
 
     fn close_other_tabs(&mut self, keep: usize, cx: &mut Context<Self>) {
-        if keep < self.browser.tabs.len() {
-            let tab = self.browser.tabs.remove(keep);
-            self.browser.tabs = vec![tab];
-            self.browser.active_tab = 0;
-            self.selected = None;
-        }
-        cx.notify();
+        self.browser.close_other_tabs(keep);
+        self.selected=None; self.marked.clear(); self.context_menu=None; self.close_search(); cx.notify();
     }
 
     /// Ctrl+C / Ctrl+X: the selection goes to the Windows clipboard, so it
