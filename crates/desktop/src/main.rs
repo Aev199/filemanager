@@ -5,6 +5,7 @@ mod keys;
 mod messages;
 mod theme;
 mod view;
+mod bulk_rename;
 
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::clipboard;
@@ -165,6 +166,10 @@ struct Explorer {
     /// once the listing arrives.
     select_first_when_loaded: bool,
     rename_input: Entity<InputState>,
+    bulk_template_input: Entity<InputState>,
+    bulk_rename: Option<bulk_rename::BulkRenameDialog>,
+    bulk_rename_errors: Vec<String>,
+    bulk_rename_generation: u64,
     folder_input: Entity<InputState>,
     creating_folder: bool,
     renaming: bool,
@@ -236,6 +241,10 @@ impl Explorer {
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Комментарий к сохранению…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фактический автор (необязательно)…"));
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Новое имя"));
+        let bulk_template_input = cx.new(|cx| InputState::new(window, cx).placeholder("{stem} ({n}){ext}"));
+        let bulk_subscription = cx.subscribe_in(&bulk_template_input, window, |this, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Change) { this.schedule_bulk_preview(cx); }
+        });
         let folder_input = cx.new(|cx| InputState::new(window, cx).placeholder("Имя папки"));
         let workspace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Например: Проект «Мост»"));
         let workspace_subscription = cx.subscribe_in(&workspace_input, window, |this, _, event: &InputEvent, window, cx| {
@@ -364,6 +373,7 @@ impl Explorer {
             pane_width: 800.,
             select_first_when_loaded: false,
             rename_input, folder_input,
+            bulk_template_input, bulk_rename: None, bulk_rename_errors: Vec::new(), bulk_rename_generation: 0,
             renaming: false,
             creating_folder: false,
             undo_stack: Vec::new(),
@@ -393,6 +403,7 @@ impl Explorer {
             _subscriptions: vec![
                 search_subscription, address_subscription, rename_subscription, folder_subscription,
                 workspace_subscription,
+                bulk_subscription,
             ],
         }
     }
@@ -736,7 +747,7 @@ impl Explorer {
         }
     }
 
-    fn start_transfer_progress(&mut self, moving: bool, cx: &mut Context<Self>) {
+    fn start_transfer_progress(&mut self, action: &'static str, cx: &mut Context<Self>) {
         let progress = self.copy_control.as_ref().unwrap().clone();
         cx.spawn(async move |weak, cx| {
             loop {
@@ -750,7 +761,6 @@ impl Explorer {
                         TransferPhase::Recycling => "Завершение переноса…".into(),
                         TransferPhase::Copying => {
                             let mib = progress.bytes_copied() as f64 / 1_048_576.0;
-                            let action = if moving { "Перемещение" } else { "Копирование" };
                             format!("{action}… {mib:.1} МБ")
                         }
                     };
@@ -792,7 +802,7 @@ impl Explorer {
                 .collect();
             (zone, target, ok, errors, first_error, created)
         });
-        self.start_transfer_progress(false, cx);
+        self.start_transfer_progress("Копирование", cx);
         cx.spawn(async move |weak, cx| {
             let (zone, target, ok, errors, first_error, created) = task.await;
             let _ = weak.update(cx, |this, cx| {
@@ -830,7 +840,7 @@ impl Explorer {
         self.copy_in_progress = true;
         let control = Arc::new(CopyControl::default());
         self.copy_control = Some(Arc::clone(&control));
-        self.start_transfer_progress(true, cx);
+        self.start_transfer_progress("Перемещение", cx);
         self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
             let results = if replace {
@@ -947,6 +957,7 @@ impl Explorer {
     }
 
     fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection().len() > 1 { self.begin_bulk_rename(window, cx); return; }
         self.context_menu = None;
         let Some(path) = &self.selected else {
             self.status = "Сначала выберите файл или папку".into();

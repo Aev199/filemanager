@@ -825,6 +825,8 @@ impl Explorer {
                 .child(div().flex().gap_2()
                     .child(text_button("group-stage", "В Drop Zone", ButtonKind::Primary).flex_1()
                         .on_click(cx.listener(|this, _, _, cx| this.stage(cx))))
+                    .child(text_button("group-rename", "Переименовать…", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, window, cx| this.begin_bulk_rename(window, cx))))
                     .child(text_button("group-recycle", "В Корзину", ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, _, cx| this.recycle(cx)))))
                 .into_any_element();
@@ -1253,6 +1255,63 @@ impl Explorer {
 
     // ------------------------------------------------------------ dialogs
 
+    fn bulk_rename_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.bulk_rename_errors.is_empty() {
+            let mut rows = div().id("bulk-rename-errors").max_h(px(320.)).overflow_y_scrollbar()
+                .flex().flex_col().gap_2().text_size(px(12.));
+            for error in &self.bulk_rename_errors { rows = rows.child(error.clone()); }
+            return Some(div().id("bulk-rename-result").absolute().inset_0().flex().items_center().justify_center()
+                .bg(rgba(0x0000008C))
+                .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded_xl().bg(rgb(RAISED))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child("Ошибки переименования группы")
+                    .child(rows)
+                    .child("Завершённые действия можно отменить Ctrl+Z после закрытия этого списка.")
+                    .child(text_button("bulk-result-close", "Закрыть", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx)))))
+                .into_any_element());
+        }
+        let state = self.bulk_rename.as_ref()?;
+        let mut rows = div().id("bulk-rename-rows").max_h(px(320.)).overflow_y_scrollbar()
+            .flex().flex_col().gap_2().p_2().rounded_md().bg(rgb(SURFACE));
+        if state.loading { rows = rows.child("Проверка имён…"); }
+        if let Some(error) = &state.error { rows = rows.child(error.clone()); }
+        if let Some(preview) = &state.preview {
+            for entry in &preview.entries {
+                let mut row = div().flex().flex_col().gap_1().text_size(px(12.))
+                    .child(format!("{} → {}", browser::display_name(&entry.source), browser::display_name(&entry.destination)));
+                if let Some(error) = &entry.error {
+                    row = row.child(div().text_color(rgb(0xe07a7a)).child(format!("Ошибка: {error}")));
+                }
+                rows = rows.child(row);
+            }
+        }
+        let can_apply = state.preview.as_ref().is_some_and(|preview| preview.can_apply()) && !self.operation_busy;
+        let mut buttons = div().flex().justify_end().gap_2()
+            .child(text_button("bulk-cancel", "Отмена", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx))));
+        if can_apply {
+            buttons = buttons.child(text_button("bulk-apply", "Переименовать группу", ButtonKind::Primary)
+                .on_click(cx.listener(|this, _, _, cx| this.apply_bulk_rename(cx))));
+        } else {
+            buttons = buttons.child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child("Применение недоступно"));
+        }
+        Some(div().id("bulk-rename-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C))
+            .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded_xl()
+                .bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Массовое переименование"))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                    .child("{stem} — имя, {ext} — расширение с точкой, {n} — номер. До применения файлы не меняются."))
+                .child(Input::new(&self.bulk_template_input))
+                .child(rows)
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
+                    .child("Занятые имена и ошибки блокируют группу. Частичный успех можно отменить Ctrl+Z."))
+                .child(buttons))
+            .into_any_element())
+    }
+
     fn conflict_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (transfer, conflicts) = self.pending_transfer.as_ref()?;
         let names: Vec<String> = conflicts.iter().take(4).map(|p| browser::display_name(p)).collect();
@@ -1481,6 +1540,7 @@ impl Render for Explorer {
         if let Some(dialog) = self.conflict_dialog(cx) {
             root = root.child(dialog);
         }
+        if let Some(dialog) = self.bulk_rename_dialog(cx) { root = root.child(dialog); }
         root
     }
 }

@@ -410,11 +410,14 @@ impl Explorer {
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
         let had_popup = self.renaming || self.creating_folder || self.address_editing || self.saving_workspace
-            || self.context_menu.is_some() || self.confirm_recycle.is_some();
+            || self.context_menu.is_some() || self.confirm_recycle.is_some() || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty();
         if self.pending_transfer.is_some() {
             self.resolve_transfer(crate::ConflictChoice::Cancel, cx);
         }
         self.renaming = false;
+        self.bulk_rename = None;
+        self.bulk_rename_errors.clear();
+        self.bulk_rename_generation = self.bulk_rename_generation.wrapping_add(1);
         self.creating_folder = false;
         self.saving_workspace = false;
         self.address_editing = false;
