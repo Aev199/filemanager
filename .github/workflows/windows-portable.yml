@@ -41,6 +41,19 @@ jobs:
       - name: Test CLI and its SQLite audit gate
         run: cargo test -p filemanager-cli --all-targets
 
+      # The same pure modules used by the renderer, without linking a GUI test
+      # harness. This does not replace the actual-window smoke test below.
+      - name: Test desktop layout and colour policies
+        run: |
+          rustc --edition=2024 --test crates/desktop/src/layout.rs -o target/ui-layout-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/ui-layout-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2024 --test crates/desktop/src/palette.rs -o target/ui-palette-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/ui-palette-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build native GPUI application
         run: cargo build -p filemanager-desktop --release --target x86_64-pc-windows-msvc
 

@@ -105,3 +105,10 @@ fn malformed_database_startup_keeps_a_visible_diagnostic() {
     assert!(store.is_some());
     assert!(error.is_none());
 }
+
+#[test]
+fn fresh_preferences_prioritize_files_over_inspector() {
+    let prefs = Preferences::default();
+    assert!(prefs.show_sidebar);
+    assert!(!prefs.show_inspector);
+}

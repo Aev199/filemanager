@@ -8,6 +8,8 @@ mod view;
 mod bulk_rename;
 mod inspector;
 mod interface;
+mod layout;
+mod palette;
 
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::clipboard;
@@ -178,6 +180,7 @@ struct Explorer {
     address_editing: bool,
     /// Width of one file pane at the last layout, for column dropping.
     pane_width: f32,
+    pane_measured_widths: [Option<f32>; 2],
     /// After entering a folder from the keyboard, select its first entry
     /// once the listing arrives.
     select_first_when_loaded: bool,
@@ -252,7 +255,7 @@ impl Explorer {
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр · Enter — поиск глубже"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр по имени"));
         let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Комментарий к сохранению…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фактический автор (необязательно)…"));
@@ -397,6 +400,7 @@ impl Explorer {
             pending_transfer: None,
             typeahead_at: None,
             pane_width: 800.,
+            pane_measured_widths: [None, None],
             select_first_when_loaded: false,
             rename_input, folder_input,
             bulk_template_input, bulk_rename: None, bulk_rename_errors: Vec::new(), bulk_rename_generation: 0,
@@ -571,8 +575,8 @@ impl Explorer {
             }
         }
         self.status = match error {
-            Some(error) => format!("Не всё добавлено в Drop Zone: {error}"),
-            None => format!("В Drop Zone: {}", self.zone.items().len()),
+            Some(error) => format!("Не всё добавлено для переноса: {error}"),
+            None => format!("Для переноса: {}", self.zone.items().len()),
         };
         cx.notify();
     }
@@ -676,7 +680,7 @@ impl Explorer {
 
     fn transfer_staged(&mut self, copy: bool, cx: &mut Context<Self>) {
         if self.zone.items().is_empty() {
-            self.status = "Drop Zone пуста".into();
+            self.status = "Нет файлов для переноса".into();
             cx.notify();
             return;
         }
@@ -833,7 +837,7 @@ impl Explorer {
                 // Failed Drop Zone items stay staged; staging done meanwhile is kept.
                 for pending in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(pending) {
-                        this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
+                        this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
                 this.copy_in_progress = false;
@@ -894,7 +898,7 @@ impl Explorer {
             let _ = weak.update(cx, |this, cx| {
                 for path in zone.items().iter().filter(|_| restore_failed) {
                     if let Err(error) = this.zone.add(path) {
-                        this.status = format!("Не удалось вернуть элемент в Drop Zone: {error}");
+                        this.status = format!("Не удалось вернуть элемент в зону переноса: {error}");
                     }
                 }
                 this.operation_busy = false;

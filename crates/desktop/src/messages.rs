@@ -19,7 +19,7 @@ const PHRASES: &[(&str, &str)] = &[
     ("Unsupported source type", "Неподдерживаемый тип источника"),
     ("Source is not a regular file", "Источник не является обычным файлом"),
     ("Cannot operate on a filesystem root", "Нельзя выполнять операции с корнем диска"),
-    ("Cannot stage a filesystem root", "Корень диска нельзя добавить в Drop Zone"),
+    ("Cannot stage a filesystem root", "Корень диска нельзя отложить для переноса"),
     ("Folder has more than 100,000 items; narrow the operation", "В папке больше 100 000 элементов, выберите меньшую часть"),
     ("Another Filemanager window is modifying files; retry after it finishes", "Другое окно Filemanager изменяет файлы, повторите после завершения"),
     ("No filesystem changes while another executor is active", "Другое окно выполняет операции, изменения отложены"),

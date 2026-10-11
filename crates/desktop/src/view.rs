@@ -20,13 +20,13 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::TitleBar;
+use gpui_component::ElementExt;
 
 use crate::keys;
 use crate::theme::*;
 use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, Side, TabDrag};
 
 const ROW_HEIGHT: f32 = 28.;
-const MILLER_COLUMNS: usize = 3;
 
 /// Aligns gpui-component widgets (inputs, scrollbars, tooltips) with our palette.
 pub fn apply_component_theme(cx: &mut App) {
@@ -64,7 +64,7 @@ fn small_icon(path: &'static str, color: u32) -> gpui::Svg {
 }
 
 fn section_title(text: &'static str) -> Div {
-    div().px_3().pt_4().pb_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+    div().px_3().pt_3().pb_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
         .font_weight(gpui::FontWeight::SEMIBOLD).child(text)
 }
 
@@ -274,7 +274,7 @@ impl Explorer {
                 .on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
             .child(icon_button("refresh", "fm/refresh.svg", "Обновить (F5)", false, true)
                 .on_click(cx.listener(|this, _, _, cx| this.refresh_visible_directories(cx))))
-            .child(icon_button("palette", "fm/search.svg", "Команды (Ctrl+K)", false, true)
+            .child(icon_button("palette", "fm/command.svg", "Команды (Ctrl+K)", false, true)
                 .on_click(cx.listener(|this,_,window,cx|this.open_palette(window,cx))))
             .child(div().w_2())
             .child(self.breadcrumbs(cx))
@@ -296,7 +296,8 @@ impl Explorer {
                 })))
             .child(div().w_1())
             .child(
-                div().flex_none().w(px(240.))
+                div().id("filter-field").flex_none().w(px(190.))
+                    .tooltip(|window, cx| Tooltip::new("Фильтр по имени в этой папке. Enter — поиск во вложенных папках (Ctrl+F).").build(window, cx))
                     .child(Input::new(&self.search_input).h(px(30.))
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))
             )
@@ -326,18 +327,18 @@ impl Explorer {
         let active_place = containing_place(&all, &current).map(|place| place.path.clone());
         let mut side = div().id("sidebar").size_full().min_h_0().flex().flex_col().pb_3()
             .overflow_y_scrollbar().bg(rgb(PANEL)).text_size(px(13.))
-            .child(section_title("ИЗБРАННОЕ"));
+            .child(section_title("Избранное"));
         for (index, place) in self.places.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             side = side.child(self.place_row(("place", index), place, active, cx));
         }
-        side = side.child(section_title("ДИСКИ"));
+        side = side.child(section_title("Диски"));
         for (index, place) in self.drives.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             side = side.child(self.place_row(("drive", index), place, active, cx));
             if let Some(&(free, total)) = self.drive_space.get(&place.path) {
                 let used = 1. - free as f32 / total as f32;
-                let color = if used > 0.9 { DANGER } else { ACCENT };
+                let color = if used > 0.9 { DANGER } else { TEXT_DIM };
                 side = side.child(
                     div().mx_2().pl(px(32.)).pr_2().pb_1().flex().flex_col().gap_1()
                         .child(div().h(px(4.)).w_full().rounded_full().bg(rgb(BORDER))
@@ -347,8 +348,10 @@ impl Explorer {
                 );
             }
         }
-        side = side.child(section_title("DROP ZONE")).child(self.drop_zone(cx));
-        side = side.child(section_title("РАБОЧИЕ ПРОСТРАНСТВА"));
+        side = side.child(div().mt_3().child(self.drop_zone(cx)));
+        if !self.workspace_names.is_empty() {
+            side = side.child(section_title("Рабочие пространства"));
+        }
         for (index, name) in self.workspace_names.iter().enumerate() {
             let open_name = name.clone();
             let delete_name = name.clone();
@@ -395,21 +398,23 @@ impl Explorer {
 
     fn drop_zone(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let items = self.zone.items();
-        let mut zone = div().id("drop-zone").mx_3().mt_1().p_2().rounded_lg().flex().flex_col().gap_1()
-            .border_1().border_dashed().border_color(rgb(BORDER_STRONG)).bg(rgb(SURFACE))
+        let mut zone = div().id("drop-zone").mx_2().p_2().rounded_md().flex().flex_col().gap_1()
+            .when(!items.is_empty(), |zone| zone.border_1().border_color(rgb(BORDER)).bg(rgb(SURFACE)))
             .drag_over::<FileDragInfo>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(ACCENT)).bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener(|this, data: &ExternalPaths, _, cx| this.stage_paths(data.paths(), cx)));
         if items.is_empty() {
             zone = zone.child(
-                div().py_2().flex().flex_col().items_center().gap_1().text_color(rgb(TEXT_DIM))
+                div().flex().items_center().gap_2().text_color(rgb(TEXT_MUTED))
                     .text_size(px(12.))
-                    .child(icon("fm/inbox.svg", TEXT_DIM))
-                    .child("Перетащите сюда файлы")
+                    .child(icon("fm/inbox.svg", TEXT_MUTED))
+                    .child("Файлы для переноса")
             );
-            return zone;
+            return zone.tooltip(|window, cx| Tooltip::new("Перетащите сюда файлы, затем откройте папку назначения. Файлы не изменятся до команды копирования или переноса.").build(window, cx));
         }
+        zone = zone.child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+            .child(format!("Для переноса: {}", items.len())));
         for path in items.iter().take(5) {
             zone = zone.child(
                 div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT))
@@ -423,10 +428,10 @@ impl Explorer {
                 .child(format!("и ещё {}", items.len() - 5)));
         }
         zone.child(
-            div().pt_1().flex().gap_1()
-                .child(text_button("zone-copy", "Копировать сюда", ButtonKind::Primary).flex_1().text_size(px(12.))
+            div().pt_1().flex().flex_col().gap_1()
+                .child(text_button("zone-copy", "Копировать сюда", ButtonKind::Primary).w_full().text_size(px(12.))
                     .on_click(cx.listener(|this, _, _, cx| this.paste(cx))))
-                .child(text_button("zone-move", "Переместить", ButtonKind::Ghost).text_size(px(12.))
+                .child(text_button("zone-move", "Переместить сюда", ButtonKind::Ghost).w_full().text_size(px(12.))
                     .on_click(cx.listener(|this, _, _, cx| this.move_staged(cx))))
         ).child(
             div().id("zone-clear").text_size(px(12.)).text_color(rgb(TEXT_DIM)).cursor_pointer()
@@ -434,13 +439,18 @@ impl Explorer {
                 .child("Очистить")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.zone.clear();
-                    this.status = "Drop Zone очищена, файлы не изменены".into();
+                    this.status = "Отложенные файлы убраны; сами файлы не изменены".into();
                     cx.notify();
                 }))
         )
     }
 
     // --------------------------------------------------------------- panes
+
+    fn pane_width_for(&self, side: Side) -> f32 {
+        let index = if side == Side::Left { 0 } else { 1 };
+        crate::layout::effective_pane_width(self.pane_width, self.pane_measured_widths[index])
+    }
 
     /// Folders shown in a pane: the trail of the current folder and, in
     /// columns mode, a preview of the selected subfolder.
@@ -456,10 +466,9 @@ impl Explorer {
                         listing.entries.iter().any(|entry| &entry.path == selected && entry.is_directory)
                     })
             });
-        // As many columns as fit at a readable width (at least two). A
-        // selected subfolder is previewed as the last column; the trail
-        // gives up its oldest column so the total stays readable.
-        let fit = ((self.pane_width / 210.) as usize).clamp(2, MILLER_COLUMNS);
+        // Current folder wins over ancestors and optional subfolder preview.
+        let fit = crate::layout::column_capacity(self.pane_width_for(side), preview.is_some());
+        let preview = preview.filter(|_| fit > 1);
         let trail = if preview.is_some() { fit - 1 } else { fit };
         let mut columns: Vec<PathBuf> = path.ancestors().take(trail).map(Path::to_path_buf).collect();
         columns.reverse();
@@ -471,23 +480,26 @@ impl Explorer {
         let split = self.browser.active().right.is_some();
         let focused = side == self.active_side();
         let path = self.pane_path(side);
+        let pane_width = self.pane_width_for(side);
         let body = if self.miller_mode {
             let folders = self.pane_columns(side);
+            let current_index = folders.iter().position(|folder| folder == &path).unwrap_or(folders.len() - 1);
             let group_id = format!(
-                "miller-{}-{}-{}-{}",
+                "miller-{}-{}-{}",
                 self.browser.active_tab,
                 if side == Side::Left { "l" } else { "r" },
-                folders.len(),
-                self.pane_width as u32 / 40,
+                crate::layout::column_identity(pane_width, folders.len(), current_index),
             );
-            let minimum_width = px(180. * folders.len() as f32);
+            let widths = crate::layout::column_widths(pane_width, folders.len(), current_index);
+            let minimum_width = px(widths.iter().sum());
             let mut group = h_resizable(group_id);
             for (index, folder) in folders.iter().enumerate() {
                 // The folder of the next column is highlighted as the trail.
                 let trail = folders.get(index + 1).cloned();
                 let column = self.column(folder.clone(), side, trail, cx);
-                let width = (self.pane_width / folders.len() as f32).max(180.);
-                group = group.child(resizable_panel().size(px(width)).size_range(px(160.)..px(900.)).child(column));
+                let width = widths[index];
+                let minimum = if index == current_index { crate::layout::CURRENT_MIN } else { 150. };
+                group = group.child(resizable_panel().size(px(width)).size_range(px(minimum)..px(4000.)).child(column));
             }
             div().id(if side == Side::Left { "columns-left" } else { "columns-right" })
                 .flex_1().min_h_0().overflow_x_scrollbar()
@@ -495,11 +507,24 @@ impl Explorer {
                 .into_any_element()
         } else {
             div().flex_1().min_h_0().flex().flex_col()
-                .child(self.list_header(cx))
+                .child(self.list_header(side, cx))
                 .child(self.column(path.clone(), side, None, cx))
                 .into_any_element()
         };
-        div().size_full().flex().flex_col().overflow_hidden().bg(rgb(SURFACE))
+        let weak = cx.weak_entity();
+        div().relative().size_full().flex().flex_col().overflow_hidden().bg(rgb(SURFACE))
+            .on_prepaint(move |bounds, _, cx| {
+                let width = bounds.size.width / px(1.);
+                cx.defer(move |cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        let index = if side == Side::Left { 0 } else { 1 };
+                        if width > 0. && this.pane_measured_widths[index].is_none_or(|old| (old - width).abs() >= 1.) {
+                            this.pane_measured_widths[index] = Some(width);
+                            cx.notify();
+                        }
+                    });
+                });
+            })
             .when(split, |this| this.child(
                 div().h(px(28.)).flex_none().px_3().flex().items_center().gap_2()
                     .border_b_1().border_color(rgb(BORDER))
@@ -535,13 +560,14 @@ impl Explorer {
     }
 
     /// Narrow panes drop the type and date columns, keeping names readable.
-    fn list_columns(&self) -> (bool, bool) {
-        (self.pane_width >= 520., self.pane_width >= 680.)
+    fn list_columns(&self, side: Side) -> (bool, bool) {
+        let width = self.pane_width_for(side);
+        (width >= 520., width >= 680.)
     }
 
-    fn list_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn list_header(&self, side: Side, cx: &mut Context<Self>) -> impl IntoElement {
         let spec = self.sort;
-        let (show_modified, show_kind) = self.list_columns();
+        let (show_modified, show_kind) = self.list_columns(side);
         let header = |id: &'static str, label: &'static str, key: SortKey| {
             let active = spec.key == key;
             div().id(id).h_full().px_2().flex().items_center().gap_1().cursor_pointer()
@@ -566,6 +592,13 @@ impl Explorer {
         let list_mode = !self.miller_mode;
         let mut column = div().size_full().min_h_0().flex().flex_col()
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
+        if !list_mode {
+            let current = folder == self.pane_path(side);
+            column = column.child(div().h(px(26.)).flex_none().px_3().flex().items_center()
+                .border_b_1().border_color(rgb(BORDER)).text_size(px(12.))
+                .text_color(rgb(if current { TEXT } else { TEXT_MUTED }))
+                .child(div().min_w_0().truncate().child(browser::display_name(&folder))));
+        }
         let background_folder = folder.clone();
         column = column.on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             this.open_menu(event.position, MenuTarget::Folder(background_folder.clone()), cx);
@@ -648,7 +681,8 @@ impl Explorer {
         };
         let text = if entry.hidden { TEXT_MUTED } else { TEXT };
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
-            .w_full().h(px(ROW_HEIGHT)).px_2().flex().items_center().gap_2().rounded_md()
+            .w_full().h(px(ROW_HEIGHT)).pl(px(6.)).pr_2().flex().items_center().gap_2().rounded_sm()
+            .border_l_2().border_color(rgb(if selected && focused_pane { ACCENT } else { bg.unwrap_or(SURFACE) }))
             .text_size(px(13.)).text_color(rgb(text)).cursor_pointer()
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
@@ -660,7 +694,7 @@ impl Explorer {
             row.child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
         };
         if list_mode {
-            let (show_modified, show_kind) = self.list_columns();
+            let (show_modified, show_kind) = self.list_columns(side);
             row = row
                 .when(show_modified, |row| row.child(div().w(px(140.)).flex_none().px_2().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child(entry.modified.map(format_time).unwrap_or_default())))
@@ -758,7 +792,7 @@ impl Explorer {
 
     fn property(label: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
         div().flex().gap_2().text_size(px(12.))
-            .child(div().w(px(76.)).flex_none().text_color(rgb(TEXT_DIM)).child(label))
+            .child(div().w(px(76.)).flex_none().text_color(rgb(TEXT_MUTED)).child(label))
             .child(div().flex_1().min_w_0().text_color(rgb(TEXT)).child(value.into()))
     }
 
@@ -826,20 +860,20 @@ impl Explorer {
                 }
             }
             return panel
-                .child(div().flex().flex_col().items_center().gap_2().pt_2()
-                    .child(svg().path("fm/layers.svg").size(px(56.)).text_color(rgb(ACCENT)))
+                .child(div().flex().items_center().gap_2()
+                    .child(icon("fm/layers.svg", TEXT_MUTED))
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Выбрано: {}", marked.len()))))
                 .child(div().flex().flex_col().gap_1p5()
                     .child(Self::property("Файлов", files.to_string()))
                     .child(Self::property("Папок", folders.to_string()))
                     .child(Self::property("Размер", format!("{} (без папок)", format_size(bytes)))))
                 .child(div().flex().gap_2()
-                    .child(text_button("group-stage", "В Drop Zone", ButtonKind::Primary).flex_1()
+                    .child(text_button("group-stage", "Отложить", ButtonKind::Ghost).flex_1()
                         .on_click(cx.listener(|this, _, _, cx| this.stage(cx))))
-                    .child(text_button("group-rename", "Переименовать…", ButtonKind::Ghost)
-                        .on_click(cx.listener(|this, _, window, cx| this.begin_bulk_rename(window, cx))))
                     .child(text_button("group-recycle", "В Корзину", ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, _, cx| this.recycle(cx)))))
+                .child(text_button("group-rename", "Переименовать…", ButtonKind::Ghost).w_full()
+                    .on_click(cx.listener(|this, _, window, cx| this.begin_bulk_rename(window, cx))))
                 .into_any_element();
         }
         let selected_entry = self.selected.clone().and_then(|selected| {
@@ -857,9 +891,9 @@ impl Explorer {
             None => (browser::display_name(&current), "fm/folder-fill.svg", FOLDER),
         };
         panel = panel.child(
-            div().flex().flex_col().items_center().gap_2().pt_2()
-                .child(svg().path(icon_path).size(px(56.)).text_color(rgb(tint)))
-                .child(div().w_full().text_center().font_weight(gpui::FontWeight::SEMIBOLD)
+            div().flex().items_center().gap_2()
+                .child(icon(icon_path, tint))
+                .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::SEMIBOLD)
                     .overflow_hidden().child(title))
         );
         match &selected_entry {
@@ -955,8 +989,8 @@ impl Explorer {
     fn history_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let watching = self.watched_root.is_some();
         let mut section = div().flex().flex_col().gap_2().pt_2().border_t_1().border_color(rgb(BORDER))
-            .child(div().flex().items_center().justify_between()
-                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ИСТОРИЯ ИЗМЕНЕНИЙ"))
+            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("История изменений"))
+            .child(div().flex()
                 .child(text_button("watch-toggle", if watching { "Остановить" } else { "Записывать историю" },
                     ButtonKind::Ghost).text_size(px(12.))
                     .on_click(cx.listener(|this, _, _, cx| this.watch(cx)))));
@@ -1049,7 +1083,7 @@ impl Explorer {
         if !self.zone.items().is_empty() {
             bar = bar.child(div().flex().items_center().gap_1()
                 .child(small_icon("fm/inbox.svg", ACCENT))
-                .child(format!("Drop Zone: {}", self.zone.items().len())));
+                .child(format!("Для переноса: {}", self.zone.items().len())));
         }
         if self.watched_root.is_some() {
             bar = bar.child(div().flex().items_center().gap_1().text_color(rgb(SUCCESS))
@@ -1145,7 +1179,7 @@ impl Explorer {
                             this.copy_path(&copy_target, cx);
                         })))
                     .child(Self::menu_item("m-stage", "fm/inbox.svg",
-                        if count > 1 { format!("Добавить в Drop Zone ({count})") } else { "Добавить в Drop Zone".into() }, "Ctrl+Shift+S", false, true)
+                        if count > 1 { format!("Отложить для переноса ({count})") } else { "Отложить для переноса".into() }, "Ctrl+Shift+S", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
                             this.stage_paths(&stage_target, cx);
@@ -1183,12 +1217,12 @@ impl Explorer {
                             this.clipboard_paste(cx);
                         })))
                     .child(Self::menu_item("m-paste", "fm/clipboard.svg",
-                        format!("Копировать сюда из Drop Zone ({staged})"), "", false, staged > 0)
+                        format!("Копировать отложенные сюда ({staged})"), "", false, staged > 0)
                         .when(staged > 0, |this| this.on_click(cx.listener(move |this, _, _, cx| {
                             this.enter_folder(&f3, cx);
                             this.paste(cx);
                         }))))
-                    .child(Self::menu_item("m-move-here", "fm/move.svg", "Переместить сюда из Drop Zone", "", false, staged > 0)
+                    .child(Self::menu_item("m-move-here", "fm/move.svg", "Переместить отложенные сюда", "", false, staged > 0)
                         .when(staged > 0, |this| this.on_click(cx.listener(move |this, _, _, cx| {
                             this.enter_folder(&f4, cx);
                             this.move_staged(cx);
@@ -1451,8 +1485,8 @@ impl Render for Explorer {
         // Panels without an explicit size get the group average; give each
         // a size derived from the window so panes split the space evenly.
         let window_width = window.viewport_size().width / px(1.);
-        let sidebar_width = if self.show_sidebar { 220. } else { 0. };
-        let inspector_width = if self.show_inspector { 290. } else { 0. };
+        let sidebar_width = if self.show_sidebar { 200. } else { 0. };
+        let inspector_width = if self.show_inspector { 260. } else { 0. };
         let pane_count = if split && !self.search_active { 2. } else { 1. };
         let pane_width = ((window_width - sidebar_width - inspector_width) / pane_count).max(280.);
         self.pane_width = pane_width;

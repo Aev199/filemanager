@@ -12,7 +12,7 @@ impl Default for Preferences {
             light: false,
             show_hidden: false,
             show_sidebar: true,
-            show_inspector: true,
+            show_inspector: false,
         }
     }
 }
