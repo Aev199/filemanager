@@ -4,7 +4,7 @@ use crate::{
     theme::{self, *},
 };
 use filemanager_core::interface::{CommandId, CommandSpec, Preferences, commands};
-use gpui::{AnyElement, Context, Entity, Focusable, Window, div, prelude::*, px};
+use gpui::{AnimationExt, AnyElement, Context, Entity, Focusable, Window, div, prelude::*, px};
 use gpui_component::{
     input::{Input, InputState},
     theme::{Theme, ThemeMode},
@@ -14,6 +14,8 @@ pub(crate) struct Palette {
     pub input: Entity<InputState>,
     pub query: String,
     pub selected: usize,
+    /// Keeps the chosen command visible in the height-limited list.
+    pub scroll: gpui::ScrollHandle,
 }
 pub(crate) struct Settings {
     pub focus: gpui::FocusHandle,
@@ -64,17 +66,28 @@ impl Explorer {
             input,
             query: String::new(),
             selected: 0,
+            scroll: gpui::ScrollHandle::new(),
         });
         self.context_menu = None;
         cx.notify();
     }
     pub(crate) fn palette_move(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(palette) = self.palette.as_mut() {
-            let len = commands(&palette.query).len();
+            let results = commands(&palette.query);
             palette.selected = palette
                 .selected
                 .saturating_add_signed(delta)
-                .min(len.saturating_sub(1));
+                .min(results.len().saturating_sub(1));
+            // The list also holds one header per section before its commands.
+            let mut headers = 0;
+            let mut group = "";
+            for command in results.iter().take(palette.selected + 1) {
+                if command.group != group {
+                    group = command.group;
+                    headers += 1;
+                }
+            }
+            palette.scroll.scroll_to_item(palette.selected + headers);
             cx.notify();
         }
     }
@@ -245,51 +258,74 @@ impl Explorer {
     }
     pub(crate) fn interface_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let body = if let Some(palette) = self.palette.as_ref() {
+            // Atlas: search field on top, commands in sections with icons
+            // and shortcut keys, key hints at the bottom.
             let results = commands(&palette.query);
-            let mut body = div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child("Команды · Ctrl+K")
-                .child(Input::new(&palette.input))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(TEXT_MUTED))
-                        .child("↑ ↓ — выбор · Enter — выполнить · Esc — закрыть"),
-                );
+            let mut list = div().id("palette-list").max_h(px(380.)).overflow_y_scroll().py_1()
+                .track_scroll(&palette.scroll);
             if results.is_empty() {
-                body = body.child(
-                    div()
-                        .p_3()
-                        .text_color(rgb(TEXT_MUTED))
-                        .child("Команды не найдены"),
-                );
+                list = list.child(div().px_4().py_3().text_color(rgb(TEXT_MUTED)).child("Команды не найдены"));
             }
+            let count = results.len();
+            let mut group = "";
             for (index, command) in results.into_iter().enumerate() {
+                if command.group != group {
+                    group = command.group;
+                    list = list.child(
+                        div().px_4().pt_2().pb_1().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(group),
+                    );
+                }
                 let enabled = self.command_enabled(&command);
-                body = body.child(
+                let chosen = index == palette.selected;
+                let fg = if chosen { SELECTION_TEXT } else { TEXT };
+                list = list.child(
                     div()
                         .id(("palette-command", index))
-                        .h(px(28.))
-                        .px_2()
+                        .mx_1()
+                        .h(px(30.))
+                        .px_3()
                         .flex()
                         .items_center()
+                        .gap_3()
                         .rounded_md()
-                        .when(index == palette.selected, |row| row.bg(rgb(SELECTED)))
-                        .text_color(rgb(if index == palette.selected { SELECTION_TEXT } else { TEXT }))
+                        .when(chosen, |row| row.bg(rgb(SELECTED)))
+                        .text_color(rgb(fg))
                         .when(!enabled, |row| row.opacity(0.4))
                         .when(enabled, |row| {
-                            row.cursor_pointer().when(index != palette.selected, |row| row.hover(|s| s.bg(rgb(HOVER))))
+                            row.cursor_pointer().when(!chosen, |row| row.hover(|s| s.bg(rgb(HOVER))))
                         })
-                        .child(div().flex_1().child(command.label))
-                        .child(div().text_color(rgb(if index == palette.selected { SELECTION_TEXT } else { TEXT_MUTED })).child(command.shortcut))
+                        .child(gpui::svg().path(command_icon(command.id)).size(px(14.)).flex_none()
+                            .text_color(rgb(if chosen { SELECTION_TEXT } else { TEXT_MUTED })))
+                        .child(div().flex_1().min_w_0().truncate().child(command.label))
+                        .when(!command.shortcut.is_empty(), |row| row.child(
+                            div().flex_none().px_1p5().rounded_sm().border_1()
+                                .border_color(rgb(if chosen { SELECTION_TEXT } else { BORDER_STRONG }))
+                                .text_size(px(11.))
+                                .text_color(rgb(if chosen { SELECTION_TEXT } else { TEXT_MUTED }))
+                                .child(command.shortcut)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.execute_command(command, window, cx)
                         })),
                 );
             }
-            body
+            div()
+                .flex()
+                .flex_col()
+                .p_0()
+                .child(
+                    div().h(px(44.)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
+                        .child(Input::new(&palette.input).appearance(false)
+                            .prefix(gpui::svg().path("fm/search.svg").size(px(14.)).text_color(rgb(TEXT_MUTED)))),
+                )
+                .child(list)
+                .child(
+                    div().h(px(28.)).px_4().flex().items_center().gap_4().border_t_1().border_color(rgb(BORDER))
+                        .text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                        .child(div().flex_1().child(format!("Команд: {count}")))
+                        .child("↑ ↓ выбор")
+                        .child("Enter выполнить")
+                        .child("Esc закрыть"),
+                )
         } else if let Some(settings) = self.settings.as_ref() {
             let mut body = div().flex().flex_col().gap_3().child("Настройки").child(
                 div()
@@ -407,13 +443,22 @@ impl Explorer {
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
                 )
                 .child(
-                    body.w(px(520.))
+                    body.w(px(if self.palette.is_some() { 560. } else { 520. }))
                         .max_w_full()
-                        .p_4()
+                        .when(self.palette.is_none(), |body| body.p_4())
+                        .overflow_hidden()
                         .rounded_lg()
                         .bg(rgb(RAISED))
                         .border_1()
-                        .border_color(rgb(BORDER_STRONG)),
+                        .border_color(rgb(BORDER_STRONG))
+                        // Atlas fades and lifts its popups in about 120 ms;
+                        // navigation itself stays instant.
+                        .with_animation(
+                            if self.palette.is_some() { "palette-appear" } else { "settings-appear" },
+                            gpui::Animation::new(std::time::Duration::from_millis(120))
+                                .with_easing(gpui::ease_out_quint()),
+                            |body, delta| body.opacity(delta).mt(px(-6. * (1. - delta))),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -671,5 +716,30 @@ impl Explorer {
                 .border_color(rgb(ACCENT))
                 .into_any_element(),
         )
+    }
+}
+
+/// Icon of a palette command, from the same set as the toolbar.
+fn command_icon(id: CommandId) -> &'static str {
+    use CommandId::*;
+    match id {
+        NewTab => "fm/plus.svg",
+        CloseTab => "fm/x.svg",
+        PinTab => "fm/layers.svg",
+        Split => "fm/split.svg",
+        Back => "fm/arrow-left.svg",
+        Forward => "fm/arrow-right.svg",
+        Up => "fm/arrow-up.svg",
+        Address => "fm/external.svg",
+        Find => "fm/search.svg",
+        Refresh => "fm/refresh.svg",
+        NewFolder => "fm/folder-plus.svg",
+        Rename => "fm/pencil.svg",
+        ToggleHidden => "fm/eye.svg",
+        Sidebar => "fm/panel-left.svg",
+        Inspector => "fm/panel-right.svg",
+        List => "fm/list.svg",
+        Columns => "fm/columns.svg",
+        Settings => "fm/command.svg",
     }
 }

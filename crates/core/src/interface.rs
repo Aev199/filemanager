@@ -42,6 +42,8 @@ pub struct CommandSpec {
     pub id: CommandId,
     pub label: &'static str,
     pub shortcut: &'static str,
+    /// Section of the palette, in display order, as in Atlas.
+    pub group: &'static str,
 }
 impl CommandSpec {
     pub fn enabled(&self, has_selection: bool, busy: bool) -> bool {
@@ -55,31 +57,36 @@ impl CommandSpec {
 pub fn commands(query: &str) -> Vec<CommandSpec> {
     use CommandId::*;
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    const TABS: &str = "Вкладки и панели";
+    const NAVIGATION: &str = "Навигация";
+    const FILES: &str = "Файлы";
+    const VIEW: &str = "Вид";
     [
-        (Back, "Назад", "Alt+←"),
-        (Forward, "Вперёд", "Alt+→"),
-        (Up, "Вверх", "Alt+↑"),
-        (NewTab, "Новая вкладка", "Ctrl+T"),
-        (CloseTab, "Закрыть вкладку", "Ctrl+W"),
-        (Split, "Разделить окно", "Ctrl+\\"),
-        (Refresh, "Обновить папку", "F5"),
-        (Find, "Поиск файлов", "Ctrl+F"),
-        (Address, "Перейти по пути", "Ctrl+L"),
-        (Rename, "Переименовать выбранное", "F2"),
-        (NewFolder, "Новая папка", "Ctrl+Shift+N"),
-        (ToggleHidden, "Показать скрытые файлы", "Ctrl+H"),
-        (Sidebar, "Боковая панель", "Ctrl+B"),
-        (Inspector, "Панель сведений", "Ctrl+I"),
-        (List, "Вид список", "Ctrl+1"),
-        (Columns, "Вид колонки", "Ctrl+2"),
-        (PinTab, "Закрепить или открепить вкладку", ""),
-        (Settings, "Настройки", "Ctrl+,"),
+        (NewTab, "Новая вкладка", "Ctrl+T", TABS),
+        (CloseTab, "Закрыть вкладку", "Ctrl+W", TABS),
+        (PinTab, "Закрепить или открепить вкладку", "", TABS),
+        (Split, "Разделить окно", "Ctrl+\\", TABS),
+        (Back, "Назад", "Alt+←", NAVIGATION),
+        (Forward, "Вперёд", "Alt+→", NAVIGATION),
+        (Up, "Вверх", "Alt+↑", NAVIGATION),
+        (Address, "Перейти по пути", "Ctrl+L", NAVIGATION),
+        (Find, "Поиск файлов", "Ctrl+F", NAVIGATION),
+        (Refresh, "Обновить папку", "F5", NAVIGATION),
+        (NewFolder, "Новая папка", "Ctrl+Shift+N", FILES),
+        (Rename, "Переименовать выбранное", "F2", FILES),
+        (ToggleHidden, "Показать скрытые файлы", "Ctrl+.", VIEW),
+        (Sidebar, "Боковая панель", "Ctrl+B", VIEW),
+        (Inspector, "Панель сведений", "Ctrl+I", VIEW),
+        (List, "Вид список", "Ctrl+1", VIEW),
+        (Columns, "Вид колонки", "Ctrl+2", VIEW),
+        (Settings, "Настройки", "Ctrl+,", VIEW),
     ]
     .into_iter()
-    .map(|(id, label, shortcut)| CommandSpec {
+    .map(|(id, label, shortcut, group)| CommandSpec {
         id,
         label,
         shortcut,
+        group,
     })
     .filter(|cmd| {
         let label = cmd.label.to_lowercase();

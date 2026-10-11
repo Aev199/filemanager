@@ -31,6 +31,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("enter", SettingsApply, Some("SettingsOverlay")),
         KeyBinding::new("escape", DismissOverlay, Some("SettingsOverlay")),
         KeyBinding::new("ctrl-k", OpenPalette, Some(CONTEXT)),
+        // Atlas opens its command list with Ctrl+Shift+P and toggles hidden files with Ctrl+.
+        KeyBinding::new("ctrl-shift-p", OpenPalette, Some(CONTEXT)),
+        KeyBinding::new("ctrl-.", ToggleHidden, Some(CONTEXT)),
         KeyBinding::new("ctrl-,", OpenSettings, Some(CONTEXT)),
         KeyBinding::new("alt-left", Back, Some(CONTEXT)),
         KeyBinding::new("alt-right", Forward, Some(CONTEXT)),
@@ -398,6 +401,7 @@ impl Explorer {
     }
     pub(crate) fn key_stage(&mut self, _: &Stage, _: &mut Window, cx: &mut Context<Self>) { self.stage(cx); }
     pub(crate) fn key_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_open = true;
         let focus = self.search_input.focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -437,12 +441,13 @@ impl Explorer {
         self.address_editing = false;
         self.context_menu = None;
         self.confirm_recycle = None;
+        self.filter_open = false;
         if self.search_active || !self.filter.is_empty() {
             self.close_search();
             self.filter.clear();
             self.search_query.clear();
             self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
-            self.status = "Поиск закрыт".into();
+            self.status.clear();
         } else if had_popup {
             self.status = "Отменено, файлы не изменены".into();
         }

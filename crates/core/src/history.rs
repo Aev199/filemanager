@@ -140,14 +140,17 @@ impl Journal {
                     ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ns=excluded.modified_ns",
             params![path, size, modified]).map_err(sqlite_error)?;
         let event_time = clock_ms(SystemTime::now());
-        // One Ctrl+S can emit many rapid MODIFY signals. Merge such bursts
-        // into one "modified" row, but never overwrite a user annotation.
+        // One Ctrl+S can emit many rapid MODIFY signals, and a file being
+        // created is often first seen empty and then written. Merge such
+        // bursts into the previous row, but never overwrite a user annotation.
         let recent: Option<(i64, String, i64, String, Option<String>)> = tx.query_row(
             "SELECT id, kind, observed_ms, comment, author FROM events WHERE path=?1 ORDER BY id DESC LIMIT 1",
             params![path], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).optional().map_err(sqlite_error)?;
         let merge = recent.filter(|(_, previous_kind, time, comment, author)|
-            kind == "modified" && previous_kind == "modified" &&
+            kind == "modified"
+                && (previous_kind == "modified"
+                    || (matches!(previous_kind.as_str(), "observed" | "version") && old.is_some_and(|(size, _)| size == 0))) &&
             event_time.saturating_sub(*time) < 2000 && comment.is_empty() && author.is_none()
         );
         if let Some((id, _, _, _, _)) = merge {
@@ -325,6 +328,20 @@ mod tests {
         let journal = Journal::open(temp.path().join("meta.sqlite3")).unwrap();
         assert!(!journal.observe(&nested).unwrap());
         assert!(journal.events(&nested, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_seen_empty_while_being_created_is_one_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("новый.docx");
+        let journal = Journal::open(temp.path().join("meta.sqlite3")).unwrap();
+        fs::write(&path, b"").unwrap();
+        journal.observe(&path).unwrap();
+        fs::write(&path, b"written right after creation").unwrap();
+        journal.observe(&path).unwrap();
+        let events = journal.events(&path, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "observed");
     }
 
     #[test]

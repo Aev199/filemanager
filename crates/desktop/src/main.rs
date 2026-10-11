@@ -189,6 +189,8 @@ struct Explorer {
     folder_views: HashMap<PathBuf, FolderView>,
     scroll_handles: HashMap<PathBuf, UniformListScrollHandle>,
     address_editing: bool,
+    /// The name filter field is shown in the bottom bar (Ctrl+F or the magnifier).
+    filter_open: bool,
     /// Width of one file pane at the last layout, for column dropping.
     pane_width: f32,
     pane_measured_widths: [Option<f32>; 2],
@@ -406,6 +408,7 @@ impl Explorer {
             folder_views: HashMap::new(),
             scroll_handles: HashMap::new(),
             address_editing: false,
+            filter_open: false,
             marked: Vec::new(),
             anchor: None,
             typeahead: String::new(),

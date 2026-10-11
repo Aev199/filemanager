@@ -28,6 +28,9 @@ use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, Si
 
 use crate::layout::ROW_HEIGHT;
 
+/// Fixed, as in Atlas: the sidebar does not grow with the window.
+const SIDEBAR_WIDTH: f32 = 220.;
+
 fn column_scroll_area(id: &'static str, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<> {
     div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
         .overflow_x_scroll().lock_scroll_axis().horizontal_scrollbar(scroll)
@@ -62,6 +65,9 @@ pub fn apply_component_theme(cx: &mut App) {
     colors.scrollbar = rgb_to_hsla(rgba(0x00000000));
     colors.scrollbar_thumb = rgb_to_hsla(rgba(if crate::theme::is_light() { 0x00000033 } else { 0xFFFFFF22 }));
     colors.scrollbar_thumb_hover = rgb_to_hsla(rgba(if crate::theme::is_light() { 0x00000055 } else { 0xFFFFFF40 }));
+    // No glow outside a focused field (it came out reddish); the blue
+    // border is enough, as in Atlas.
+    cx.global_mut::<Theme>().focus_ring = false;
     // Re-project onto the base layer, which draws focus rings and scrollbars.
     Theme::sync_base(cx);
 }
@@ -102,6 +108,16 @@ fn icon_button(
 }
 
 /// Text button for dialogs and panels.
+/// Small icon button of the bottom bar, like the corner icons in Atlas.
+fn bar_button(id: &'static str, path: &'static str, tip: &'static str, active: bool) -> Stateful<Div> {
+    div().id(id).flex_none().size(px(24.)).rounded_sm().flex().items_center().justify_center()
+        .cursor_pointer()
+        .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
+        .hover(|style| style.bg(rgb(HOVER)))
+        .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+        .child(svg().path(path).size(px(14.)).text_color(rgb(if active { ACCENT } else { TEXT_MUTED })))
+}
+
 /// «Версия 1.6», or «Исходный» for the file without a suffix.
 fn version_label(version: &filemanager_core::versions::Version) -> String {
     if version.number.is_empty() { "Исходный".into() } else { format!("Версия {}", version.label()) }
@@ -207,14 +223,15 @@ impl Explorer {
         TitleBar::new().h(px(40.)).pl_0().bg(rgb(WINDOW)).border_color(rgb(BORDER))
             .child(
                 div().h_full().flex_1().min_w_0().flex().items_end()
-                    .child(
+                    .when(!self.show_sidebar, |bar| bar.child(
                         div().flex_none().h_full().flex().items_center().pl_2()
-                            .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Боковая панель (Ctrl+B)", self.show_sidebar, true)
+                            .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Боковая панель (Ctrl+B)", false, true)
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_sidebar = !this.show_sidebar;
+                                    this.show_sidebar = true;
                                     cx.notify();
                                 })))
-                    )
+                    ))
+                    .when(self.show_sidebar, |bar| bar.child(div().w_1()))
                     .child(self.tab_strip(cx))
                     // Free space: window drag area.
                     .child(div().flex_1().h_full())
@@ -283,8 +300,7 @@ impl Explorer {
         let can_back = pane.can_go_back();
         let can_forward = pane.can_go_forward();
         let can_up = pane.path.parent().is_some();
-        let split = self.browser.active().right.is_some();
-        div().w_full().h(px(46.)).flex_none().flex().items_center().gap_1().px_2()
+        div().w_full().h(px(40.)).flex_none().flex().items_center().gap_1().px_2()
             .bg(rgb(SURFACE)).border_b_1().border_color(rgb(BORDER))
             .child(icon_button("back", "fm/arrow-left.svg", "Назад (Alt+←)", false, can_back)
                 .on_click(cx.listener(|this, _, _, cx| this.go_back(false, cx))))
@@ -292,35 +308,8 @@ impl Explorer {
                 .on_click(cx.listener(|this, _, _, cx| this.go_back(true, cx))))
             .child(icon_button("up", "fm/arrow-up.svg", "Вверх (Backspace)", false, can_up)
                 .on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
-            .child(icon_button("refresh", "fm/refresh.svg", "Обновить (F5)", false, true)
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_visible_directories(cx))))
-            .child(icon_button("palette", "fm/command.svg", "Команды (Ctrl+K)", false, true)
-                .on_click(cx.listener(|this,_,window,cx|this.open_palette(window,cx))))
             .child(div().w_2())
             .child(self.breadcrumbs(cx))
-            .child(div().w_2())
-            .child(
-                div().flex_none().flex().items_center().p_0p5().gap_0p5().rounded_md().bg(rgb(PANEL))
-                    .child(icon_button("view-list", "fm/list.svg", "Список (Ctrl+1)", !self.miller_mode, true)
-                        .on_click(cx.listener(|this, _, _, cx| this.set_miller(false, cx))))
-                    .child(icon_button("view-columns", "fm/columns.svg", "Колонки (Ctrl+2)", self.miller_mode, true)
-                        .on_click(cx.listener(|this, _, _, cx| this.set_miller(true, cx))))
-            )
-            .child(icon_button("split", "fm/split.svg", "Разделить окно (Ctrl+\\)", split, true)
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_split(cx))))
-            .child(icon_button("hidden", if self.show_hidden { "fm/eye.svg" } else { "fm/eye-off.svg" },
-                "Скрытые файлы (Ctrl+H)", self.show_hidden, true)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_hidden = !this.show_hidden;
-                    cx.notify();
-                })))
-            .child(div().w_1())
-            .child(
-                div().id("filter-field").flex_none().w(px(190.))
-                    .tooltip(|window, cx| Tooltip::new("Фильтр по имени в этой папке. Enter — поиск во вложенных папках (Ctrl+F).").build(window, cx))
-                    .child(Input::new(&self.search_input).h(px(30.))
-                        .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))
-            )
     }
 
     // ------------------------------------------------------------- sidebar
@@ -345,8 +334,8 @@ impl Explorer {
         let current = self.pane_path(self.active_side());
         let all: Vec<Place> = self.places.iter().chain(self.drives.iter()).cloned().collect();
         let active_place = containing_place(&all, &current).map(|place| place.path.clone());
-        let mut side = div().id("sidebar").size_full().min_h_0().flex().flex_col().pb_3()
-            .overflow_y_scrollbar().bg(rgb(PANEL)).text_size(px(13.))
+        let mut side = div().id("sidebar").flex_1().min_h_0().flex().flex_col().pb_3()
+            .overflow_y_scrollbar().text_size(px(13.))
             .child(section_title("Избранное"));
         for (index, place) in self.places.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
@@ -398,7 +387,20 @@ impl Explorer {
                 cx.listener(|this, _, window, cx| this.begin_save_workspace(window, cx))))
             .child(self.sidebar_action("operation-review", "fm/history.svg", "Журнал операций",
                 cx.listener(|this, _, _, cx| this.toggle_operation_review(cx))));
-        side.into_any_element()
+        // Full window height like Atlas; its header also drags the window.
+        div().w(px(SIDEBAR_WIDTH)).flex_none().h_full().flex().flex_col().bg(rgb(PANEL))
+            .border_r_1().border_color(rgb(BORDER))
+            .child(div().h(px(40.)).flex_none().pl_3().pr_2().flex().items_center().gap_2()
+                .window_control_area(gpui::WindowControlArea::Drag)
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(rgb(TEXT_MUTED))
+                    .child("Filemanager"))
+                .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Скрыть боковую панель (Ctrl+B)", false, true)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_sidebar = false;
+                        cx.notify();
+                    }))))
+            .child(side)
+            .into_any_element()
     }
 
     fn sidebar_action(
@@ -1170,14 +1172,23 @@ impl Explorer {
                 else { format!("Выбрано: {} · {}", entry.name, format_size(entry.size)) }
             })
         }) };
-        let mut bar = div().w_full().h(px(28.)).flex_none().px_3().flex().items_center().gap_4()
+        let filter_shown = self.filter_open || !self.filter.is_empty();
+        let split = self.browser.active().right.is_some();
+        let mut bar = div().w_full().h(px(32.)).flex_none().pl_1().pr_1().flex().items_center().gap_3()
             .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+            // Atlas: a magnifier in the corner; the filter field opens in place.
+            .when(!filter_shown, |this| this.child(
+                bar_button("filter-open", "fm/search.svg", "Фильтр по имени (Ctrl+F)", false)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.key_find(&crate::keys::Find, window, cx);
+                    }))))
+            .when(filter_shown, |this| this.child(
+                div().id("filter-field").flex_none().w(px(200.))
+                    .tooltip(|window, cx| Tooltip::new("Фильтр по имени в этой папке. Enter — во вложенных папках, Esc — закрыть.").build(window, cx))
+                    .child(Input::new(&self.search_input).h(px(24.)).text_size(px(12.))
+                        .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
-            .when(!self.filter.is_empty(), |this| this.child(
-                div().flex().items_center().gap_1().text_color(rgb(ACCENT))
-                    .child(small_icon("fm/search.svg", ACCENT))
-                    .child(format!("фильтр «{}» · Enter — во вложенных папках", self.filter))))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
             .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
                 .child(crate::messages::localize(&self.status)));
@@ -1198,7 +1209,21 @@ impl Explorer {
             bar = bar.child(div().flex().items_center().gap_1().text_color(rgb(SUCCESS))
                 .child(small_icon("fm/eye-watch.svg", SUCCESS)).child("Наблюдение"));
         }
-        bar
+        bar.child(div().flex_none().flex().items_center().gap_0p5()
+            .child(bar_button("bar-new-folder", "fm/folder-plus.svg", "Новая папка (Ctrl+Shift+N)", false)
+                .on_click(cx.listener(|this, _, window, cx| this.begin_new_folder(window, cx))))
+            .child(bar_button("bar-split", "fm/split.svg", "Разделить окно (Ctrl+\\)", split)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_split(cx))))
+            .child(bar_button("bar-hidden", if self.show_hidden { "fm/eye.svg" } else { "fm/eye-off.svg" },
+                "Скрытые файлы (Ctrl+.)", self.show_hidden)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_hidden = !this.show_hidden;
+                    cx.notify();
+                })))
+            .child(bar_button("bar-list", "fm/list.svg", "Список (Ctrl+1)", !self.miller_mode)
+                .on_click(cx.listener(|this, _, _, cx| this.set_miller(false, cx))))
+            .child(bar_button("bar-columns", "fm/columns.svg", "Колонки (Ctrl+2)", self.miller_mode)
+                .on_click(cx.listener(|this, _, _, cx| this.set_miller(true, cx)))))
     }
 
     // ------------------------------------------------------- context menu
@@ -1594,17 +1619,13 @@ impl Render for Explorer {
         // Panels without an explicit size get the group average; give each
         // a size derived from the window so panes split the space evenly.
         let window_width = window.viewport_size().width / px(1.);
-        let sidebar_width = if self.show_sidebar { 200. } else { 0. };
+        let sidebar_width = if self.show_sidebar { SIDEBAR_WIDTH } else { 0. };
         let inspector_width = if self.show_inspector { 260. } else { 0. };
         let pane_count = if split && !self.search_active { 2. } else { 1. };
         let pane_width = ((window_width - sidebar_width - inspector_width) / pane_count).max(280.);
         self.pane_width = pane_width;
         let group_id = format!("main-{}-{}-{}-{}", self.show_sidebar, self.show_inspector, pane_count, self.search_active);
         let mut panels = h_resizable(SharedString::from(group_id));
-        if self.show_sidebar {
-            panels = panels.child(resizable_panel().size(px(sidebar_width)).size_range(px(200.)..px(360.))
-                .child(self.sidebar(cx)));
-        }
         if self.search_active {
             panels = panels.child(resizable_panel().size(px(pane_width)).size_range(px(320.)..px(4000.))
                 .child(self.search_results(cx)));
@@ -1695,10 +1716,15 @@ impl Render for Explorer {
                     this.type_ahead(text, cx);
                 }
             }))
-            .child(self.title_bar(cx))
-            .child(self.toolbar(cx))
-            .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
-            .child(self.status_bar(cx));
+            // Atlas: the sidebar runs the full height; tabs, navigation,
+            // panes and the bottom bar sit to its right.
+            .child(div().flex_1().min_h_0().w_full().flex()
+                .when(self.show_sidebar, |row| row.child(self.sidebar(cx)))
+                .child(div().flex_1().min_w_0().h_full().flex().flex_col()
+                    .child(self.title_bar(cx))
+                    .child(self.toolbar(cx))
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
+                    .child(self.status_bar(cx))));
         if let Some(menu) = self.context_menu.clone() {
             root = root.child(self.context_menu_view(&menu, cx));
         }
