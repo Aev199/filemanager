@@ -758,6 +758,10 @@ impl Explorer {
     fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let mut panel = div().id("inspector").size_full().min_h_0().flex().flex_col().gap_3().p_4()
             .overflow_y_scrollbar().bg(rgb(PANEL)).text_size(px(13.));
+        if self.document_preview.is_some() || self.preview_launch_busy {
+            panel = panel.child(text_button("document-preview-close", "Закрыть предпросмотр", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _, _, cx| this.close_document_preview(cx))));
+        }
         if self.operation_review {
             panel = panel.child(div().flex().items_center().justify_between()
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Последние операции"))
@@ -883,6 +887,11 @@ impl Explorer {
                     );
                 }
                 panel = panel.child(self.preview_section(entry));
+                if filemanager_core::preview_host::supports_document(&entry.path) {
+                    let path = entry.path.clone();
+                    panel = panel.child(text_button("document-preview-open", "Просмотреть документ", ButtonKind::Ghost)
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_document_preview(path.clone(), cx))));
+                }
             }
             None if self.selected.is_some() => {
                 let selected = self.selected.as_ref().unwrap();
@@ -908,29 +917,13 @@ impl Explorer {
     }
 
     fn preview_section(&self, entry: &Entry) -> AnyElement {
-        // Images are decoded by GPUI off the UI thread and cached; very
-        // large files are skipped so a 500 MB TIFF cannot eat memory.
-        const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
+        // GPUI only decodes dimension-validated small PNGs from the helper.
         if let Some(thumbnail) = self.inspector_thumbnail.clone().filter(|_| self.inspector_path.as_ref() == Some(&entry.path)) {
             return div().flex().flex_col().gap_1()
                 .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ПРЕДПРОСМОТР"))
                 .child(div().w_full().h(px(240.)).p_1().rounded_md().bg(rgb(SURFACE))
                     .border_1().border_color(rgb(BORDER)).flex().items_center().justify_center()
                     .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)))
-                .into_any_element();
-        }
-        let is_image = matches!(entry.extension().as_deref(),
-            Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "tif" | "tiff"));
-        // Large images on Windows wait for the Shell thumbnail instead.
-        let direct_limit = if cfg!(windows) { 16 * 1024 * 1024 } else { IMAGE_LIMIT };
-        if is_image && entry.size <= direct_limit {
-            return div().flex().flex_col().gap_1()
-                .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("ПРЕДПРОСМОТР · ИЗОБРАЖЕНИЕ"))
-                .child(div().w_full().h(px(220.)).p_1().rounded_md().bg(rgb(SURFACE))
-                    .border_1().border_color(rgb(BORDER)).flex().items_center().justify_center()
-                    .child(img(entry.path.clone()).size_full().object_fit(ObjectFit::Contain)
-                        .with_fallback(|| div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
-                            .child("Не удалось показать изображение").into_any_element())))
                 .into_any_element();
         }
         if self.inspector_loading {

@@ -88,7 +88,7 @@ pub fn preview(path: &Path, max_bytes: u64) -> io::Result<Preview> {
         return Ok(Preview { kind: "metadata", description: format!("Файл {} · {} байт. Содержимое открывается в связанной программе.", extension.to_uppercase(), meta.len()) });
     }
     if ["png", "jpg", "jpeg", "webp", "gif", "bmp"].contains(&extension.as_str()) {
-        return Ok(Preview { kind: "image", description: format!("Изображение · {} байт. Миниатюры появятся на этапе 3.", meta.len()) });
+        return Ok(Preview { kind: "image", description: format!("Изображение · {} байт. Если миниатюра недоступна, откройте файл обычной командой.", meta.len()) });
     }
     let file = File::open(path)?;
     let mut bytes = Vec::new();

@@ -6,6 +6,7 @@ mod messages;
 mod theme;
 mod view;
 mod bulk_rename;
+mod inspector;
 
 use filemanager_core::browser::{self, Browser};
 use filemanager_core::clipboard;
@@ -94,9 +95,8 @@ fn wants_shell_thumbnail(path: &std::path::Path) -> bool {
     match extension.as_str() {
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf"
         | "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v" | "mpg" | "mpeg"
-        | "heic" | "heif" | "psd" | "svg" | "dwg" | "dxf" => true,
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" =>
-            std::fs::metadata(path).is_ok_and(|m| m.len() > 16 * 1024 * 1024),
+        | "heic" | "heif" | "psd" | "svg" | "dwg" | "dxf"
+        | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "ico" => true,
         _ => false,
     }
 }
@@ -141,6 +141,11 @@ struct Explorer {
     inspector_preview: Option<(String, String)>,
     /// Shell thumbnail (PNG in the cache) for the selected file, if any.
     inspector_thumbnail: Option<PathBuf>,
+    inspector_details_busy: bool,
+    inspector_thumbnail_busy: bool,
+    document_preview: Option<filemanager_core::preview_host::PreviewProcess>,
+    preview_launch_busy: bool,
+    preview_launch_generation: u64,
     inspector_history: Vec<Event>,
     zone: DropZone,
     copy_in_progress: bool,
@@ -342,6 +347,11 @@ impl Explorer {
             inspector_dirty: false,
             inspector_preview: None,
             inspector_thumbnail: None,
+            inspector_details_busy: false,
+            inspector_thumbnail_busy: false,
+            document_preview: None,
+            preview_launch_busy: false,
+            preview_launch_generation: 0,
             inspector_history: Vec::new(),
             zone: DropZone::default(),
             copy_in_progress: false,
@@ -427,6 +437,8 @@ impl Explorer {
             return;
         };
         self.inspector_loading = true;
+        if self.inspector_details_busy { return; }
+        self.inspector_details_busy = true;
         let history_journal = self.journal.clone();
         let observe_history = self.watched_root.is_some();
         let selected_path = path.clone();
@@ -445,19 +457,20 @@ impl Explorer {
                 }
                 None => Ok(Vec::new()),
             };
-            let thumbnail = wants_shell_thumbnail(&path)
-                .then(|| filemanager_core::thumbnail::thumbnail(&path, 320).ok())
-                .flatten();
-            (preview, history, thumbnail)
+            (preview, history)
         });
         cx.spawn(async move |weak, cx| {
-            let (preview, history, thumbnail) = task.await;
+            let (preview, history) = task.await;
             let _ = weak.update(cx, |this, cx| {
+                this.inspector_details_busy = false;
                 if this.inspector_request != request || this.selected.as_ref() != Some(&selected_path) {
+                    this.inspector_loading = false;
+                    this.inspector_dirty = true;
+                    this.load_selected_details(cx);
                     return;
                 }
                 this.inspector_preview = preview;
-                this.inspector_thumbnail = thumbnail;
+                this.load_selected_thumbnail(cx);
                 match history {
                     Ok(history) => this.inspector_history = history,
                     Err(error) => {
@@ -1755,6 +1768,10 @@ impl Focusable for Explorer {
 }
 
 fn main() {
+    let helper_args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let Some(code) = filemanager_core::preview_host::helper_main(&helper_args) {
+        std::process::exit(code);
+    }
     gpui_platform::application().with_assets(assets::Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
@@ -1791,7 +1808,10 @@ fn main() {
             let saver = explorer.downgrade();
             // Tabs, splits and view mode come back on the next start.
             window.on_window_should_close(cx, move |_, cx| {
-                let _ = saver.update(cx, |this, _| this.persist_workspace());
+                let _ = saver.update(cx, |this, cx| {
+                    this.close_document_preview(cx);
+                    this.persist_workspace();
+                });
                 true
             });
             // gpui_ce_components require Root as the outer window view.

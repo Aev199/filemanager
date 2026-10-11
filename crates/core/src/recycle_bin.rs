@@ -33,26 +33,34 @@ pub(crate) fn restore(token: &RecycleToken) -> io::Result<PathBuf> {
 mod platform {
     use super::*;
     use std::collections::HashSet;
+    #[cfg(test)]
+    #[test]
+    fn reused_id_from_other_original_path_is_a_new_receipt() {
+        let path = PathBuf::from("/work/new/source");
+        let item = trash::TrashItem { id: "source.trashinfo".into(), name: "source".into(), original_parent: "/work/new".into(), time_deleted: 1 };
+        let before = HashSet::from([(item.id.clone(), PathBuf::from("/work/other/source"))]);
+        let token = capture(before, vec![item], &path).unwrap();
+        assert_eq!(token.original, path);
+    }
     fn list() -> io::Result<Vec<trash::TrashItem>> {
         trash::os_limited::list().map_err(|error| io::Error::other(error.to_string()))
     }
+    fn capture(before: HashSet<(OsString, PathBuf)>, after: Vec<trash::TrashItem>, path: &Path) -> Option<RecycleToken> {
+        let candidates: Vec<_> = after.into_iter().filter(|item| {
+            !before.contains(&(item.id.clone(), item.original_path())) && item.original_path() == path
+        }).collect();
+        if candidates.len() != 1 { return None; }
+        Some(RecycleToken { id: candidates[0].id.clone(), original: path.to_owned() })
+    }
     pub(super) fn recycle(path: &Path) -> io::Result<Option<RecycleToken>> {
-        let before: HashSet<_> = list()?.into_iter().map(|item| item.id).collect();
+        let before: HashSet<_> = list()?.into_iter().map(|item| (item.id.clone(), item.original_path())).collect();
         trash::delete(path).map_err(|error| io::Error::other(error.to_string()))?;
         // Deletion has already succeeded. A failed capture disables Undo rather
         // than misreporting a mutation as an untouched/automatically retryable job.
         let Ok(after) = list() else { return Ok(None) };
-        let candidates: Vec<_> = after
-            .into_iter()
-            .filter(|item| !before.contains(&item.id) && item.original_path() == path)
-            .collect();
-        if candidates.len() != 1 {
-            return Ok(None);
-        }
-        Ok(Some(RecycleToken {
-            id: candidates[0].id.clone(),
-            original: path.to_owned(),
-        }))
+        // Another operation can restore an unrelated item between snapshots,
+        // freeing its .trashinfo ID for this deletion. Compare original paths too.
+        Ok(capture(before, after, path))
     }
     pub(super) fn restore(token: &RecycleToken) -> io::Result<PathBuf> {
         let item = list()?

@@ -31,6 +31,9 @@ pub mod clipboard;
 pub mod recycle_bin;
 
 pub mod thumbnail;
+pub mod preview_host;
+#[cfg(windows)]
+mod document_preview;
 
 mod undo_snapshot;
 mod native_copy;
