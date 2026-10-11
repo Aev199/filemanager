@@ -19,6 +19,7 @@ pub struct InterruptedAction {
     pub status: String,
     pub phase: Option<String>,
     pub error: Option<String>,
+    pub recovery: Option<String>,
 }
 
 fn sql_error(error: rusqlite::Error) -> io::Error { io::Error::other(error) }
@@ -61,16 +62,18 @@ impl OperationJournal {
                 updated_ms INTEGER NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('queued','running','done','failed','interrupted')),
                 error TEXT,
-                phase TEXT
+                phase TEXT,
+                recovery TEXT
             );
             CREATE INDEX IF NOT EXISTS operation_jobs_status ON operation_jobs(status,id);
         ").map_err(sql_error)?;
-        let has_phase = {
+        let columns = {
             let mut stmt = tx.prepare("PRAGMA table_info(operation_jobs)").map_err(sql_error)?;
             let names = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(sql_error)?;
-            names.collect::<Result<Vec<_>,_>>().map_err(sql_error)?.iter().any(|name| name == "phase")
+            names.collect::<Result<Vec<_>,_>>().map_err(sql_error)?
         };
-        if !has_phase { tx.execute_batch("ALTER TABLE operation_jobs ADD COLUMN phase TEXT").map_err(sql_error)?; }
+        if !columns.iter().any(|name| name == "phase") { tx.execute_batch("ALTER TABLE operation_jobs ADD COLUMN phase TEXT").map_err(sql_error)?; }
+        if !columns.iter().any(|name| name == "recovery") { tx.execute_batch("ALTER TABLE operation_jobs ADD COLUMN recovery TEXT").map_err(sql_error)?; }
         tx.commit().map_err(sql_error)?;
         Ok(journal)
     }
@@ -165,10 +168,11 @@ impl OperationJournal {
         let error = result.as_ref().err().map(|err| {
             err.to_string().chars().take(1200).collect::<String>()
         });
+        let recovery = result.as_ref().err().and_then(crate::replacement::recovery).map(ToString::to_string);
         let changed = self.connection()?.execute(
-            "UPDATE operation_jobs SET status=?2,error=?3,updated_ms=?4
+            "UPDATE operation_jobs SET status=?2,error=?3,updated_ms=?4,recovery=?5
              WHERE id=?1 AND status='running'",
-            params![id, status, error, clock_ms()],
+            params![id, status, error, clock_ms(), recovery],
         ).map_err(sql_error)?;
         if changed != 1 {
             return Err(io::Error::other("Operation completed, but journal status could not be saved"));
@@ -184,14 +188,18 @@ impl OperationJournal {
         }.map(|message| message.chars().take(1200).collect::<String>());
         let restored = match result {
             Ok(outcome) => outcome.restored_path.as_ref(),
-            Err(error) => error.get_ref()
+            Err(error) => crate::replacement::recovery(error)
+                .and_then(|partial| partial.incoming.as_ref())
+                .and_then(|incoming| incoming.restored_path.as_ref())
+                .or_else(|| error.get_ref()
                 .and_then(|inner| inner.downcast_ref::<crate::cross_volume_move::PartialUndoError>())
-                .map(|partial| &partial.restored_path),
+                .map(|partial| &partial.restored_path)),
         }.map(|path| path.to_string_lossy().into_owned());
+        let recovery = result.as_ref().err().and_then(crate::replacement::recovery).map(ToString::to_string);
         let changed = self.connection()?.execute(
-            "UPDATE operation_jobs SET status=?2,error=?3,updated_ms=?4,destination=COALESCE(?5,destination)
+            "UPDATE operation_jobs SET status=?2,error=?3,updated_ms=?4,destination=COALESCE(?5,destination),recovery=?6
              WHERE id=?1 AND status='running'",
-            params![id, status, note, clock_ms(), restored],
+            params![id, status, note, clock_ms(), restored, recovery],
         ).map_err(sql_error)?;
         if changed != 1 { return Err(io::Error::other("Undo completed, but journal status could not be saved")); }
         Ok(())
@@ -212,18 +220,26 @@ impl OperationJournal {
     }
 
     pub fn unresolved(&self, max: usize) -> io::Result<Vec<InterruptedAction>> {
+        self.records(max, false)
+    }
+
+    pub fn recent(&self, max: usize) -> io::Result<Vec<InterruptedAction>> {
+        self.records(max, true)
+    }
+
+    fn records(&self, max: usize, include_finished: bool) -> io::Result<Vec<InterruptedAction>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id,action,source,destination,status,phase,error FROM operation_jobs
-             WHERE status IN ('queued','running','interrupted') OR (status='failed' AND phase IS NOT NULL)
+            "SELECT id,action,source,destination,status,phase,error,recovery FROM operation_jobs
+             WHERE ?2 OR status IN ('queued','running','interrupted') OR (status='failed' AND phase IS NOT NULL)
              ORDER BY id DESC LIMIT ?1"
         ).map_err(sql_error)?;
-        let mapped = stmt.query_map(params![max.min(100) as i64], |row| {
+        let mapped = stmt.query_map(params![max.min(100) as i64, include_finished], |row| {
             Ok(InterruptedAction {
                 id: row.get(0)?, action: row.get(1)?,
                 source: PathBuf::from(row.get::<_, String>(2)?),
                 destination: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
-                status: row.get(4)?, phase: row.get(5)?, error: row.get(6)?,
+                status: row.get(4)?, phase: row.get(5)?, error: row.get(6)?, recovery: row.get(7)?,
             })
         }).map_err(sql_error)?;
         mapped.collect::<Result<Vec<_>,_>>().map_err(sql_error)
@@ -244,6 +260,31 @@ impl OperationJournal {
 mod tests {
     use super::*;
     use crate::operations::{Action, Plan};
+    #[test]
+    fn recent_operations_include_done_and_failed_with_bounded_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"data").unwrap();
+        let plan = Plan::prepare(Action::Copy, &source, Some(&temp.path().join("target"))).unwrap();
+        let journal = OperationJournal::open(temp.path().join("jobs.sqlite")).unwrap();
+        let first = journal.queue(&plan).unwrap();
+        journal.start(first).unwrap();
+        journal.finish(first, &Ok(plan.execute().unwrap())).unwrap();
+        for _ in 0..105 {
+            let id = journal.queue(&plan).unwrap();
+            journal.start(id).unwrap();
+            journal.finish(id, &Err(io::Error::other("collision"))).unwrap();
+        }
+        assert_eq!(journal.recent(200).unwrap().len(), 100);
+        assert_eq!(journal.recent(1).unwrap()[0].status, "failed");
+        assert_eq!(journal.recent(0).unwrap().len(), 0);
+        let temp2 = tempfile::tempdir().unwrap();
+        let journal2 = OperationJournal::open(temp2.path().join("jobs.sqlite")).unwrap();
+        let id = journal2.queue(&plan).unwrap();
+        journal2.start(id).unwrap();
+        journal2.finish_undo(id, &Ok(crate::operations::UndoOutcome::default())).unwrap();
+        assert_eq!(journal2.recent(1).unwrap()[0].status, "done");
+    }
     #[test]
     fn failed_phased_action_remains_inspectable_after_restart() {
         let tmp = tempfile::tempdir().unwrap();

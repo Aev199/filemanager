@@ -66,12 +66,13 @@ struct Transfer {
     copy: bool,
     /// Occupied names get "name (2).ext" instead of being refused.
     keep_both: bool,
+    replace: bool,
     /// Items came from the Drop Zone and go back there if not done.
     restore_failed: bool,
 }
 
 #[derive(Clone, Copy)]
-enum ConflictChoice { Skip, KeepBoth, Cancel }
+enum ConflictChoice { Skip, KeepBoth, Replace, Cancel }
 
 struct Undo {
     receipts: Vec<Receipt>,
@@ -179,6 +180,7 @@ struct Explorer {
     journal: Option<Arc<Journal>>,
     operation_journal: Option<Arc<OperationJournal>>,
     operation_review: bool,
+    operation_review_epoch: u64,
     operation_alerts: Vec<InterruptedAction>,
     watcher: Option<DirectoryWatch>,
     live_watch_started: bool,
@@ -376,6 +378,7 @@ impl Explorer {
             journal: None,
             operation_journal,
             operation_review: false,
+            operation_review_epoch: 0,
             operation_alerts: Vec::new(),
             watcher: None, live_watch_started: false, live_watch_error: None,
             watched_root: None, confirm_recycle: None,
@@ -599,13 +602,13 @@ impl Explorer {
             // A cut is consumed once, as in Explorer.
             let _ = clipboard::write_files(&[], false);
         }
-        self.request_transfer(Transfer { zone, target, copy: !files.cut, keep_both: false, restore_failed: false }, cx);
+        self.request_transfer(Transfer { zone, target, copy: !files.cut, keep_both: false, replace: false, restore_failed: false }, cx);
     }
 
     /// Files dropped on a folder: copied, or moved when `copy` is false.
     fn drop_into(&mut self, paths: &[PathBuf], folder: PathBuf, copy: bool, cx: &mut Context<Self>) {
         let Some(zone) = self.zone_of(paths, cx) else { return };
-        self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, restore_failed: false }, cx);
+        self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, replace: false, restore_failed: false }, cx);
     }
 
     /// Validated transfer list for external paths (clipboard, drops).
@@ -644,7 +647,7 @@ impl Explorer {
         }
         let zone = std::mem::take(&mut self.zone);
         let target = self.browser.active().active().path.clone();
-        self.request_transfer(Transfer { zone, target, copy, keep_both: false, restore_failed: true }, cx);
+        self.request_transfer(Transfer { zone, target, copy, keep_both: false, replace: false, restore_failed: true }, cx);
     }
 
     /// Checks a transfer before running it: copying into the items' own
@@ -707,6 +710,10 @@ impl Explorer {
                 transfer.keep_both = true;
                 self.execute_transfer(transfer, cx);
             }
+            ConflictChoice::Replace => {
+                transfer.replace = true;
+                self.execute_transfer(transfer, cx);
+            }
         }
         cx.notify();
     }
@@ -721,11 +728,11 @@ impl Explorer {
     }
 
     fn execute_transfer(&mut self, transfer: Transfer, cx: &mut Context<Self>) {
-        let Transfer { zone, target, copy, keep_both, restore_failed } = transfer;
+        let Transfer { zone, target, copy, keep_both, replace, restore_failed } = transfer;
         if copy {
-            self.run_copy(zone, target, keep_both, restore_failed, cx);
+            self.run_copy(zone, target, keep_both, replace, restore_failed, cx);
         } else {
-            self.run_move(zone, target, keep_both, restore_failed, cx);
+            self.run_move(zone, target, keep_both, replace, restore_failed, cx);
         }
     }
 
@@ -737,7 +744,8 @@ impl Explorer {
                 let keep_going = weak.update(cx, |this, cx| {
                     if !this.copy_in_progress || !this.copy_control.as_ref()
                         .is_some_and(|active| Arc::ptr_eq(active, &progress)) { return false; }
-                    this.status = match progress.phase() {
+                    let detail = progress.progress();
+                    let phase: String = match progress.phase() {
                         TransferPhase::Verifying => "Проверка копии…".into(),
                         TransferPhase::Recycling => "Завершение переноса…".into(),
                         TransferPhase::Copying => {
@@ -746,6 +754,8 @@ impl Explorer {
                             format!("{action}… {mib:.1} МБ")
                         }
                     };
+                    let path = detail.source.as_ref().map(|path| browser::display_name(path)).unwrap_or_default();
+                    this.status = format!("{phase} · обработано {}/{} · {path}", detail.processed, detail.total);
                     cx.notify();
                     true
                 }).unwrap_or(false);
@@ -754,7 +764,7 @@ impl Explorer {
         }).detach();
     }
 
-    fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, restore_failed: bool, cx: &mut Context<Self>) {
+    fn run_copy(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, cx: &mut Context<Self>) {
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.status = "Копирование отклонено: журнал операций недоступен".into();
             cx.notify();
@@ -765,7 +775,9 @@ impl Explorer {
         self.copy_control = Some(Arc::clone(&control));
         self.status = "Копирование…".into();
         let task = cx.background_spawn(async move {
-            let results = if keep_both {
+            let results = if replace {
+                zone.transfer_to_audited_replace(Action::Copy, &target, &control, &audit)
+            } else if keep_both {
                 zone.copy_to_audited_keep_both(&target, &control, &audit)
             } else {
                 zone.copy_to_audited(&target, &control, &audit)
@@ -808,7 +820,7 @@ impl Explorer {
 
     /// Same-volume rename or verified cross-volume transfer. Each item is prepared again and
     /// journaled before any disk change.
-    fn run_move(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, restore_failed: bool, cx: &mut Context<Self>) {
+    fn run_move(&mut self, mut zone: DropZone, target: PathBuf, keep_both: bool, replace: bool, restore_failed: bool, cx: &mut Context<Self>) {
         let Some(audit) = self.operation_journal.as_ref().cloned() else {
             self.status = "Перемещение отклонено: журнал операций недоступен".into();
             cx.notify();
@@ -821,7 +833,9 @@ impl Explorer {
         self.start_transfer_progress(true, cx);
         self.status = "Перемещение…".into();
         let task = cx.background_spawn(async move {
-            let results = if keep_both {
+            let results = if replace {
+                zone.transfer_to_audited_replace(Action::Move, &target, &control, &audit)
+            } else if keep_both {
                 zone.move_to_audited_keep_both(&target, &control, &audit)
             } else {
                 zone.move_to_audited(&target, &control, &audit)
@@ -1653,22 +1667,30 @@ impl Explorer {
 
     fn toggle_operation_review(&mut self, cx: &mut Context<Self>) {
         self.operation_review = !self.operation_review;
-        if self.operation_review {
-            self.operation_alerts.clear();
-            match &self.operation_journal {
-                Some(journal) => match journal.unresolved(30) {
-                    Ok(jobs) => {
-                        let total = jobs.len();
-                        self.operation_alerts = jobs;
-                        self.status = format!(
-                            "Незавершённых записей: {total}. Проверьте файлы перед повтором"
-                        );
+        self.operation_review_epoch = self.operation_review_epoch.wrapping_add(1);
+        if !self.operation_review { cx.notify(); return; }
+        let Some(journal) = self.operation_journal.as_ref().cloned() else {
+            self.status = "Журнал операций недоступен".into();
+            cx.notify(); return;
+        };
+        let epoch = self.operation_review_epoch;
+        self.operation_alerts.clear();
+        cx.spawn(async move |weak, cx| {
+            loop {
+                let worker_journal = journal.clone();
+                let result = cx.background_spawn(async move { worker_journal.recent(30) }).await;
+                let active = weak.update(cx, |this, cx| {
+                    if !this.operation_review || this.operation_review_epoch != epoch { return false; }
+                    match result {
+                        Ok(jobs) => this.operation_alerts = jobs,
+                        Err(error) => this.status = format!("Не удалось прочитать журнал операций: {error}"),
                     }
-                    Err(error) => self.status = format!("Не удалось прочитать журнал операций: {error}"),
-                },
-                None => self.status = "Журнал операций недоступен: изменение файлов отключено".into(),
-            };
-        }
+                    cx.notify(); true
+                }).unwrap_or(false);
+                if !active { break; }
+                cx.background_spawn(async { std::thread::sleep(Duration::from_secs(1)); }).await;
+            }
+        }).detach();
         cx.notify();
     }
 

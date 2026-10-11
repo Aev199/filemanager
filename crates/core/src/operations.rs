@@ -7,6 +7,7 @@ use std::io::Read;
 #[cfg(any(not(windows), test))]
 use std::io::Write;
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering}};
+use std::sync::Mutex;
 use tempfile::Builder;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,14 @@ pub struct UndoOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferPhase { Copying, Verifying, Recycling }
 
+#[derive(Clone, Debug, Default)]
+pub struct TransferProgress {
+    pub source: Option<PathBuf>,
+    pub destination: Option<PathBuf>,
+    pub processed: usize,
+    pub total: usize,
+}
+
 /// Cooperative cancellation and byte progress shared with the UI worker.
 #[derive(Default, Debug)]
 pub struct CopyControl {
@@ -31,8 +40,24 @@ pub struct CopyControl {
     copied_bytes: AtomicU64,
     total_bytes: AtomicU64,
     phase: AtomicU8,
+    progress: Mutex<TransferProgress>,
 }
 impl CopyControl {
+    pub fn progress(&self) -> TransferProgress {
+        self.progress.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    fn begin_batch(&self, total: usize) {
+        *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = TransferProgress { total, ..Default::default() };
+    }
+    fn begin_item(&self, plan: &Plan) {
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        progress.source = Some(plan.source.clone());
+        progress.destination = plan.destination.clone();
+        self.set_phase(TransferPhase::Copying);
+    }
+    fn finish_item(&self) {
+        self.progress.lock().unwrap_or_else(|e| e.into_inner()).processed += 1;
+    }
     pub fn phase(&self) -> TransferPhase {
         match self.phase.load(Ordering::Relaxed) {
             1 => TransferPhase::Verifying, 2 => TransferPhase::Recycling,
@@ -85,6 +110,7 @@ pub struct Plan {
     pub destination: Option<PathBuf>,
     /// The queued command is only valid for the source observed at preflight.
     stamp: SourceStamp,
+    replacement: Option<crate::replacement::Guard>,
 }
 
 /// Best-effort protection against a file being replaced or edited after
@@ -119,6 +145,7 @@ pub struct Receipt {
     created_snapshot: Option<crate::undo_snapshot::Snapshot>,
     recycled: Option<crate::recycle_bin::RecycleToken>,
     cross_move: Option<Arc<crate::cross_volume_move::UndoState>>,
+    replacement: Option<Arc<crate::replacement::UndoState>>,
 }
 
 /// Serial execution boundary between the user interface and filesystem changes.
@@ -172,6 +199,7 @@ impl OperationQueue {
         journal: &crate::operation_journal::OperationJournal,
     ) -> Vec<(Plan, io::Result<Receipt>)> {
         let mut results = Vec::new();
+        control.begin_batch(self.pending.len());
         // Fail closed if another Filemanager process owns the executor lock.
         // Hold the lock for the entire batch, not one file at a time.
         let _executor_lock = match journal.lock_executor() {
@@ -184,6 +212,7 @@ impl OperationQueue {
             }
         };
         while let Some(plan) = self.pending.pop_front() {
+            control.begin_item(&plan);
             let result = match journal.queue(&plan) {
                 Ok(id) => match journal.start(id) {
                     Ok(()) => {
@@ -201,6 +230,7 @@ impl OperationQueue {
                 },
                 Err(error) => Err(error),
             };
+            control.finish_item();
             results.push((plan, result));
         }
         results
@@ -210,10 +240,13 @@ impl OperationQueue {
         &mut self, control: &CopyControl
     ) -> Vec<(Plan, io::Result<Receipt>)> {
         let mut results = Vec::new();
+        control.begin_batch(self.pending.len());
         while let Some(plan) = self.pending.pop_front() {
+            control.begin_item(&plan);
             // Never re-prepare a changed source. Cancellation also rejects
             // remaining queued items; the Drop Zone preserves failures.
             let result = control.check().and_then(|_| plan.execute_with_control(control));
+            control.finish_item();
             results.push((plan, result));
         }
         results
@@ -279,6 +312,19 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 impl Plan {
     pub fn prepare(action: Action, source: &Path, destination: Option<&Path>) -> io::Result<Self> {
+        Self::prepare_inner(action, source, destination, false)
+    }
+
+    pub fn prepare_replace(action: Action, source: &Path, destination: &Path) -> io::Result<Self> {
+        if !matches!(action, Action::Copy | Action::Move) { return Err(invalid("Only Copy/Move can replace files")); }
+        let mut plan = Self::prepare_inner(action, source, Some(destination), true)?;
+        if occupied(plan.destination.as_ref().unwrap())? {
+            plan.replacement = Some(crate::replacement::Guard::prepare(&plan.source, plan.destination.as_ref().unwrap())?);
+        }
+        Ok(plan)
+    }
+
+    fn prepare_inner(action: Action, source: &Path, destination: Option<&Path>, replacing: bool) -> io::Result<Self> {
         // Only existing local paths can be operated on.
         crate::folder_copy::reject_link(source)?;
         let source = fs::canonicalize(source)?;
@@ -305,7 +351,7 @@ impl Plan {
                 if action == Action::CreateFolder && (!source.is_dir() || source != parent) {
                     return Err(invalid("A new folder must be created directly inside the selected parent"));
                 }
-                if occupied(&normalized)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
+                if occupied(&normalized)? && !replacing { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
                 if action != Action::CreateFolder && source.is_dir() && parent.starts_with(&source) {
                     return Err(invalid("Cannot move or copy a folder inside itself"));
                 }
@@ -313,7 +359,7 @@ impl Plan {
             }
         };
         let stamp = SourceStamp::read(&fs::symlink_metadata(&source)?);
-        Ok(Self { action, source, destination: dest, stamp })
+        Ok(Self { action, source, destination: dest, stamp, replacement: None })
     }
 
     /// Call only after an explicit user click / confirmation; prepare() performs no changes.
@@ -339,8 +385,17 @@ impl Plan {
         Ok(copy)
     }
 
-    fn execute_with_checkpoint(&self, control: &CopyControl,
+    pub(crate) fn without_replacement(&self) -> Self {
+        let mut plan = self.clone();
+        plan.replacement = None;
+        plan
+    }
+
+    pub(crate) fn execute_with_checkpoint(&self, control: &CopyControl,
         checkpoint: &dyn Fn(&str) -> io::Result<()>) -> io::Result<Receipt> {
+        if let Some(guard) = &self.replacement {
+            return crate::replacement::execute(self, guard, control, checkpoint);
+        }
         control.check()?;
         let meta = fs::symlink_metadata(&self.source)?;
         crate::folder_copy::reject_link(&self.source)?;
@@ -372,7 +427,7 @@ impl Plan {
                     return Ok(Receipt {
                         action: self.action, source: self.source.clone(),
                         destination, modified, size, completed_stamp,
-                        created_snapshot: Some(snapshot), recycled: None, cross_move: None,
+                        created_snapshot: Some(snapshot), recycled: None, cross_move: None, replacement: None,
                     });
                 }
                 if !meta.is_file() { return Err(invalid("Unsupported source type")); }
@@ -477,13 +532,18 @@ impl Plan {
             modified: last_metadata.as_ref().and_then(|m| m.modified().ok()),
             size: last_metadata.as_ref().map_or(size, |m| m.len()),
             completed_stamp: last_metadata.as_ref().map(SourceStamp::read),
-            created_snapshot, recycled, cross_move: None,
+            created_snapshot, recycled, cross_move: None, replacement: None,
         })
     }
 }
 
 impl Receipt {
+    pub(crate) fn with_replacement(mut self, undo: crate::replacement::UndoState) -> Self {
+        self.replacement = Some(Arc::new(undo));
+        self
+    }
     pub fn can_undo(&self) -> bool {
+        if let Some(undo) = &self.replacement { return undo.can_undo(); }
         if let Some(undo) = &self.cross_move {
             return undo.can_undo() && self.created_snapshot.is_some();
         }
@@ -495,6 +555,7 @@ impl Receipt {
     }
 
     pub(crate) fn undo_destination(&self) -> Option<String> {
+        if self.replacement.is_some() { return self.destination.as_ref().map(|path| path.to_string_lossy().into_owned()); }
         match self.action {
             Action::Copy | Action::CreateFolder => None,
             _ => Some(self.source.to_string_lossy().into_owned()),
@@ -514,6 +575,7 @@ impl Receipt {
     }
 
     pub(crate) fn undo_with_checkpoint(&self, checkpoint: &dyn Fn(&str) -> io::Result<()>) -> io::Result<UndoOutcome> {
+        if let Some(undo) = &self.replacement { return undo.undo(checkpoint); }
         if let Some(undo) = &self.cross_move {
             let target = self.destination.as_deref().ok_or_else(|| invalid("Missing destination"))?;
             let snapshot = self.created_snapshot.as_ref().ok_or_else(|| invalid("Original copy identity unavailable; Undo refused"))?;
@@ -574,6 +636,25 @@ impl DropZone {
     }
 
     pub fn clear(&mut self) { self.sources.clear(); }
+
+    pub fn transfer_to_audited_replace(&mut self, action: Action, target: &Path,
+        control: &CopyControl, journal: &crate::operation_journal::OperationJournal,
+    ) -> Vec<(PathBuf, io::Result<Receipt>)> {
+        let mut queue = OperationQueue::default();
+        let mut results = Vec::new();
+        for source in std::mem::take(&mut self.sources) {
+            let destination = target.join(source.file_name().unwrap_or_default());
+            match Plan::prepare_replace(action, &source, &destination) {
+                Ok(plan) => queue.submit(plan),
+                Err(error) => { self.sources.push(source.clone()); results.push((source, Err(error))); }
+            }
+        }
+        for (plan, result) in queue.run_all_audited(control, journal) {
+            if result.is_err() { self.sources.push(plan.source.clone()); }
+            results.push((plan.source, result));
+        }
+        results
+    }
 
     /// Safe staged copies for files and directories. Failures stay in the zone.
     pub fn copy_to(&mut self, target: &Path) -> Vec<(PathBuf, io::Result<Receipt>)> {
@@ -699,6 +780,27 @@ pub fn free_destination(target: &Path, name: &Path, reserved: &[PathBuf]) -> Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audited_queue_reports_processed_items_and_current_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = crate::operation_journal::OperationJournal::open(temp.path().join("jobs.sqlite")).unwrap();
+        let mut queue = OperationQueue::default();
+        let mut last = PathBuf::new();
+        for name in ["a", "b"] {
+            let source = temp.path().join(name);
+            let destination = temp.path().join(format!("copy-{name}"));
+            fs::write(&source, b"data").unwrap();
+            queue.submit(Plan::prepare(Action::Copy, &source, Some(&destination)).unwrap());
+            last = source;
+        }
+        let control = CopyControl::default();
+        assert!(queue.run_all_audited(&control, &journal).iter().all(|(_, r)| r.is_ok()));
+        let progress = control.progress();
+        assert_eq!(progress.processed, 2);
+        assert_eq!(progress.total, 2);
+        assert_eq!(progress.source.as_ref(), Some(&last));
+    }
 
     #[test]
     fn cross_volume_fallback_requires_windows_error_17() {

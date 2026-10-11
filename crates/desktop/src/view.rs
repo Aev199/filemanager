@@ -760,13 +760,19 @@ impl Explorer {
             .overflow_y_scrollbar().bg(rgb(PANEL)).text_size(px(13.));
         if self.operation_review {
             panel = panel.child(div().flex().items_center().justify_between()
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Незавершённые операции"))
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Последние операции"))
                     .child(icon_button("close-review", "fm/x.svg", "Закрыть", false, true)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_operation_review(cx)))))
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child("Список только читает журнал SQLite и ничего не меняет. Перед повтором проверьте источник и назначение в Проводнике."));
+                    .child("Последние 30 заданий. Обновляется автоматически. После сбоя проверьте оба пути; автоматического повтора нет."));
+            if let Some(control) = &self.copy_control {
+                let progress = control.progress();
+                panel = panel.child(div().child(format!("Обработано: {}/{}", progress.processed, progress.total)))
+                    .child(text_button("queue-cancel", "Отменить передачу", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx))));
+            }
             if self.operation_alerts.is_empty() {
-                panel = panel.child(div().text_color(rgb(TEXT_DIM)).child("Незавершённых записей нет."));
+                panel = panel.child(div().text_color(rgb(TEXT_DIM)).child("Записей пока нет."));
             }
             for entry in &self.operation_alerts {
                 panel = panel.child(
@@ -778,9 +784,15 @@ impl Explorer {
                             Some("move_recycling_source") => "Этап: перенос исходника в Корзину",
                             Some("undo_restoring_source") => "Этап: восстановление исходника",
                             Some("undo_recycling_copy") => "Этап: перенос копии в Корзину",
+                            Some("replace_recycling_old") => "Этап: прежний файл в Корзину",
+                            Some("replace_incoming") => "Этап: создание нового файла",
+                            Some("replace_verifying_copy") => "Этап: проверка новой копии",
+                            Some("undo_replacement_incoming") => "Этап: отмена нового действия",
+                            Some("undo_replacement_restore_old") => "Этап: восстановление прежнего файла",
                             _ => "Этап не указан",
                         })
                         .child(entry.error.clone().unwrap_or_default())
+                        .child(entry.recovery.clone().unwrap_or_default())
                         .child(div().text_color(rgb(TEXT_MUTED)).child(format!("Откуда: {}", entry.source.display())))
                         .child(div().text_color(rgb(TEXT_MUTED)).child(format!("Куда: {}",
                             entry.destination.as_ref().map(|p| p.display().to_string())
@@ -1260,9 +1272,11 @@ impl Explorer {
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(format!("Совпадают имена: {}", conflicts.len())))
             .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(format!("В папке «{}» уже есть объекты с такими именами. Существующие файлы не заменяются.",
+                .child(format!("В папке «{}» уже есть объекты с такими именами. При замене прежние файлы отправляются в Корзину. Каталоги не заменяются.",
                     browser::display_name(&transfer.target))))
             .child(list)
+            .child(text_button("conflict-replace", "Заменить файлы — прежние в Корзину", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Replace, cx))))
             .child(div().flex().justify_end().gap_2()
                 .child(text_button("conflict-cancel", "Отмена", ButtonKind::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Cancel, cx))))
