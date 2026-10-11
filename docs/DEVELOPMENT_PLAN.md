@@ -29,3 +29,6 @@ replay после аварии и не выдаём наличие миниат�
 
 Детальный план первого пакета:
 [verified-cross-volume-move](superpowers/plans/2026-10-10-verified-cross-volume-move.md).
+
+Следующий этап — панели со своими вкладками, как в Atlas:
+[pane-groups](superpowers/plans/2026-10-11-pane-groups.md).
