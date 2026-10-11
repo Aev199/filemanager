@@ -407,7 +407,8 @@ impl Explorer {
             .cursor_pointer().text_color(rgb(TEXT_MUTED))
             .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
             .child(icon(icon_path, TEXT_MUTED))
-            .child(label)
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
             .on_click(click)
     }
 
@@ -424,7 +425,7 @@ impl Explorer {
                 div().flex().items_center().gap_2().text_color(rgb(TEXT_MUTED))
                     .text_size(px(12.))
                     .child(icon("fm/inbox.svg", TEXT_MUTED))
-                    .child("Файлы для переноса")
+                    .child(div().flex_1().min_w_0().truncate().child("Файлы для переноса"))
             );
             return zone.tooltip(|window, cx| Tooltip::new("Перетащите сюда файлы, затем откройте папку назначения. Файлы не изменятся до команды копирования или переноса.").build(window, cx));
         }
