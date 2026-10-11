@@ -2,6 +2,7 @@
 //! for the CLI and logs). Unknown text is shown unchanged.
 
 const PHRASES: &[(&str, &str)] = &[
+    ("Created file or folder changed since the action; undo refused", "Созданный файл или папка изменились после операции, отмена запрещена"),
     ("Destination already exists", "Объект с таким именем уже существует, замена запрещена"),
     ("No-overwrite moves are implemented for Windows only", "Безопасный перенос без перезаписи работает только в Windows"),
     ("Cannot move or copy a folder inside itself", "Нельзя переместить или скопировать папку внутрь самой себя"),

@@ -172,7 +172,8 @@ pub(crate) fn copy_folder(source: &Path, destination: &Path, control: &CopyContr
     control.check()?;
     safe_rename(staging.path(), destination)?;
     // The old path no longer exists; drop(tempdir) cannot remove the published tree.
-    Ok(undo_snapshot)
+    // If anything else changed, the old snapshot keeps refusing Undo.
+    Ok(undo_snapshot.republished(destination).unwrap_or(undo_snapshot))
 }
 
 #[cfg(test)]

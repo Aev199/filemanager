@@ -74,7 +74,13 @@ fn same_name(a: &[u16], b: &[u16]) -> bool {
     // Explicit lengths, valid buffers, invariant ordinal Windows case handling.
     let result =
         unsafe { CompareStringOrdinal(a.as_ptr(), a.len() as i32, b.as_ptr(), b.len() as i32, 1) };
-    result == CSTR_EQUAL || result == 0 // Refuse the group on comparison failure.
+    // Refuse the group on comparison failure. Windows ordinal casing keeps
+    // pairs such as Σ/ς apart while other tools and volumes fold them, so
+    // Unicode case folding also counts as a collision (a rename never
+    // replaces, so a false conflict only blocks the group).
+    result == CSTR_EQUAL
+        || result == 0
+        || String::from_utf16_lossy(a).to_uppercase() == String::from_utf16_lossy(b).to_uppercase()
 }
 #[cfg(not(windows))]
 fn comparison_key(path: &std::path::Path) -> String {
@@ -269,11 +275,11 @@ mod tests {
         fs::write(&b, b"keep").unwrap();
         let preview = preview(&[a.clone(), b.clone()], "{stem}-{n}{ext}").unwrap();
         assert!(preview.can_apply());
-        assert_eq!(
-            preview.entries[0].destination,
-            tmp.path().join("отчёт{n}-1.txt")
-        );
-        assert_eq!(preview.entries[1].destination, tmp.path().join("notes-2"));
+        // Listings show long folder names; the temp folder may come as 8.3.
+        let dir = crate::path_utils::canonicalize_parent(&tmp.path().join("x"));
+        let dir = dir.parent().unwrap();
+        assert_eq!(preview.entries[0].destination, dir.join("отчёт{n}-1.txt"));
+        assert_eq!(preview.entries[1].destination, dir.join("notes-2"));
         assert!(a.exists() && b.exists());
         assert!(!preview.entries[0].destination.exists());
     }

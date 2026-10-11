@@ -393,7 +393,7 @@ mod tests {
                 }
             })
             .unwrap_err();
-        assert!(error.to_string().contains(&target.display().to_string()));
+        assert!(crate::path_utils::mentions(&error.to_string(), &target));
         assert!(!target.exists());
         OperationQueue::default()
             .undo_completed(&receipt.clone())

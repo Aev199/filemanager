@@ -471,6 +471,7 @@ impl Plan {
                     created_snapshot = crate::undo_snapshot::Snapshot::capture(&payload).ok();
                     control.check()?;
                     safe_rename(&payload, dest)?;
+                    created_snapshot = created_snapshot.and_then(|snapshot| snapshot.republished(dest).ok());
                 }
                 #[cfg(not(windows))]
                 {
@@ -501,6 +502,7 @@ impl Plan {
                 created_snapshot = crate::undo_snapshot::Snapshot::capture(staging.path()).ok();
                 control.check()?;
                 staging.persist_noclobber(dest).map_err(|e| e.error)?;
+                created_snapshot = created_snapshot.and_then(|snapshot| snapshot.republished(dest).ok());
                 }
             }
             Action::Move | Action::Rename => {
@@ -799,7 +801,7 @@ mod tests {
         let progress = control.progress();
         assert_eq!(progress.processed, 2);
         assert_eq!(progress.total, 2);
-        assert_eq!(progress.source.as_ref(), Some(&last));
+        assert!(crate::path_utils::same_place(progress.source.as_ref().unwrap(), &last));
     }
 
     #[test]
@@ -830,7 +832,7 @@ mod tests {
         fs::remove_file(&db).unwrap();
         let journal = crate::operation_journal::OperationJournal::open(&db).unwrap();
         let outcome = queue.undo_completed_audited(&receipt, &journal).unwrap();
-        assert_eq!(outcome.restored_path, Some(path.clone()));
+        assert!(crate::path_utils::same_place(outcome.restored_path.as_ref().unwrap(), &path));
         assert_eq!(fs::read(&path).unwrap(), b"original");
         let conn = rusqlite::Connection::open(db).unwrap();
         let (action, status, source, destination): (String, String, String, String) = conn.query_row(
@@ -839,7 +841,7 @@ mod tests {
         ).unwrap();
         assert_eq!(action, "undo_recycle");
         assert_eq!(status, "done");
-        assert_eq!(destination, receipt.source.to_string_lossy());
+        assert!(crate::path_utils::same_place(Path::new(&destination), &receipt.source));
         assert!(!source.is_empty());
     }
 

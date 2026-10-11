@@ -49,12 +49,68 @@ impl Snapshot {
     }
 
     pub(crate) fn verify(&self, root: &Path) -> io::Result<()> {
-        if *self != Self::capture(root)? {
-            return Err(io::Error::other(
-                "Created file or folder changed since the action; undo refused",
-            ));
+        let now = Self::capture(root)?;
+        if *self != now {
+            return Err(io::Error::other(format!(
+                "Created file or folder changed since the action; undo refused ({})",
+                self.difference(&now)
+            )));
         }
         Ok(())
+    }
+
+    /// NTFS tunneling: publishing under a name removed seconds ago (a
+    /// replacement recycles the old file first) gives the new item the old
+    /// one's creation time. Re-capture after the rename and accept it only
+    /// if nothing but the root's creation time changed.
+    pub(crate) fn republished(&self, root: &Path) -> io::Result<Self> {
+        let now = Self::capture(root)?;
+        let same = self.0.len() == now.0.len()
+            && self.0.iter().zip(&now.0).all(|(was, is)| {
+                was == is
+                    || (was.relative.as_os_str().is_empty()
+                        && Item { created: is.created, ..was.clone() } == *is)
+            });
+        if !same {
+            return Err(io::Error::other(format!(
+                "Published item changed during the action ({})",
+                self.difference(&now)
+            )));
+        }
+        Ok(now)
+    }
+
+    /// Which property changed, so a refusal can be checked by hand.
+    fn difference(&self, now: &Self) -> String {
+        if self.0.len() != now.0.len() {
+            return format!("items: {} -> {}", self.0.len(), now.0.len());
+        }
+        for (was, is) in self.0.iter().zip(&now.0) {
+            let field = if was.relative != is.relative {
+                "name"
+            } else if was.identity != is.identity {
+                "identity"
+            } else if was.directory != is.directory {
+                "kind"
+            } else if was.size != is.size {
+                "size"
+            } else if was.modified != is.modified {
+                "modified"
+            } else if was.created != is.created {
+                "created"
+            } else if was.attributes != is.attributes {
+                return format!(
+                    "attributes {:#x} -> {:#x}: {}",
+                    was.attributes,
+                    is.attributes,
+                    was.relative.display()
+                );
+            } else {
+                continue;
+            };
+            return format!("{field}: {}", was.relative.display());
+        }
+        "unknown".into()
     }
 
     pub(crate) fn is_empty_directory(&self) -> bool {
@@ -119,6 +175,21 @@ fn identity(_: &Path) -> io::Result<((u64, u64), fs::Metadata)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn republished_accepts_the_same_item_and_names_a_real_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("payload");
+        fs::write(&staged, b"copy").unwrap();
+        let before = Snapshot::capture(&staged).unwrap();
+        let published = temp.path().join("target");
+        fs::rename(&staged, &published).unwrap();
+        let after = before.republished(&published).unwrap();
+        after.verify(&published).unwrap();
+        fs::write(&published, b"longer copy").unwrap();
+        let error = after.verify(&published).unwrap_err().to_string();
+        assert!(error.contains("size"), "{error}");
+        assert!(before.republished(&published).is_err());
+    }
     #[test]
     fn changing_attributes_invalidates_the_snapshot() {
         let temp = tempfile::tempdir().unwrap();

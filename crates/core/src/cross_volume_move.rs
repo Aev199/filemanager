@@ -262,7 +262,7 @@ mod tests {
                 }
             })
             .unwrap_err();
-        assert!(error.to_string().contains(&target.display().to_string()));
+        assert!(crate::path_utils::mentions(&error.to_string(), &target));
         assert_eq!(fs::read(&source).unwrap(), b"original data");
         assert_eq!(fs::read(&target).unwrap(), b"original data");
     }
@@ -318,8 +318,8 @@ mod tests {
                 }
             })
             .unwrap_err();
-        assert!(error.to_string().contains(&source.display().to_string()));
-        assert!(error.to_string().contains(&target.display().to_string()));
+        assert!(crate::path_utils::mentions(&error.to_string(), &source));
+        assert!(crate::path_utils::mentions(&error.to_string(), &target));
         let journal =
             crate::operation_journal::OperationJournal::open(tmp.path().join("jobs.sqlite"))
                 .unwrap();

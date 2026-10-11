@@ -263,14 +263,16 @@ fn recycle_sta(path: &Path) -> io::Result<Option<RecycleToken>> {
     let _com = ComApartment::enter()?;
     let capture: Capture = Arc::new(Mutex::new(None));
     let failure: Failure = Arc::new(Mutex::new(None));
+    // The Shell reports long names; a path given with 8.3 short folders
+    // (`RUNNER~1`) would otherwise never match and lose its receipt.
+    let source = crate::path_utils::canonicalize_parent(path);
     let sink: IFileOperationProgressSink = Sink {
         capture: capture.clone(),
         failure: failure.clone(),
-        source: path.to_owned(),
+        source: source.clone(),
         restoring: false,
     }
     .into();
-    let source = crate::path_utils::normalize_extended_path(path);
     let parsing_name = wide(source.as_os_str());
     unsafe {
         let op: IFileOperation =

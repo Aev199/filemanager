@@ -39,6 +39,21 @@ pub fn canonicalize_parent(path: &Path) -> PathBuf {
     }
 }
 
+/// Whether `text` names `path` as the Shell and listings show it: long
+/// folder names and no `\\?\` (temp folders may be given as 8.3 names).
+#[cfg(test)]
+pub(crate) fn mentions(text: &str, path: &Path) -> bool {
+    let text = text.replace(r"\\?\", "");
+    text.contains(&canonicalize_parent(path).display().to_string())
+        || text.contains(&path.display().to_string())
+}
+
+/// `a` and `b` are the same place once both are written as listings show them.
+#[cfg(test)]
+pub(crate) fn same_place(a: &Path, b: &Path) -> bool {
+    canonicalize_parent(a) == canonicalize_parent(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
