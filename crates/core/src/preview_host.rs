@@ -111,6 +111,19 @@ impl PreviewProcess {
             reap(child);
         }
     }
+    /// Exit status if the helper window was closed (by the user or by an
+    /// error) without us stopping it; `None` while it is still open or
+    /// after `stop`. Never blocks.
+    pub fn exited(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        let Some(child) = self.child.as_mut() else { return Ok(None) };
+        let status = child.try_wait()?;
+        if status.is_some() {
+            // Already reaped: nothing left to kill or wait for on drop.
+            self.child = None;
+        }
+        Ok(status)
+    }
+
     pub fn finished(&mut self) -> io::Result<bool> {
         self.child.as_mut().map_or(Ok(true), |child| {
             child.try_wait().map(|status| status.is_some())
@@ -288,6 +301,27 @@ mod tests {
         }
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
     }
+
+    #[test]
+    fn exited_reports_a_helper_that_closed_by_itself() {
+        let mut quick = PreviewProcess::spawn(Command::new("sh").args(["-c", "exit 3"])).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = quick.exited().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "helper did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(3));
+        // Reported once; afterwards there is nothing left to watch.
+        assert!(quick.exited().unwrap().is_none());
+
+        let mut running = PreviewProcess::spawn(Command::new("sleep").arg("5")).unwrap();
+        assert!(running.exited().unwrap().is_none());
+        running.stop();
+        assert!(running.exited().unwrap().is_none());
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -305,4 +339,5 @@ mod windows_tests {
         let _ = child.kill();
         let _ = child.wait();
     }
+
 }

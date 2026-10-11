@@ -83,7 +83,18 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
     })
     .filter(|cmd| {
         let label = cmd.label.to_lowercase();
-        words.iter().all(|w| label.contains(w))
+        // A word typed in the wrong keyboard layout ("dbl" for "вид") also matches.
+        words.iter().all(|w| label.contains(w.as_str()) || label.contains(&to_russian_layout(w)))
     })
     .collect()
+}
+
+/// Re-reads keys typed in the English QWERTY layout as the Russian ЙЦУКЕН
+/// keys at the same positions.
+pub fn to_russian_layout(text: &str) -> String {
+    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
+    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
+    text.chars()
+        .map(|c| EN.chars().position(|e| e == c).and_then(|i| RU.chars().nth(i)).unwrap_or(c))
+        .collect()
 }

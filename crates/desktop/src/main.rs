@@ -103,6 +103,11 @@ fn wants_shell_thumbnail(path: &std::path::Path) -> bool {
     }
 }
 
+/// A path from an operation receipt as the listings know it (no `\\?\`).
+fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
+    path.map(|path| filemanager_core::path_utils::normalize_extended_path(&path))
+}
+
 /// Internal name of the session restored at startup.
 const SESSION_WORKSPACE: &str = "Default";
 
@@ -904,7 +909,7 @@ impl Explorer {
                     None => format!("Перемещено: {moved}. Ctrl+Z — отменить."),
                 };
                 if moved > 0 {
-                    this.selected = receipts.last().and_then(|receipt| receipt.destination.clone());
+                    this.selected = normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));
                     let label = if moved == 1 {
                         format!("перенос «{}»", browser::display_name(&receipts[0].source))
                     } else {
@@ -966,7 +971,7 @@ impl Explorer {
                             let label = format!("создание папки «{}»", browser::display_name(&dest));
                             this.push_undo(vec![receipt.clone()], label);
                         }
-                        this.selected = receipt.destination;
+                        this.selected = normalized(receipt.destination);
                     }
                     Err(error) => this.status = format!("Не удалось создать папку: {error}"),
                 }
@@ -1041,7 +1046,7 @@ impl Explorer {
                         if let Some(ref dest) = receipt.destination {
                             this.refresh_parent_of(dest, cx);
                         }
-                        this.selected = receipt.destination.clone();
+                        this.selected = normalized(receipt.destination.clone());
                         let label = format!("переименование «{}»", browser::display_name(&receipt.source));
                         this.status = "Переименовано. Ctrl+Z — отменить.".into();
                         this.push_undo(vec![receipt], label);
@@ -1675,6 +1680,9 @@ impl Explorer {
     }
 
     fn refresh_parent_of(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        // Operation receipts carry verbatim \\?\ paths (kept for long-path
+        // Win32 calls); the listing cache is keyed by normal paths.
+        let path = filemanager_core::path_utils::normalize_extended_path(path);
         if let Some(parent) = path.parent() {
             self.load_directory(parent.to_path_buf(), true, cx);
         }

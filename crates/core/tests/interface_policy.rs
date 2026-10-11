@@ -79,6 +79,9 @@ fn palette_searches_russian_words_and_gates_mutating_commands() {
             .any(|c| c.id == CommandId::ToggleHidden)
     );
     assert!(commands("нет такой команды").is_empty());
+    // Typed with the English layout active: "dbl" is "вид", "yfcnh" is "настр".
+    assert_eq!(commands("dbl").len(), 2);
+    assert_eq!(commands("yfcnh").first().map(|c| c.label), Some("Настройки"));
     let rename = commands("")
         .into_iter()
         .find(|c| c.id == CommandId::Rename)

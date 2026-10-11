@@ -137,7 +137,7 @@ impl Explorer {
                 this.bulk_rename_errors = report.errors;
                 let done = receipts.len();
                 this.marked.clear(); this.anchor = None;
-                this.selected = receipts.last().and_then(|receipt| receipt.destination.clone());
+                this.selected = crate::normalized(receipts.last().and_then(|receipt| receipt.destination.clone()));
                 this.status = match this.bulk_rename_errors.first() {
                     Some(error) => format!("Переименовано {done}/{total}. {error}. Завершённые действия можно отменить Ctrl+Z."),
                     None => format!("Переименовано: {done}. Ctrl+Z — отменить группу."),

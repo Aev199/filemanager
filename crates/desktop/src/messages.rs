@@ -39,7 +39,8 @@ const PHRASES: &[(&str, &str)] = &[
 ];
 
 pub fn localize(text: &str) -> String {
-    let mut out = text.to_string();
+    // Verbatim Windows paths (\\?\C:\..., \\?\UNC\server\...) read as plain ones.
+    let mut out = text.replace(r"\\?\UNC\", r"\\").replace(r"\\?\", "");
     for (english, russian) in PHRASES {
         if out.contains(english) {
             out = out.replace(english, russian);
@@ -57,5 +58,7 @@ mod tests {
             "Ошибка: notes.txt: Объект с таким именем уже существует, замена запрещена"
         );
         assert_eq!(super::localize("something else"), "something else");
+        assert_eq!(super::localize(r"Ошибка: \\?\C:\a.txt"), r"Ошибка: C:\a.txt");
+        assert_eq!(super::localize(r"\\?\UNC\srv\share\x"), r"\\srv\share\x");
     }
 }

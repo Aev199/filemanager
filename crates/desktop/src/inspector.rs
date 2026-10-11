@@ -57,6 +57,7 @@ impl Explorer {
                         this.document_preview = Some(child);
                         this.status =
                             "Предпросмотр открыт в отдельном окне. Его можно закрыть здесь.".into();
+                        this.watch_document_preview(generation, cx);
                     }
                     Err(error) => this.status = format!("Предпросмотр недоступен: {error}"),
                 }
@@ -66,6 +67,52 @@ impl Explorer {
         .detach();
         cx.notify();
     }
+    /// Notices when the user closes the preview window themselves (or the
+    /// handler fails), so the panel stops offering "close" for a dead window.
+    fn watch_document_preview(&mut self, generation: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_spawn(async {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                })
+                .await;
+                let keep_watching = weak
+                    .update(cx, |this, cx| {
+                        if this.preview_launch_generation != generation {
+                            return false;
+                        }
+                        let Some(preview) = this.document_preview.as_mut() else {
+                            return false;
+                        };
+                        match preview.exited() {
+                            Ok(None) => true,
+                            Ok(Some(status)) => {
+                                this.document_preview = None;
+                                this.status = if status.success() {
+                                    "Окно предпросмотра закрыто".into()
+                                } else {
+                                    "Предпросмотр завершился с ошибкой обработчика; файл можно открыть обычной командой".into()
+                                };
+                                cx.notify();
+                                false
+                            }
+                            Err(error) => {
+                                this.document_preview = None;
+                                this.status = format!("Состояние предпросмотра неизвестно: {error}");
+                                cx.notify();
+                                false
+                            }
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep_watching {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn close_document_preview(&mut self, cx: &mut Context<Self>) {
         self.preview_launch_generation = self.preview_launch_generation.wrapping_add(1);
         self.document_preview.take();

@@ -134,7 +134,9 @@ pub fn preview(paths: &[PathBuf], template: &str) -> io::Result<RenamePreview> {
         let mut destination = supplied.clone();
         let prepared = (|| {
             crate::folder_copy::reject_link(supplied)?;
-            source = fs::canonicalize(supplied)?;
+            // Shown in the preview: no verbatim \\?\ prefix (Plan::prepare
+            // canonicalizes again for the actual operation).
+            source = crate::path_utils::normalize_extended_path(&fs::canonicalize(supplied)?);
             let meta = fs::symlink_metadata(&source)?;
             let name = source
                 .file_name()
