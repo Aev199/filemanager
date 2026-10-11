@@ -277,12 +277,13 @@ impl Explorer {
                         .items_center()
                         .rounded_md()
                         .when(index == palette.selected, |row| row.bg(rgb(SELECTED)))
+                        .text_color(rgb(if index == palette.selected { SELECTION_TEXT } else { TEXT }))
                         .when(!enabled, |row| row.opacity(0.4))
                         .when(enabled, |row| {
-                            row.cursor_pointer().hover(|s| s.bg(rgb(HOVER)))
+                            row.cursor_pointer().when(index != palette.selected, |row| row.hover(|s| s.bg(rgb(HOVER))))
                         })
                         .child(div().flex_1().child(command.label))
-                        .child(div().text_color(rgb(TEXT_MUTED)).child(command.shortcut))
+                        .child(div().text_color(rgb(if index == palette.selected { SELECTION_TEXT } else { TEXT_MUTED })).child(command.shortcut))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.execute_command(command, window, cx)
                         })),
@@ -458,7 +459,7 @@ impl Explorer {
             return;
         };
         let local_y = (event.position.y - bounds.origin.y) / px(1.);
-        let row = ((local_y + scroll) / 28.).floor() as usize;
+        let row = crate::layout::row_index(local_y, scroll);
         // Reserve the right gutter; rows retain their normal file drag gesture.
         if row < indices.len() && event.position.x < bounds.right() - px(12.) {
             return;
@@ -567,7 +568,7 @@ impl Explorer {
         m.moved = true;
         let rows = filemanager_core::selection::marquee_rows(
             m.indices.len(),
-            28.,
+            crate::layout::ROW_HEIGHT,
             (m.start.y - m.bounds.top()) / px(1.),
             (m.current.y - m.bounds.top()) / px(1.),
             m.bounds.size.height / px(1.),
@@ -597,7 +598,7 @@ impl Explorer {
         } else {
             let rows = filemanager_core::selection::marquee_rows(
                 m.indices.len(),
-                28.,
+                crate::layout::ROW_HEIGHT,
                 (m.start.y - m.bounds.top()) / px(1.),
                 (m.current.y - m.bounds.top()) / px(1.),
                 m.bounds.size.height / px(1.),

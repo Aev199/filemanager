@@ -20,13 +20,28 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::TitleBar;
-use gpui_component::ElementExt;
+use gpui_component::{ElementExt, InteractiveElementExt};
 
 use crate::keys;
 use crate::theme::*;
 use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, Side, TabDrag};
 
-const ROW_HEIGHT: f32 = 28.;
+use crate::layout::ROW_HEIGHT;
+
+fn column_scroll_area(id: &'static str, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<> {
+    div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
+        .overflow_x_scroll().lock_scroll_axis().horizontal_scrollbar(scroll)
+}
+
+#[cfg(test)]
+mod atlas_scroll_tests {
+    use super::*;
+    #[test]
+    fn explicit_column_handle_tracks_the_overflow_viewport() {
+        let mut area = column_scroll_area("test-columns", &gpui::ScrollHandle::default());
+        assert_eq!(area.style().overflow.x, Some(gpui::Overflow::Scroll));
+    }
+}
 
 /// Aligns gpui-component widgets (inputs, scrollbars, tooltips) with our palette.
 pub fn apply_component_theme(cx: &mut App) {
@@ -466,14 +481,10 @@ impl Explorer {
                         listing.entries.iter().any(|entry| &entry.path == selected && entry.is_directory)
                     })
             });
-        // Current folder wins over ancestors and optional subfolder preview.
+        // A narrow viewport may omit the optional preview, never the trail.
         let fit = crate::layout::column_capacity(self.pane_width_for(side), preview.is_some());
         let preview = preview.filter(|_| fit > 1);
-        let trail = if preview.is_some() { fit - 1 } else { fit };
-        let mut columns: Vec<PathBuf> = path.ancestors().take(trail).map(Path::to_path_buf).collect();
-        columns.reverse();
-        columns.extend(preview);
-        columns
+        crate::layout::column_paths(&path, preview.as_deref())
     }
 
     fn pane(&mut self, side: Side, cx: &mut Context<Self>) -> AnyElement {
@@ -490,20 +501,67 @@ impl Explorer {
                 if side == Side::Left { "l" } else { "r" },
                 crate::layout::column_identity(pane_width, folders.len(), current_index),
             );
-            let widths = crate::layout::column_widths(pane_width, folders.len(), current_index);
-            let minimum_width = px(widths.iter().sum());
-            let mut group = h_resizable(group_id);
+            let side_index = if side == Side::Left { 0 } else { 1 };
+            let scroll = self.column_scroll_handles[side_index].clone();
+            let reveal_key = format!("{group_id}-{:?}-{:?}-{}", path, folders.last(), pane_width as u32);
+            if self.column_sizes[side_index].as_ref().is_none_or(|(key, _)| key != &reveal_key) {
+                self.column_sizes[side_index] = Some((reveal_key.clone(), crate::layout::column_widths(pane_width, folders.len(), current_index)));
+                if self.column_resize.as_ref().is_some_and(|resize| resize.side_index == side_index) {
+                    self.column_resize = None;
+                }
+            }
+            let widths = self.column_sizes[side_index].as_ref().unwrap().1.clone();
+            let content_width = px(widths.iter().sum::<f32>().max(pane_width));
+            let mut group = div().id(group_id).w(content_width).h_full().flex().flex_row().flex_none();
             for (index, folder) in folders.iter().enumerate() {
                 // The folder of the next column is highlighted as the trail.
                 let trail = folders.get(index + 1).cloned();
                 let column = self.column(folder.clone(), side, trail, cx);
-                let width = widths[index];
-                let minimum = if index == current_index { crate::layout::CURRENT_MIN } else { 150. };
-                group = group.child(resizable_panel().size(px(width)).size_range(px(minimum)..px(4000.)).child(column));
+                let weak = cx.weak_entity();
+                let reveal_scroll = scroll.clone();
+                let reveal_key = reveal_key.clone();
+                let resize_key = reveal_key.clone();
+                let resize_widths = widths.clone();
+                let reveal_widths = widths.clone();
+                let column = div().relative().w(px(widths[index])).h_full().flex_none().child(column)
+                    .child(div().id(("column-resize", index)).absolute().right_0().top_0().bottom_0().w(px(6.))
+                        .cursor_col_resize().hover(|style| style.bg(rgb(BORDER_STRONG)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if this.interface_modal() { return; }
+                            this.column_resize = Some(crate::ColumnResize {
+                                side_index, key: resize_key.clone(), index, current: current_index,
+                                start_x: event.position.x, widths: resize_widths.clone(),
+                            });
+                            this.marquee = None;
+                        })))
+                    .when(index == current_index, |column| column.on_prepaint(move |bounds, _, cx| {
+                        let reveal_scroll = reveal_scroll.clone();
+                        let reveal_key = reveal_key.clone();
+                        let weak = weak.clone();
+                        let reveal_widths = reveal_widths.clone();
+                        cx.defer(move |cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                if this.column_reveal_keys[side_index].as_ref() == Some(&reveal_key) {
+                                    return;
+                                }
+                                let viewport = reveal_scroll.bounds();
+                                if viewport.size.width <= px(0.) { return; }
+                                let offset = reveal_scroll.offset().x / px(1.);
+                                let start = (bounds.origin.x - viewport.origin.x) / px(1.) - offset;
+                                let next = crate::layout::reveal_column_offset(&reveal_widths, current_index,
+                                    viewport.size.width / px(1.), start, bounds.size.width / px(1.), offset)
+                                    .min(0.).max(-reveal_scroll.max_offset().x / px(1.));
+                                this.column_reveal_keys[side_index] = Some(reveal_key);
+                                reveal_scroll.set_offset(gpui::point(px(next), px(0.)));
+                                cx.notify();
+                            });
+                        });
+                    }));
+                group = group.child(column);
             }
-            div().id(if side == Side::Left { "columns-left" } else { "columns-right" })
-                .flex_1().min_h_0().overflow_x_scrollbar()
-                .child(div().w_full().min_w(minimum_width).h_full().child(group))
+            column_scroll_area(if side == Side::Left { "columns-left" } else { "columns-right" }, &scroll)
+                .child(group)
                 .into_any_element()
         } else {
             div().flex_1().min_h_0().flex().flex_col()
@@ -594,7 +652,7 @@ impl Explorer {
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
         if !list_mode {
             let current = folder == self.pane_path(side);
-            column = column.child(div().h(px(26.)).flex_none().px_3().flex().items_center()
+            column = column.child(div().h(px(ROW_HEIGHT)).flex_none().px_2().flex().items_center()
                 .border_b_1().border_color(rgb(BORDER)).text_size(px(12.))
                 .text_color(rgb(if current { TEXT } else { TEXT_MUTED }))
                 .child(div().min_w_0().truncate().child(browser::display_name(&folder))));
@@ -674,19 +732,23 @@ impl Explorer {
         let (icon_path, tint) = entry_icon(entry);
         let bg = if selected && focused_pane {
             Some(SELECTED)
-        } else if selected || on_trail {
+        } else if selected {
+            Some(INACTIVE_SELECTED)
+        } else if on_trail {
             Some(TRAIL)
         } else {
             None
         };
-        let text = if entry.hidden { TEXT_MUTED } else { TEXT };
+        let text = if selected { SELECTION_TEXT } else if entry.hidden { TEXT_MUTED } else { TEXT };
+        let metadata_text = if selected { SELECTION_TEXT } else { TEXT_MUTED };
+        let tint = if selected { SELECTION_TEXT } else { tint };
         let mut row = div().id(SharedString::from(format!("row-{}", path.display())))
-            .w_full().h(px(ROW_HEIGHT)).pl(px(6.)).pr_2().flex().items_center().gap_2().rounded_sm()
+            .w_full().h(px(ROW_HEIGHT)).pl(px(6.)).pr_2().flex().items_center().gap_2()
             .border_l_2().border_color(rgb(if selected && focused_pane { ACCENT } else { bg.unwrap_or(SURFACE) }))
             .text_size(px(13.)).text_color(rgb(text)).cursor_pointer()
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
-            .child(icon(icon_path, tint).when(entry.hidden, |svg| svg.opacity(0.55)));
+            .child(icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)));
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
         row = if self.renaming && self.selected.as_ref() == Some(&path) {
             row.child(div().flex_1().min_w_0().child(Input::new(&self.rename_input).h(px(24.))))
@@ -696,15 +758,15 @@ impl Explorer {
         if list_mode {
             let (show_modified, show_kind) = self.list_columns(side);
             row = row
-                .when(show_modified, |row| row.child(div().w(px(140.)).flex_none().px_2().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                .when(show_modified, |row| row.child(div().w(px(140.)).flex_none().px_2().text_size(px(12.)).text_color(rgb(metadata_text))
                     .child(entry.modified.map(format_time).unwrap_or_default())))
-                .when(show_kind, |row| row.child(div().w(px(110.)).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                .when(show_kind, |row| row.child(div().w(px(110.)).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
                     .child(kind_label(entry))))
                 .child(div().w(px(90.)).flex_none().px_2().flex().justify_end().text_size(px(12.))
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(metadata_text))
                     .child(if is_dir { String::new() } else { format_size(entry.size) }));
         } else if is_dir {
-            row = row.child(small_icon("fm/chevron-right.svg", TEXT_DIM));
+            row = row.child(small_icon("fm/chevron-right.svg", if selected { SELECTION_TEXT } else { TEXT_DIM }));
         }
         if is_dir {
             let internal_target = path.clone();
@@ -1519,9 +1581,21 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,_: &keys::PaletteEnter,window,cx|this.palette_enter(window,cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsToggle,_,cx|this.settings_toggle(cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsApply,_,cx|this.apply_settings(cx)))
-            .on_mouse_move(cx.listener(|this,event,cx_window,cx| {let _=cx_window;this.move_marquee(event,cx);}))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx|this.finish_marquee(cx)))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx|this.finish_marquee(cx)))
+            .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {
+                if this.column_resize.is_some() {
+                    if !event.dragging() || this.interface_modal() {
+                        this.column_resize = None;
+                        return;
+                    }
+                    let resize = this.column_resize.as_ref().unwrap();
+                    let next = crate::layout::resize_column(&resize.widths, resize.index,
+                        resize.widths[resize.index] + (event.position.x - resize.start_x) / px(1.), resize.current);
+                    this.column_sizes[resize.side_index] = Some((resize.key.clone(), next));
+                    cx.notify();
+                } else { this.move_marquee(event,cx); }
+            }))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.column_resize=None;this.finish_marquee(cx);}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.column_resize=None;this.finish_marquee(cx);}))
             .on_action(cx.listener(|this,_: &keys::OpenPalette,window,cx|this.open_palette(window,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenSettings,window,cx|this.open_settings(window,cx)))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_back(this,event,window,cx); } }))

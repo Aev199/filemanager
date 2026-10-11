@@ -40,6 +40,15 @@ use std::time::Duration;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side { Left, Right }
 
+struct ColumnResize {
+    side_index: usize,
+    key: String,
+    index: usize,
+    current: usize,
+    start_x: Pixels,
+    widths: Vec<f32>,
+}
+
 /// Internal drag-and-drop payload. Dropping only stages a path; no file
 /// operation takes place until the user explicitly clicks Copy here.
 #[derive(Clone)]
@@ -59,7 +68,7 @@ impl Render for FileDragPreview {
             .child(
                 div().px_3().py_1().rounded_md().bg(rgb(theme::SELECTED))
                     .border_1().border_color(rgb(theme::SELECTED_BORDER))
-                    .text_color(rgb(theme::TEXT)).text_size(px(13.))
+                    .text_color(rgb(theme::SELECTION_TEXT)).text_size(px(13.))
                     .child(self.name.clone())
             )
     }
@@ -181,6 +190,10 @@ struct Explorer {
     /// Width of one file pane at the last layout, for column dropping.
     pane_width: f32,
     pane_measured_widths: [Option<f32>; 2],
+    column_scroll_handles: [gpui::ScrollHandle; 2],
+    column_reveal_keys: [Option<String>; 2],
+    column_sizes: [Option<(String, Vec<f32>)>; 2],
+    column_resize: Option<ColumnResize>,
     /// After entering a folder from the keyboard, select its first entry
     /// once the listing arrives.
     select_first_when_loaded: bool,
@@ -401,6 +414,10 @@ impl Explorer {
             typeahead_at: None,
             pane_width: 800.,
             pane_measured_widths: [None, None],
+            column_scroll_handles: Default::default(),
+            column_reveal_keys: [None, None],
+            column_sizes: [None, None],
+            column_resize: None,
             select_first_when_loaded: false,
             rename_input, folder_input,
             bulk_template_input, bulk_rename: None, bulk_rename_errors: Vec::new(), bulk_rename_generation: 0,

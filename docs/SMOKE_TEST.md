@@ -8,6 +8,8 @@
 
 Перед общим прогоном выполнить также UI_POLISH_2026-10-11.md: размеры окна,
 DPI, разные ширины split, смена preview role, компактный staging, обе темы.
+Затем выполнить ATLAS_ALIGNMENT_2026-10-11.md: глубокая цепочка, horizontal
+reveal/resize, 24px marquee, selection/commands/drag в обеих темах.
 Проверять новый EXE после UI-доработки, не старый артефакт run №19.
 
 1. В «Загрузках» создай `FM-test-A` и `FM-test-B`.

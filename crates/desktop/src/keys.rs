@@ -416,6 +416,11 @@ impl Explorer {
     /// Escape never submits a filesystem change or silently cancels a copy.
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(resize) = self.column_resize.take() {
+            self.column_sizes[resize.side_index] = Some((resize.key, resize.widths));
+            cx.notify();
+            return;
+        }
         if self.escape_marquee(cx) {return;}
         if self.dismiss_interface(window,cx) { return; }
         let had_popup = self.renaming || self.creating_folder || self.address_editing || self.saving_workspace

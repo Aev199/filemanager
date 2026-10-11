@@ -8,10 +8,12 @@ pub const BORDER: u32 = 0x26282F;
 pub const BORDER_STRONG: u32 = 0x33363F;
 pub const HOVER: u32 = 0x292D35;
 pub const PRESSED: u32 = 0x2B2E36;
-pub const SELECTED: u32 = 0x24375A;
+pub const SELECTED: u32 = 0x0069D9;
+pub const SELECTION_TEXT: u32 = 0xFFFFFF;
+pub const INACTIVE_SELECTED: u32 = 0x35465C;
 pub const SELECTED_BORDER: u32 = 0x3D6BD8;
 /// Ancestors of the current folder in Miller columns.
-pub const TRAIL: u32 = 0x1E2229;
+pub const TRAIL: u32 = 0x24456B;
 pub const ACCENT: u32 = 0x5E8BFF;
 pub const ACCENT_SOFT: u32 = 0x1D2A47;
 
@@ -44,9 +46,11 @@ pub fn resolve(light: bool, color: u32) -> u32 {
             BORDER_STRONG => 0xBEC5D1,
             HOVER => 0xE9EDF5,
             PRESSED => 0xDCE3EF,
-            SELECTED => 0xDCE8FF,
+            SELECTED => 0x0069D9,
+            SELECTION_TEXT => 0xFFFFFF,
+            INACTIVE_SELECTED => 0x35465C,
             SELECTED_BORDER => 0x376AC9,
-            TRAIL => 0xE7ECF4,
+            TRAIL => 0xCFDFF2,
             ACCENT => 0x285DC7,
             ACCENT_SOFT => 0xE3EBFC,
             TEXT => 0x202631,
@@ -106,6 +110,17 @@ mod tests {
             assert_ne!(resolve(light, SELECTED), resolve(light, HOVER));
             assert_ne!(resolve(light, HOVER), resolve(light, TRAIL));
             assert_ne!(resolve(light, SELECTED), resolve(light, TRAIL));
+        }
+    }
+    #[test]
+    fn bright_selection_has_readable_text_in_both_themes() {
+        for light in [false, true] {
+            for background in [SELECTED, INACTIVE_SELECTED] {
+                let fg = luminance(resolve(light, SELECTION_TEXT));
+                let bg = luminance(resolve(light, background));
+                let contrast = (fg.max(bg) + 0.05) / (fg.min(bg) + 0.05);
+                assert!(contrast >= 4.5, "light={light}: contrast={contrast}");
+            }
         }
     }
 }
