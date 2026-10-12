@@ -25,7 +25,7 @@ pub fn validate_document(path: &Path) -> io::Result<PathBuf> {
             "Предпросмотр поддерживает PDF/Office до 64 МБ. Откройте файл обычной командой.",
         ));
     }
-    std::fs::canonicalize(path)
+    crate::path_utils::canonical(path)
 }
 
 pub struct PreviewProcess {

@@ -142,7 +142,7 @@ pub fn preview(paths: &[PathBuf], template: &str) -> io::Result<RenamePreview> {
             crate::folder_copy::reject_link(supplied)?;
             // Shown in the preview: no verbatim \\?\ prefix (Plan::prepare
             // canonicalizes again for the actual operation).
-            source = crate::path_utils::normalize_extended_path(&fs::canonicalize(supplied)?);
+            source = crate::path_utils::normalize_extended_path(&crate::path_utils::canonical(supplied)?);
             let meta = fs::symlink_metadata(&source)?;
             let name = source
                 .file_name()

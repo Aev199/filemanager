@@ -71,7 +71,7 @@ fn run() -> io::Result<()> {
             println!("Comment saved for event #{id}.");
         }
         "watch" => {
-            let root = path(&mut args, "folder")?.canonicalize()?;
+            let root = filemanager_core::path_utils::canonical(&path(&mut args, "folder")?)?;
             let journal = Arc::new(Journal::open(Journal::default_path())?);
             let watcher = HistoryWatch::start(&root, journal)
                 .map_err(io::Error::other)?;

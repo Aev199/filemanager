@@ -75,7 +75,7 @@ impl Pane {
 fn canonical_directory(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     // Windows canonicalize() returns verbatim `\\?\C:\...` paths. They work,
     // but must never reach breadcrumbs, tab titles or copied paths.
-    let path = normalize_extended_path(&fs::canonicalize(path)?);
+    let path = normalize_extended_path(&crate::path_utils::canonical(path.as_ref())?);
     if !fs::metadata(&path)?.is_dir() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "Expected a directory"));
     }

@@ -47,6 +47,40 @@ pub fn is_network_path(path: &Path) -> bool {
     }
 }
 
+/// `fs::canonicalize`, except that a network path keeps the name it was
+/// opened by. On Windows canonicalize asks for the final path of an open
+/// handle, which for a DFS folder is the target server's own share
+/// (`\\fs.pp.lc\S\…\2026` → `\\fscl\SHD_DFS_Objekt_2026\2026`). Opening
+/// that target directly next to the DFS name confuses the SMB client: the
+/// folder then fails for Explorer too until a reboot. A mapped drive also
+/// stays `Z:\…` instead of turning into its UNC share.
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    if !is_network_path(&absolute) {
+        return fs::canonicalize(path);
+    }
+    // Existence check only; the name is resolved lexically (no `..` left).
+    fs::metadata(&absolute)?;
+    Ok(verbatim(&normalize_extended_path(&absolute)))
+}
+
+/// The `\\?\` form `fs::canonicalize` returns on Windows, for consistency
+/// with local paths; unchanged elsewhere.
+fn verbatim(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\") {
+            return PathBuf::from(format!(r"\\?\UNC\{rest}"));
+        }
+        return PathBuf::from(format!(r"\\?\{text}"));
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
 /// Canonicalizes the parent folders of `path` and re-appends its final
 /// component, so it compares equal to canonical index roots even when it was
 /// reported with Windows 8.3 short names (`RUNNER~1`) or no longer exists.
@@ -60,7 +94,7 @@ pub fn canonicalize_parent(path: &Path) -> PathBuf {
         };
         missing.push(name.to_os_string());
         current = parent;
-        if let Ok(base) = fs::canonicalize(current) {
+        if let Ok(base) = canonical(current) {
             let mut resolved = normalize_extended_path(&base);
             resolved.extend(missing.iter().rev());
             return resolved;
@@ -86,6 +120,24 @@ pub(crate) fn same_place(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn network_path_keeps_the_name_it_was_opened_by() {
+        // A symlink stands in for a DFS link: local folders resolve it,
+        // network ones must not (the test marks the folder as network).
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("server-share");
+        fs::create_dir(&target).unwrap();
+        let link = temp.path().join("fm-poll-test-dfs");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(canonical(&link).unwrap(), link);
+        assert_eq!(canonical(&link.join("..").join("fm-poll-test-dfs")).unwrap_or_default().file_name(),
+            Some(std::ffi::OsStr::new("fm-poll-test-dfs")));
+        assert!(canonical(&temp.path().join("fm-poll-test-missing")).is_err());
+        let local = temp.path().join("local-link");
+        std::os::unix::fs::symlink(&target, &local).unwrap();
+        assert_eq!(canonical(&local).unwrap(), fs::canonicalize(&target).unwrap());
+    }
     #[test]
     fn normalization_never_mangles_plain_unicode_paths() {
         let normal = Path::new("Проекты/Расчётная_модель.xlsx");

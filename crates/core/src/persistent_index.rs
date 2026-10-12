@@ -17,7 +17,7 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 fn root_key(root: &Path) -> io::Result<String> {
-    let canonical = normalize_extended_path(&fs::canonicalize(root)?);
+    let canonical = normalize_extended_path(&crate::path_utils::canonical(root)?);
     if !canonical.is_dir() { return Err(invalid("Index root must be a folder")); }
     canonical.into_os_string().into_string()
         .map_err(|_| invalid("Non-Unicode index roots are not supported"))

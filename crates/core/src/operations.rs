@@ -327,7 +327,7 @@ impl Plan {
     fn prepare_inner(action: Action, source: &Path, destination: Option<&Path>, replacing: bool) -> io::Result<Self> {
         // Only existing local paths can be operated on.
         crate::folder_copy::reject_link(source)?;
-        let source = fs::canonicalize(source)?;
+        let source = crate::path_utils::canonical(source)?;
         if source.parent().is_none() && action != Action::CreateFolder {
             return Err(invalid("Cannot operate on a filesystem root"));
         }
@@ -345,7 +345,7 @@ impl Plan {
                 let name = destination.file_name().ok_or_else(|| invalid("Missing destination name"))?;
                 let name_text = name.to_str().ok_or_else(|| invalid("Destination name is not UTF-8"))?;
                 validate_leaf_name(name_text)?;
-                let parent = fs::canonicalize(destination.parent().ok_or_else(|| invalid("Missing parent"))?)?;
+                let parent = crate::path_utils::canonical(destination.parent().ok_or_else(|| invalid("Missing parent"))?)?;
                 if !parent.is_dir() { return Err(invalid("Destination parent is not a directory")); }
                 let normalized = parent.join(name);
                 if action == Action::CreateFolder && (!source.is_dir() || source != parent) {
@@ -629,7 +629,7 @@ impl DropZone {
         // Check the *supplied* path before canonicalize. Otherwise adding a
         // symlink/junction silently stages its target rather than refusing it.
         crate::folder_copy::reject_link(source)?;
-        let canonical = fs::canonicalize(source)?;
+        let canonical = crate::path_utils::canonical(source)?;
         if canonical.parent().is_none() {
             return Err(invalid("Cannot stage a filesystem root"));
         }
