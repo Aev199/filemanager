@@ -744,9 +744,24 @@ impl Explorer {
                 .child(div().min_w_0().truncate().child(browser::display_name(&folder))));
         }
         let background_folder = folder.clone();
+        let drop_folder = folder.clone();
+        let hover_folder = folder.clone();
+        let right_target = self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&folder);
         column = column.on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
             this.open_menu(event.position, MenuTarget::Folder(background_folder.clone()), cx);
-        }));
+        }))
+            // Files dropped on the empty space or a file row land in this folder.
+            .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
+            .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
+                this.drop_files(&data.paths, drop_folder.clone(), window.modifiers(), cx);
+            }))
+            .on_mouse_move(cx.listener(move |this, _, _, _| {
+                if let Some(drag) = this.right_drag.as_mut().filter(|drag| drag.active && !drag.claimed) {
+                    drag.target = Some(hover_folder.clone());
+                    drag.claimed = true;
+                }
+            }))
+            .when(right_target, |column| column.bg(rgb(ACCENT_SOFT)));
 
         if let Some((listing, indices)) = self.folder_view(side, &folder) {
             if indices.is_empty() {
@@ -832,6 +847,8 @@ impl Explorer {
             None
         };
         let base = if striped { STRIPE } else { SURFACE };
+        let right_target = is_dir && self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&path);
+        let bg = if right_target && !selected { Some(ACCENT_SOFT) } else { bg };
         let text = if selected { SELECTION_TEXT } else if entry.hidden { TEXT_MUTED } else { TEXT };
         let metadata_text = if selected { SELECTION_TEXT } else { TEXT_MUTED };
         let tint = if selected { SELECTION_TEXT } else { tint };
@@ -868,12 +885,17 @@ impl Explorer {
             row = row
                 .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)).border_1().border_color(rgb(ACCENT)))
                 .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)).border_1().border_color(rgb(ACCENT)))
-                // Inside the app a drop moves (Ctrl copies); from Explorer it copies.
+                // Inside the app: Explorer's rule (see drop_files); from Explorer it copies.
                 .on_drop(cx.listener(move |this, data: &FileDragInfo, window, cx| {
                     cx.stop_propagation();
-                    let copy = window.modifiers().control;
-                    this.drop_into(&data.paths, internal_target.clone(), copy, cx);
+                    this.drop_files(&data.paths, internal_target.clone(), window.modifiers(), cx);
                 }))
+                .on_mouse_move(cx.listener({ let target = path.clone(); move |this, _, _, _| {
+                    if let Some(drag) = this.right_drag.as_mut().filter(|drag| drag.active && !drag.claimed) {
+                        drag.target = Some(target.clone());
+                        drag.claimed = true;
+                    }
+                }}))
                 .on_drop(cx.listener(move |this, data: &ExternalPaths, _, cx| {
                     cx.stop_propagation();
                     this.drop_into(data.paths(), external_target.clone(), true, cx);
@@ -897,7 +919,14 @@ impl Explorer {
                 if !this.is_selected(&menu_path) {
                     this.navigate_side(side, &menu_folder, Some(menu_path.clone()), cx);
                 }
-                this.open_menu(event.position, MenuTarget::Entry(menu_path.clone()), cx);
+                // As in Explorer the menu opens on release; dragging instead
+                // ends in the copy/move menu (see the root mouse handlers).
+                let paths = if this.is_selected(&menu_path) { this.selection() } else { vec![menu_path.clone()] };
+                this.context_menu = None;
+                this.right_drag = Some(crate::RightDrag {
+                    paths, start: event.position, position: event.position, active: false,
+                    target: None, claimed: false, click_menu: MenuTarget::Entry(menu_path.clone()),
+                });
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if this.marquee.is_some() {cx.stop_propagation();return;}
@@ -1469,6 +1498,26 @@ impl Explorer {
                             this.copy_path(&copy_target, cx);
                         })));
             }
+            MenuTarget::Drop(paths, folder) => {
+                let what = match paths.as_slice() {
+                    [single] => format!("«{}»", browser::display_name(single)),
+                    many => format!("{} элементов", many.len()),
+                };
+                list = list.child(div().px_2().py_1().text_size(px(12.)).text_color(rgb(TEXT_DIM)).truncate()
+                    .child(format!("{what} → {}", browser::display_name(folder))));
+                for (id, icon_path, label, copy) in [("m-drop-copy", "fm/copy.svg", "Копировать сюда", true),
+                                                      ("m-drop-move", "fm/move.svg", "Переместить сюда", false)] {
+                    let (paths, folder) = (paths.clone(), folder.clone());
+                    list = list.child(Self::menu_item(id, icon_path, label, "", false, true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.context_menu = None;
+                            this.drop_into(&paths, folder.clone(), copy, cx);
+                        })));
+                }
+                list = list.child(Self::separator())
+                    .child(Self::menu_item("m-drop-cancel", "fm/x.svg", "Отмена", "Esc", false, true)
+                        .on_click(cx.listener(|this, _, _, cx| { this.context_menu = None; cx.notify(); })));
+            }
             MenuTarget::TabList(group) => {
                 let group=*group;
                 list=list.w(px(440.)).max_h(px(420.)).overflow_y_scroll();
@@ -1754,6 +1803,18 @@ impl Render for Explorer {
                 if !this.pane_bounds.values().any(|bounds|bounds.contains(&event.event.position)) && this.dock_hover.take().is_some() {cx.notify();}
             }))
             .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {
+                // Root runs after rows and columns: they have claimed the target.
+                if let Some(drag) = this.right_drag.as_mut() {
+                    if event.pressed_button == Some(MouseButton::Right) {
+                        let moved = (event.position.x - drag.start.x).abs() + (event.position.y - drag.start.y).abs();
+                        if !drag.active && moved > px(6.) { drag.active = true; }
+                        drag.position = event.position;
+                        if !drag.claimed { drag.target = None; }
+                        drag.claimed = false;
+                        if drag.active { cx.notify(); }
+                        return;
+                    }
+                }
                 if this.column_resize.is_some() {
                     if !event.dragging() || this.interface_modal() {
                         this.column_resize = None;
@@ -1768,6 +1829,17 @@ impl Render for Explorer {
             }))
             .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {
+                let Some(drag)=this.right_drag.take() else {return};
+                if !drag.active {
+                    this.open_menu(event.position,drag.click_menu,cx);
+                } else if let Some(target)=drag.target.filter(|target| !drag.paths.contains(target)
+                    && !drag.paths.iter().all(|path| path.parent()==Some(target.as_path()))) {
+                    this.open_menu(event.position,MenuTarget::Drop(drag.paths,target),cx);
+                }
+                cx.notify();
+            }))
+            .on_mouse_up_out(MouseButton::Right,cx.listener(|this,_,_,cx| {this.right_drag=None;cx.notify();}))
             .on_action(cx.listener(|this,_: &keys::OpenPalette,window,cx|this.open_palette(window,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenSettings,window,cx|this.open_settings(window,cx)))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_back(this,event,window,cx); } }))
@@ -1848,6 +1920,15 @@ impl Render for Explorer {
         }
         if let Some(dialog) = self.bulk_rename_dialog(cx) { root = root.child(dialog); }
         if let Some(rect)=self.marquee_rectangle() {root=root.child(rect);}
+        if let Some(drag)=self.right_drag.as_ref().filter(|drag| drag.active) {
+            let name = match drag.paths.as_slice() {
+                [single] => browser::display_name(single),
+                many => format!("{} элементов", many.len()),
+            };
+            root=root.child(div().absolute().left(drag.position.x+px(14.)).top(drag.position.y+px(10.))
+                .px_3().py_1().rounded_md().bg(rgb(SELECTED)).border_1().border_color(rgb(SELECTED_BORDER))
+                .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
+        }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
         root
     }

@@ -125,9 +125,24 @@ const SESSION_WORKSPACE: &str = "Default";
 #[derive(Clone)]
 enum MenuTarget {
     Entry(PathBuf),
+    /// Right-button drop, as in Explorer: copy or move these into the folder.
+    Drop(Vec<PathBuf>, PathBuf),
     Folder(PathBuf),
     Tab(GroupId, usize),
     TabList(GroupId),
+}
+
+struct RightDrag {
+    paths: Vec<PathBuf>,
+    start: Point<Pixels>,
+    position: Point<Pixels>,
+    /// Moved far enough to be a drag rather than a click.
+    active: bool,
+    /// Folder under the cursor; rows claim it before their column does.
+    target: Option<PathBuf>,
+    claimed: bool,
+    /// Opened on release when the button was not dragged.
+    click_menu: MenuTarget,
 }
 
 #[derive(Clone)]
@@ -176,6 +191,9 @@ struct Explorer {
     operation_busy: bool,
     copy_control: Option<Arc<CopyControl>>,
     context_menu: Option<ContextMenu>,
+    /// Pressed right button on files: a plain click opens their menu, a
+    /// drag ends in the «Копировать сюда / Переместить сюда» menu.
+    right_drag: Option<RightDrag>,
     menu_serial: u64,
     focus_handle: FocusHandle,
     places: Vec<Place>,
@@ -404,6 +422,7 @@ impl Explorer {
             operation_busy: false,
             copy_control: None,
             context_menu: None,
+            right_drag: None,
             menu_serial: 0,
             focus_handle,
             places: places::user_places(),
@@ -683,6 +702,19 @@ impl Explorer {
     }
 
     /// Files dropped on a folder: copied, or moved when `copy` is false.
+    /// A left-button drop inside the app, decided like Explorer: Ctrl copies,
+    /// Shift moves, otherwise moves within one volume and copies across.
+    fn drop_files(&mut self, paths: &[PathBuf], folder: PathBuf, modifiers: gpui::Modifiers, cx: &mut Context<Self>) {
+        // Released over the folder they came from: nothing to do.
+        if paths.is_empty() || paths.iter().any(|path| path == &folder)
+            || (!modifiers.control && paths.iter().all(|path| path.parent() == Some(folder.as_path()))) {
+            return;
+        }
+        let copy = if modifiers.control { true } else if modifiers.shift { false }
+            else { !filemanager_core::path_utils::same_volume(&paths[0], &folder) };
+        self.drop_into(paths, folder, copy, cx);
+    }
+
     fn drop_into(&mut self, paths: &[PathBuf], folder: PathBuf, copy: bool, cx: &mut Context<Self>) {
         let Some(zone) = self.zone_of(paths, cx) else { return };
         self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, replace: false, restore_failed: false }, cx);

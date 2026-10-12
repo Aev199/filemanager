@@ -81,6 +81,36 @@ fn verbatim(path: &Path) -> PathBuf {
     }
 }
 
+/// Whether two existing paths are on one volume. Like Explorer, a drop
+/// moves within a volume and copies onto another one.
+pub fn same_volume(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        // `C:` or `\\server\share`: the drive or share a path lives on.
+        fn key(path: &Path) -> Option<String> {
+            match normalize_extended_path(path).components().next()? {
+                Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy().to_lowercase()),
+                _ => None,
+            }
+        }
+        key(a) == key(b)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev(),
+            _ => true,
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (a, b);
+        true
+    }
+}
+
 /// Canonicalizes the parent folders of `path` and re-appends its final
 /// component, so it compares equal to canonical index roots even when it was
 /// reported with Windows 8.3 short names (`RUNNER~1`) or no longer exists.
@@ -120,6 +150,20 @@ pub(crate) fn same_place(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn one_folder_tree_is_one_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a");
+        fs::create_dir(&a).unwrap();
+        assert!(same_volume(&a, temp.path()));
+        #[cfg(windows)]
+        {
+            assert!(same_volume(Path::new(r"C:\x"), Path::new(r"c:\y")));
+            assert!(!same_volume(Path::new(r"C:\x"), Path::new(r"D:\y")));
+            assert!(same_volume(Path::new(r"\\srv\share\a"), Path::new(r"\\SRV\Share\b")));
+            assert!(!same_volume(Path::new(r"\\srv\one\a"), Path::new(r"\\srv\two\a")));
+        }
+    }
     #[cfg(unix)]
     #[test]
     fn network_path_keeps_the_name_it_was_opened_by() {
