@@ -1298,6 +1298,11 @@ impl Explorer {
         if self.index_watch_root.as_ref() == Some(&root) && self.index_watch.is_some() {
             return;
         }
+        // A recursive subscription on a share keeps change requests open on
+        // the server for the whole tree; search there uses its scan only.
+        if filemanager_core::path_utils::is_network_path(&root) {
+            return;
+        }
         self.index_watch = None;
         self.index_watch_root = None;
         self.index_watch_generation = self.index_watch_generation.wrapping_add(1);

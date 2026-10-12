@@ -3,7 +3,9 @@
 use crate::history::Journal;
 use crate::path_utils::normalize_extended_path;
 use notify::{EventKind, RecursiveMode, Watcher};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::time::{Instant, SystemTime};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{
@@ -16,6 +18,33 @@ use std::time::Duration;
 const MAX_DIRECTORIES: usize = 32;
 const MAX_PATHS: usize = 1024;
 const MAX_BATCH: usize = 256;
+/// Network folders are re-read this often (or rarer if a read is slow).
+const POLL_INTERVAL: Duration = if cfg!(test) { Duration::from_millis(100) } else { Duration::from_secs(5) };
+const POLL_ENTRY_LIMIT: usize = 20_000;
+
+/// Name → (is folder, size, modified) of one polled folder.
+type PollSnapshot = HashMap<OsString, (bool, u64, Option<SystemTime>)>;
+
+fn poll_snapshot(root: &std::path::Path) -> Option<PollSnapshot> {
+    let mut snapshot = HashMap::new();
+    for entry in std::fs::read_dir(root).ok()? {
+        let Ok(entry) = entry else { continue };
+        if snapshot.len() == POLL_ENTRY_LIMIT { break; }
+        // Enumeration data only: nothing on the server is opened per entry.
+        let Ok(meta) = entry.metadata() else { continue };
+        snapshot.insert(entry.file_name(), (meta.is_dir(), meta.len(), meta.modified().ok()));
+    }
+    Some(snapshot)
+}
+
+/// Names whose entry appeared, disappeared or changed size or time.
+fn poll_changes(old: &PollSnapshot, new: &PollSnapshot) -> Vec<OsString> {
+    let mut changed: Vec<OsString> = new.iter()
+        .filter(|(name, value)| old.get(*name) != Some(*value))
+        .map(|(name, _)| name.clone()).collect();
+    changed.extend(old.keys().filter(|name| !new.contains_key(*name)).cloned());
+    changed
+}
 
 #[derive(Default, Debug)]
 pub struct WatchChanges {
@@ -142,10 +171,19 @@ fn run(state: Arc<State>) {
             }
         };
     let mut watched = HashSet::new();
+    // Network folders: read periodically, never subscribed to (see
+    // `path_utils::is_network_path`).
+    let mut polled: HashMap<PathBuf, Option<PollSnapshot>> = HashMap::new();
+    let mut next_poll = Instant::now();
     let mut config = Configuration::default();
     loop {
         if state.stop.load(Ordering::Acquire) {
             return;
+        }
+        if !polled.is_empty() && Instant::now() >= next_poll {
+            let started = Instant::now();
+            poll(&state, &config, &mut polled);
+            next_poll = Instant::now() + POLL_INTERVAL.max(started.elapsed() * 10);
         }
         let desired = state.configuration.lock().unwrap().clone();
         if desired.generation != config.generation {
@@ -165,6 +203,7 @@ fn run(state: Arc<State>) {
                 }
             }
             watched.retain(|path| roots.contains(path));
+            polled.retain(|path, _| roots.contains(path));
             state.unwatched.lock().unwrap().retain(|path| roots.contains(path));
             {
                 let mut changes = state.changes.lock().unwrap();
@@ -175,6 +214,17 @@ fn run(state: Arc<State>) {
                 });
             }
             for root in roots.difference(&watched).cloned().collect::<Vec<_>>() {
+                if crate::path_utils::is_network_path(&root) {
+                    if !polled.contains_key(&root) {
+                        // The first read becomes the baseline on the next poll.
+                        polled.insert(root.clone(), None);
+                        next_poll = Instant::now();
+                        let mut changes = state.changes.lock().unwrap();
+                        changes.ready.insert(root.clone());
+                        changes.directories.insert(root);
+                    }
+                    continue;
+                }
                 match watcher.watch(&root, RecursiveMode::NonRecursive) {
                     Ok(()) => {
                         state.unwatched.lock().unwrap().remove(&root);
@@ -284,8 +334,64 @@ fn run(state: Arc<State>) {
     }
 }
 
+/// Re-reads every polled folder and reports what changed since the last
+/// read, as notifications would; changed files also go to the journal.
+fn poll(state: &State, config: &Configuration, polled: &mut HashMap<PathBuf, Option<PollSnapshot>>) {
+    let roots: Vec<PathBuf> = polled.keys().cloned().collect();
+    for root in roots {
+        if state.stop.load(Ordering::Acquire) {
+            return;
+        }
+        // An offline or locked share is simply tried again next time.
+        let Some(snapshot) = poll_snapshot(&root) else { continue };
+        let previous = polled.insert(root.clone(), Some(snapshot)).flatten();
+        let Some(previous) = previous else { continue };
+        let changed = poll_changes(&previous, polled[&root].as_ref().unwrap());
+        if changed.is_empty() {
+            continue;
+        }
+        let mut observed = 0;
+        let paths: Vec<PathBuf> = changed.iter().map(|name| root.join(name)).collect();
+        if let Some(journal) = &config.journal {
+            for path in &paths {
+                if !journal.is_database_path(path) && journal.observe(path).unwrap_or(false) {
+                    observed += 1;
+                }
+            }
+        }
+        let mut changes = state.changes.lock().unwrap();
+        changes.history_revision = changes.history_revision.wrapping_add(observed);
+        changes.directories.insert(root.clone());
+        for path in paths {
+            if changes.paths.len() < MAX_PATHS {
+                changes.paths.insert(path);
+            } else {
+                changes.refresh_all = true;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn network_folders_are_polled_without_a_subscription() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("fm-poll-test");
+        fs::create_dir(&root).unwrap();
+        let journal = Arc::new(Journal::open(temp.path().join("journal.sqlite3")).unwrap());
+        let watch = DirectoryWatch::start(vec![root.clone()], Some(journal.clone())).unwrap();
+        until(&watch, |change| change.ready.contains(&root));
+        // Let the first read become the baseline.
+        std::thread::sleep(Duration::from_millis(300));
+        let file = root.join("Отчёт_v_1_2.docx");
+        fs::write(&file, b"saved on the server").unwrap();
+        let change = until(&watch, |change| change.paths.contains(&file));
+        assert!(change.directories.contains(&root));
+        assert!(!watch.unwatched().contains(&root));
+        assert_eq!(journal.events(&file, 8).unwrap().len(), 1);
+    }
+
     use super::*;
     use std::fs;
     use std::time::{Duration, Instant};

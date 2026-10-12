@@ -18,6 +18,35 @@ pub fn normalize_extended_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// A folder on another computer: `\\server\share\…` or a mapped network
+/// drive such as `Z:`. Such folders are polled instead of subscribed to:
+/// change notifications keep a handle and a request open on the server.
+pub fn is_network_path(path: &Path) -> bool {
+    let path = normalize_extended_path(path);
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if text.starts_with(r"\\") {
+            return true;
+        }
+        let bytes = text.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            use std::os::windows::ffi::OsStrExt;
+            const DRIVE_REMOTE: u32 = 4;
+            let root: Vec<u16> = std::ffi::OsStr::new(&format!("{}:\\", bytes[0] as char))
+                .encode_wide().chain(std::iter::once(0)).collect();
+            return unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) } == DRIVE_REMOTE;
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        // Tests mark polled folders by name; real network mounts on other
+        // systems keep using notifications.
+        cfg!(test) && text.contains("fm-poll-test")
+    }
+}
+
 /// Canonicalizes the parent folders of `path` and re-appends its final
 /// component, so it compares equal to canonical index roots even when it was
 /// reported with Windows 8.3 short names (`RUNNER~1`) or no longer exists.
