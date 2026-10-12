@@ -20,5 +20,5 @@ for f in "Документы/Пояснительная записка.docx" "Д
          "Изображения/Горы.jpg" "Документы/Проекты/Атлас/чертёж.dwg"; do
   [ -e "$H/$f" ] || echo "sample" > "$H/$f"
 done
-(cd /tmp/fm-smoke-home && DISPLAY=:$D HOME=/tmp/fm-smoke-home LOCALAPPDATA=/tmp/fm-smoke-appdata \
+(cd /tmp/fm-smoke-home && RUST_BACKTRACE=0 DISPLAY=:$D HOME=/tmp/fm-smoke-home LOCALAPPDATA=/tmp/fm-smoke-appdata \
   timeout 900 "$ROOT/target/debug/filemanager-desktop" >/tmp/fm-smoke-app.log 2>&1 &)

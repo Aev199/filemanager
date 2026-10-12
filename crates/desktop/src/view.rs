@@ -220,7 +220,8 @@ impl Explorer {
                     this.open_menu(event.position,MenuTarget::Tab(group,index),cx);
                 })));
         }
-        div().h(px(34.)).flex_none().min_w_0().flex().items_center().bg(rgb(WINDOW))
+        // Never wider than its pane: overflowing tabs scroll inside the strip.
+        div().h(px(34.)).w_full().flex_none().min_w_0().overflow_hidden().flex().items_center().bg(rgb(WINDOW))
             .child(strip)
             .child(icon_button("new-tab","fm/plus.svg","Новая вкладка (Ctrl+T)",false,true)
                 .on_click(cx.listener(move |this,_,_,cx| {this.focus_group(group,cx);this.add_tab(cx);})))
@@ -272,8 +273,8 @@ impl Explorer {
         }
     }
 
-    /// Our own title bar: tabs live in it, as in Atlas. The empty space
-    /// after the tabs drags the window; Windows draws the system buttons.
+    /// Window strip above the panes: it drags the window and holds the
+    /// system buttons; each pane has its own tab strip.
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         TitleBar::new().h(px(32.)).pl_0().bg(rgb(WINDOW)).border_color(rgb(BORDER))
             .child(
@@ -563,7 +564,8 @@ impl Explorer {
             let current_index = folders.iter().position(|folder| folder == &path).unwrap_or(folders.len() - 1);
             let group_id = format!(
                 "miller-{}-{}-{}",
-                self.browser.active_group().active_tab,
+                // This pane's own tab: another pane's tab switch must not reset its columns.
+                self.browser.group(side).map_or(0, |group| group.active_tab),
                 side.0,
                 crate::layout::column_identity(pane_width, folders.len(), current_index),
             );
@@ -661,6 +663,8 @@ impl Explorer {
             .on_drop(cx.listener(move |this,drag: &TabDrag,window,cx| {
                 use crate::layout::DockZone::*;
                 let zone=this.dock_hover.take().filter(|(id,_)|*id==side).map(|(_,zone)|zone).unwrap_or(Center);
+                // Its own pane's centre: the tab is already there.
+                if zone==Center && drag.group==side {cx.notify();return;}
                 if zone==Center || this.browser.groups.len()>=filemanager_core::panes::MAX_GROUPS {
                     this.move_tab_to(drag,side,usize::MAX,cx);
                     if zone!=Center {this.status="Не больше четырёх панелей".into();}

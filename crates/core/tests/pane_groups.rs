@@ -53,6 +53,9 @@ fn tree_codec_rejects_invalid_and_bounds_ratios() {
 fn matching_titles_show_parent() {
     let paths = ["/a/Документы", "/b/Документы", "/a/Расчёты"].map(std::path::PathBuf::from);
     assert_eq!(tab_titles(&paths), ["Документы · a", "Документы · b", "Расчёты"]);
+    // Several tabs of one folder are not told apart by repeating its parent.
+    let same = ["/a/Документы", "/a/Документы"].map(std::path::PathBuf::from);
+    assert_eq!(tab_titles(&same), ["Документы", "Документы"]);
 }
 
 #[test]

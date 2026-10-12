@@ -254,7 +254,9 @@ impl Workspace {
 pub fn tab_titles(paths: &[PathBuf]) -> Vec<String> {
     let names: Vec<_> = paths.iter().map(|p| display_name(p)).collect();
     names.iter().enumerate().map(|(i,name)| {
-        if names.iter().filter(|other| *other == name).count() > 1 {
+        // Only different folders with one name need the parent; two tabs
+        // of the same folder would just repeat it.
+        if names.iter().zip(paths).any(|(other, path)| other == name && path != &paths[i]) {
             if let Some(parent) = paths[i].parent() { return format!("{name} · {}",display_name(parent)); }
         } name.clone()
     }).collect()
