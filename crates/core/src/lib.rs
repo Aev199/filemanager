@@ -43,3 +43,5 @@ mod cross_volume_move;
 mod replacement;
 
 pub mod interface;
+
+pub mod panes;
