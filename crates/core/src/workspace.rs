@@ -1,5 +1,5 @@
 //! Lightweight, explicit workspace bookmarks. File contents are never stored.
-use crate::panes::{Workspace, Group, GroupId, Node, Tab, MAX_GROUPS, MAX_TABS};
+use crate::panes::{Workspace, Group, GroupId, Node, Tab, MAX_GROUPS, MAX_RESTORED_TABS};
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 use std::fs;
@@ -188,10 +188,10 @@ impl WorkspaceStore {
         let layout = conn.query_row("SELECT tree,active_group FROM workspace_layout WHERE workspace_name=?1",params![name],
             |r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?))).optional().map_err(db_error)?;
         let mut stmt = conn.prepare("SELECT group_id,position,left_path,right_path,pinned FROM workspace_tabs
-            WHERE workspace_name=?1 ORDER BY group_id,position LIMIT 101").map_err(db_error)?;
+            WHERE workspace_name=?1 ORDER BY group_id,position LIMIT 201").map_err(db_error)?;
         let rows = stmt.query_map(params![name], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?)))
             .map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
-        if rows.len() > MAX_TABS { return Ok(None); }
+        if rows.len() > MAX_RESTORED_TABS { return Ok(None); }
         if let Some((tree,active)) = &layout {
             let parsed = Node::decode(tree);
             let mut groups = Vec::new();
@@ -247,7 +247,7 @@ impl WorkspaceStore {
         if !tabs.is_empty() { groups.push(Group { id: GroupId(1), tabs, active_tab: selected }); }
         if !right_paths.is_empty() {
             let active_tab = right_active.as_ref().and_then(|path|right_paths.iter().position(|p|p==path)).unwrap_or(0);
-            let budget = MAX_TABS - groups.iter().map(|g|g.tabs.len()).sum::<usize>();
+            let budget = MAX_RESTORED_TABS - groups.iter().map(|g|g.tabs.len()).sum::<usize>();
             let tabs: Vec<_> = right_paths.iter().take(budget).filter_map(|path|Tab::new(path).ok()).collect();
             if !tabs.is_empty() { let active_tab=active_tab.min(tabs.len()-1); groups.push(Group {id:GroupId(2),tabs,active_tab}); }
         }

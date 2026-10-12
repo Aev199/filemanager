@@ -455,6 +455,7 @@ impl Explorer {
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
         self.dock_hover=None;
+        if cx.stop_active_drag(window) { cx.notify(); return; }
         if let Some(resize) = self.column_resize.take() {
             self.column_sizes.insert(resize.group,(resize.key,resize.widths));
             cx.notify();

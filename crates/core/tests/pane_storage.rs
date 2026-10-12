@@ -61,3 +61,33 @@ fn missing_group_collapses_tree_and_corrupt_tree_falls_back_to_all_tabs() {
     assert_eq!(loaded.groups.len(),1);
     assert!(loaded.group(second).is_none());
 }
+
+#[test]
+fn full_legacy_split_session_preserves_every_folder_after_resave() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ws.sqlite3");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TABLE workspaces(name TEXT PRIMARY KEY,active_tab INTEGER NOT NULL,miller_mode INTEGER NOT NULL); CREATE TABLE workspace_tabs(workspace_name TEXT,position INTEGER,left_path TEXT,right_path TEXT,focus_right INTEGER,PRIMARY KEY(workspace_name,position)); INSERT INTO workspaces VALUES('old',99,1);").unwrap();
+    for i in 0..100 {
+        let left = dir.path().join(format!("left{i}"));
+        let right = dir.path().join(format!("right{i}"));
+        std::fs::create_dir(&left).unwrap(); std::fs::create_dir(&right).unwrap();
+        conn.execute("INSERT INTO workspace_tabs VALUES('old',?1,?2,?3,1)",params![i,left.to_string_lossy(),right.to_string_lossy()]).unwrap();
+    }
+    let store = WorkspaceStore::open(&db).unwrap();
+    let (mut w,_) = store.load("old").unwrap().unwrap();
+    assert_eq!(w.tab_count(),200);
+    assert_eq!(w.groups.len(),2);
+    assert_eq!(w.groups[1].active_tab,99);
+    assert!(w.new_tab(w.active,dir.path()).is_err());
+    let right = w.groups[1].id;
+    w.move_tab(w.active,0,right,100).unwrap();
+    assert_eq!(w.tab_count(),200);
+    store.save("old",&w,true).unwrap();
+    let restored = store.load("old").unwrap().unwrap().0;
+    assert_eq!(restored.tab_count(),200);
+    for group in &w.groups {
+        let loaded = restored.group(group.id).unwrap();
+        assert_eq!(loaded.tabs.iter().map(|t|&t.pane.path).collect::<Vec<_>>(),group.tabs.iter().map(|t|&t.pane.path).collect::<Vec<_>>());
+    }
+}

@@ -31,6 +31,8 @@ pub enum Node {
 pub enum Edge { Left, Right, Top, Bottom }
 pub const MAX_GROUPS: usize = 4;
 pub const MAX_TABS: usize = 100;
+/// Old tabs each held two folders; restoration must preserve both.
+pub const MAX_RESTORED_TABS: usize = MAX_TABS * 2;
 pub const CLOSED_TABS_REMEMBERED: usize = 20;
 
 impl Node {
@@ -107,7 +109,7 @@ impl Workspace {
     }
     pub fn from_parts(groups: Vec<Group>, root: Node, active: GroupId) -> io::Result<Self> {
         let mut ids = Vec::new(); root.leaves(&mut ids);
-        if groups.is_empty() || groups.len() > MAX_GROUPS || groups.iter().map(|g|g.tabs.len()).sum::<usize>() > MAX_TABS
+        if groups.is_empty() || groups.len() > MAX_GROUPS || groups.iter().map(|g|g.tabs.len()).sum::<usize>() > MAX_RESTORED_TABS
             || ids.len() != groups.len() || groups.iter().any(|g| g.tabs.is_empty() || g.active_tab >= g.tabs.len() || ids.iter().filter(|id| **id == g.id).count() != 1)
             || !groups.iter().any(|g|g.id == active) { return Err(invalid("Повреждённая раскладка")); }
         let next_id = groups.iter().map(|g| g.id.0).max().unwrap().checked_add(1).ok_or_else(|| invalid("Неверный идентификатор панели"))?;
@@ -244,7 +246,7 @@ impl Workspace {
         debug_assert!((1..=MAX_GROUPS).contains(&self.groups.len()));
         let ids = self.leaves(); debug_assert_eq!(ids.len(),self.groups.len());
         debug_assert!(self.group(self.active).is_some());
-        debug_assert!(self.tab_count() <= MAX_TABS);
+        debug_assert!(self.tab_count() <= MAX_RESTORED_TABS);
         debug_assert!(self.groups.iter().all(|g| !g.tabs.is_empty() && g.active_tab < g.tabs.len() && ids.iter().filter(|id| **id == g.id).count() == 1));
     }
 }
