@@ -13,6 +13,7 @@ actions!(filemanager, [
     PaletteEnter, SettingsToggle, SettingsApply, OpenPalette, OpenSettings, Back, Forward, Up, NewTab, CloseTab, NextTab, PrevTab, Split, Refresh, Stage, Find,
     AddressBar, RenameSelected, NewFolder, DismissOverlay, SelectNext, SelectPrev,
     SelectFirst, SelectLast, OpenSelected, ColumnLeft, ColumnRight, RecycleSelected,
+    SplitRight, SplitDown, ClosePane, ReopenTab, PreviousPane, PaneLeft, PaneRight, PaneUp, PaneDown,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
 ]);
@@ -45,7 +46,18 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-shift-tab", PrevTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-\\", Split, Some(CONTEXT)),
         KeyBinding::new("f5", Refresh, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-s", Stage, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-d", Stage, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-s", SplitRight, Some(CONTEXT)),
+        KeyBinding::new("ctrl-alt-s", SplitDown, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-w", ClosePane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-t", ReopenTab, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", PreviousPane, Some(CONTEXT)),
+        KeyBinding::new("alt-shift-left", PaneLeft, Some(CONTEXT)),
+        KeyBinding::new("alt-shift-right", PaneRight, Some(CONTEXT)),
+        KeyBinding::new("alt-shift-up", PaneUp, Some(CONTEXT)),
+        KeyBinding::new("alt-shift-down", PaneDown, Some(CONTEXT)),
+        KeyBinding::new("ctrl-pagedown", NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-pageup", PrevTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-f", Find, Some(CONTEXT)),
         KeyBinding::new("ctrl-l", AddressBar, Some(CONTEXT)),
         KeyBinding::new("f2", RenameSelected, Some(CONTEXT)),
@@ -325,6 +337,8 @@ impl Explorer {
         self.marquee=None;
         if index < self.browser.active_group().tabs.len() {
             self.browser.active_group_mut().active_tab = index;
+            self.select_first_when_loaded=false;
+            self.address_editing=None;
             self.selected = None;
             self.selected_history_event = None;
             self.confirm_recycle = None;
@@ -360,7 +374,7 @@ impl Explorer {
 
     pub(crate) fn toggle_split(&mut self, cx: &mut Context<Self>) {
         if self.browser.groups.len() == 1 {
-            if let Err(error)=self.browser.split(self.browser.active, crate::Edge::Right, None) { self.status=error.to_string(); }
+            if let Err(error)=self.browser.split(self.browser.active, if self.pane_width<480. {crate::Edge::Bottom} else {crate::Edge::Right}, None) { self.status=error.to_string(); }
         } else { self.browser.close_group(self.browser.active); }
         self.prune_group_state();
         self.selected = None;
@@ -519,15 +533,15 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn key_switch_pane(&mut self, _: &SwitchPane, _: &mut Window, cx: &mut Context<Self>) {
-        let leaves=self.browser.leaves();
-        let current=leaves.iter().position(|id|*id==self.browser.active).unwrap_or(0);
-        self.focus_group(leaves[(current+1)%leaves.len()],cx);
+    pub(crate) fn key_switch_pane(&mut self, _: &SwitchPane, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_pane(false,window,cx);
     }
 
     pub(crate) fn focus_group(&mut self, id: GroupId, cx: &mut Context<Self>) {
         if self.browser.active != id && self.browser.group(id).is_some() {
             self.browser.focus(id);
+            self.select_first_when_loaded=false;
+            self.address_editing=None;
             self.selected=None; self.marked.clear(); self.anchor=None; self.marquee=None;
             self.confirm_recycle=None; self.context_menu=None;
             self.clear_filter=!self.filter.is_empty(); self.close_search();
@@ -546,6 +560,26 @@ impl Explorer {
         self.folder_views.retain(|(id,_),_|ids.contains(id));
         self.tab_scroll.retain(|id,_|ids.contains(id));
         self.tab_reveal.retain(|id,_|ids.contains(id));
+    }
+
+    pub(crate) fn cycle_pane(&mut self, previous: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let leaves=self.browser.leaves(); let current=leaves.iter().position(|id|*id==self.browser.active).unwrap_or(0);
+        let index=if previous {(current+leaves.len()-1)%leaves.len()} else {(current+1)%leaves.len()};
+        self.focus_group(leaves[index],cx); window.focus(&self.focus_handle,cx);
+    }
+    pub(crate) fn directional_pane(&mut self, edge: crate::Edge, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id)=self.browser.neighbour(self.browser.active,edge) {self.focus_group(id,cx);window.focus(&self.focus_handle,cx);}
+    }
+    pub(crate) fn close_active_group(&mut self, cx: &mut Context<Self>) {
+        self.browser.close_group(self.browser.active); self.prune_group_state();
+        self.selected=None;self.marked.clear();self.anchor=None;self.marquee=None;self.dock_hover=None;
+        self.select_first_when_loaded=false;self.address_editing=None;self.clear_filter=!self.filter.is_empty();self.close_search();cx.notify();
+    }
+    pub(crate) fn reopen_tab(&mut self, cx: &mut Context<Self>) {
+        if self.browser.reopen_closed() {
+            self.selected=None;self.marked.clear();self.anchor=None;self.marquee=None;
+            self.select_first_when_loaded=false;self.clear_filter=!self.filter.is_empty();self.close_search();
+        } else {self.status="Закрытых вкладок нет".into();} cx.notify();
     }
 
     pub(crate) fn key_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {

@@ -629,7 +629,7 @@ impl Explorer {
         let active = self.browser.active;
         let other = match self.browser.other_group(active) {
             Some(id) => id,
-            None => match self.browser.split(active, Edge::Right, None) {
+            None => match self.browser.split(active, if self.pane_width<480. {Edge::Bottom} else {Edge::Right}, None) {
                 Ok(id) => id, Err(error) => { self.status=error.to_string(); cx.notify(); return; }
             },
         };
@@ -1517,6 +1517,10 @@ impl Explorer {
             Some(store) => match store.load(name) {
                 Ok(Some((browser, miller_mode))) => {
                     self.browser = browser;
+                    self.pane_measured_widths.clear();self.column_scroll_handles.clear();self.column_reveal_keys.clear();
+                    self.column_sizes.clear();self.pane_bounds.clear();self.tab_scroll.clear();self.tab_reveal.clear();
+                    self.scroll_handles.clear();self.folder_views.clear();self.column_resize=None;self.dock_hover=None;
+                    self.marquee=None;self.anchor=None;self.address_editing=None;self.select_first_when_loaded=false;
                     self.miller_mode = miller_mode;
                     self.selected = None;
                     self.marked.clear();
@@ -1797,6 +1801,7 @@ impl Explorer {
             cx.notify();
             return;
         }
+        if let Some(group)=self.address_editing {self.browser.focus(group);}
         let tab = self.browser.active_mut();
         // Navigating in the currently focused pane retains the other pane
         // and its independent history, as in a conventional file manager.

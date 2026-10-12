@@ -311,7 +311,8 @@ impl Explorer {
         let path = self.pane_path(side);
         let chain = browser::ancestors_from_root(&path);
         // Long paths keep the root and the last folders, like Explorer.
-        let skip = if chain.len() > 6 { chain.len() - 4 } else { 0 };
+        let skip = if self.pane_width_for(side)<400. && chain.len()>2 {chain.len()-1}
+            else if chain.len()>6 {chain.len()-4} else {0};
         let mut crumbs = div().id("breadcrumbs").flex_1().min_w_0().h(px(30.)).px_1()
             .flex().items_center().gap_0p5().overflow_hidden().rounded_md()
             .hover(|style| style.bg(rgb(HOVER))).cursor_text()
@@ -334,7 +335,8 @@ impl Explorer {
             let last = index + 1 == chain.len();
             let target = folder.clone();
             crumbs = crumbs.child(
-                div().id(("crumb", index)).flex_none().max_w(px(220.)).truncate().px_1p5().py_0p5()
+                div().id(("crumb", index)).when(last,|crumb|crumb.flex_1().min_w_0())
+                    .when(!last,|crumb|crumb.flex_none()).max_w(px(220.)).truncate().px_1p5().py_0p5()
                     .rounded_sm().cursor_pointer()
                     .text_color(rgb(if last { TEXT } else { TEXT_MUTED }))
                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
@@ -370,6 +372,7 @@ impl Explorer {
 
     fn place_row(&self, id: (&'static str, usize), place: &Place, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let path = place.path.clone();
+        let middle=path.clone();
         div().id(id).mx_2().h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
             .cursor_pointer()
             .when(active, |this| this.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
@@ -380,6 +383,9 @@ impl Explorer {
             .on_click(cx.listener(move |this, _, _, cx| {
                 let side = this.active_side();
                 this.navigate_side(side, &path, None, cx);
+            }))
+            .on_mouse_down(MouseButton::Middle,cx.listener(move |this,_,window,cx| {
+                this.open_in_new_tab(&middle,cx);window.focus(&this.focus_handle,cx);
             }))
             .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
     }
@@ -1381,7 +1387,7 @@ impl Explorer {
                             this.copy_path(&copy_target, cx);
                         })))
                     .child(Self::menu_item("m-stage", "fm/inbox.svg",
-                        if count > 1 { format!("Отложить для переноса ({count})") } else { "Отложить для переноса".into() }, "Ctrl+Shift+S", false, true)
+                        if count > 1 { format!("Отложить для переноса ({count})") } else { "Отложить для переноса".into() }, "Ctrl+Shift+D", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
                             this.stage_paths(&stage_target, cx);
@@ -1629,7 +1635,7 @@ impl Explorer {
         } else if self.saving_workspace {
             ("Сохранить рабочее пространство", div().flex().flex_col().gap_2()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("Вкладок: {}. Сохраняются только пути к папкам и вид окна.", self.browser.active_group().tabs.len())))
+                    .child(format!("Вкладок: {}. Сохраняются только пути к папкам и вид окна.", self.browser.tab_count())))
                 .child(Input::new(&self.workspace_input)).into_any_element(), "Сохранить", ButtonKind::Primary)
         } else if let Some(plans) = &self.confirm_recycle {
             let what = match plans.as_slice() {
@@ -1778,6 +1784,15 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_column_right(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_recycle(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_hidden(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,_: &keys::SplitRight,window,cx| {if !this.interface_modal() {this.split_group(this.browser.active,Edge::Right,None,window,cx);}}))
+            .on_action(cx.listener(|this,_: &keys::SplitDown,window,cx| {if !this.interface_modal() {this.split_group(this.browser.active,Edge::Bottom,None,window,cx);}}))
+            .on_action(cx.listener(|this,_: &keys::ClosePane,window,cx| {if !this.interface_modal() {this.close_active_group(cx);window.focus(&this.focus_handle,cx);}}))
+            .on_action(cx.listener(|this,_: &keys::ReopenTab,_,cx| {if !this.interface_modal() {this.reopen_tab(cx);}}))
+            .on_action(cx.listener(|this,_: &keys::PreviousPane,window,cx| {if !this.interface_modal() {this.cycle_pane(true,window,cx);}}))
+            .on_action(cx.listener(|this,_: &keys::PaneLeft,window,cx| {if !this.interface_modal() {this.directional_pane(Edge::Left,window,cx);}}))
+            .on_action(cx.listener(|this,_: &keys::PaneRight,window,cx| {if !this.interface_modal() {this.directional_pane(Edge::Right,window,cx);}}))
+            .on_action(cx.listener(|this,_: &keys::PaneUp,window,cx| {if !this.interface_modal() {this.directional_pane(Edge::Top,window,cx);}}))
+            .on_action(cx.listener(|this,_: &keys::PaneDown,window,cx| {if !this.interface_modal() {this.directional_pane(Edge::Bottom,window,cx);}}))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_switch_pane(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_sidebar(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_toggle_inspector(this,event,window,cx); } }))

@@ -89,7 +89,8 @@ fn palette_searches_russian_words_and_gates_mutating_commands() {
     assert!(!rename.enabled(false, false));
     assert!(!rename.enabled(true, true));
     assert!(rename.enabled(true, false));
-    assert!(commands("").len() <= 24);
+    // Pane navigation adds twelve commands to the existing palette.
+    assert!(commands("").len() <= 36);
 }
 
 #[test]
@@ -111,4 +112,15 @@ fn fresh_preferences_prioritize_files_over_inspector() {
     let prefs = Preferences::default();
     assert!(prefs.show_sidebar);
     assert!(!prefs.show_inspector);
+}
+
+#[test]
+fn panel_and_tab_commands_expose_group_and_shortcut() {
+    use CommandId::*;
+    let all=commands("");
+    for id in [SplitRight,SplitDown,ClosePane,ReopenTab,NextPane,PreviousPane,PaneLeft,PaneRight,PaneUp,PaneDown,NextTab,PreviousTab] {
+        let command=all.iter().find(|c|c.id==id).unwrap();
+        assert_eq!(command.group,"Вкладки и панели");
+        assert!(!command.shortcut.is_empty());
+    }
 }
