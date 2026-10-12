@@ -99,7 +99,7 @@ impl Explorer {
             return false;
         }
         match command.id {
-            CommandId::CloseTab => self.browser.tabs.len() > 1 && !self.browser.active().pinned,
+            CommandId::CloseTab => self.browser.active_group().tabs.len() > 1 && !self.browser.active().pinned,
             CommandId::Back => self.browser.active().active().can_go_back(),
             CommandId::Forward => self.browser.active().active().can_go_forward(),
             CommandId::Up => self.browser.active().active().path.parent().is_some(),
@@ -131,7 +131,7 @@ impl Explorer {
             Forward => self.go_back(true, cx),
             Up => self.go_up(cx),
             NewTab => self.add_tab(cx),
-            CloseTab => self.close_tab_at(self.browser.active_tab, cx),
+            CloseTab => self.close_tab_at(self.browser.active_group().active_tab, cx),
             Split => self.toggle_split(cx),
             Refresh => self.refresh_visible_directories(cx),
             Find => self.key_find(&crate::keys::Find, window, cx),
@@ -144,7 +144,7 @@ impl Explorer {
             List => self.set_miller(false, cx),
             Columns => self.set_miller(true, cx),
             PinTab => {
-                self.browser.toggle_pin(self.browser.active_tab);
+                self.browser.toggle_pin(self.browser.active, self.browser.active_group().active_tab);
                 cx.notify();
             }
             Settings => self.open_settings(window, cx),
@@ -467,7 +467,7 @@ impl Explorer {
 
 pub(crate) struct Marquee {
     folder: std::path::PathBuf,
-    side: crate::Side,
+    side: crate::GroupId,
     tab: usize,
     listing: std::sync::Arc<filemanager_core::browser::Listing>,
     indices: std::sync::Arc<Vec<usize>>,
@@ -489,7 +489,7 @@ impl Explorer {
     pub(crate) fn begin_marquee(
         &mut self,
         folder: &std::path::Path,
-        side: crate::Side,
+        side: crate::GroupId,
         event: &gpui::MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -507,7 +507,7 @@ impl Explorer {
         if self.active_side() != side && !self.filter.is_empty() {
             return;
         }
-        let Some(handle) = self.scroll_handles.get(folder) else {
+        let Some(handle) = self.scroll_handles.get(&(side,folder.to_path_buf())) else {
             return;
         };
         let state = handle.0.borrow();
@@ -517,7 +517,7 @@ impl Explorer {
         if !bounds.contains(&event.position) {
             return;
         }
-        let Some((listing, indices)) = self.folder_view(folder) else {
+        let Some((listing, indices)) = self.folder_view(side, folder) else {
             return;
         };
         let local_y = (event.position.y - bounds.origin.y) / px(1.);
@@ -527,7 +527,7 @@ impl Explorer {
             return;
         }
         let switched = self.active_side() != side;
-        self.browser.active_mut().focus_right = side == crate::Side::Right;
+        self.browser.focus(side);
         let selected = if switched {
             None
         } else {
@@ -542,7 +542,7 @@ impl Explorer {
         self.marquee = Some(Marquee {
             folder: folder.to_path_buf(),
             side,
-            tab: self.browser.active_tab,
+            tab: self.browser.active_group().active_tab,
             listing,
             indices,
             bounds,
@@ -568,11 +568,11 @@ impl Explorer {
         let Some(folder) = self.marquee.as_ref().map(|m| m.folder.clone()) else {
             return false;
         };
-        let view = self.folder_view(&folder);
+        let view = self.folder_view(self.browser.active, &folder);
         let Some(m) = self.marquee.as_ref() else {
             return false;
         };
-        let same_location = self.browser.active_tab == m.tab
+        let same_location = self.browser.active_group().active_tab == m.tab
             && self.active_side() == m.side
             && self.pane_path(m.side) == m.folder;
         let same_view = view.is_some_and(|(listing, indices)| {
@@ -591,7 +591,7 @@ impl Explorer {
                 .directory_cache
                 .get(&m.folder)
                 .is_some_and(|l| std::sync::Arc::ptr_eq(l, &m.listing))
-            && self.scroll_handles.get(&m.folder).is_some_and(|h| {
+            && self.scroll_handles.get(&(m.side,m.folder.clone())).is_some_and(|h| {
                 let s = h.0.borrow();
                 s.base_handle.bounds() == m.bounds
                     && (-s.base_handle.offset().y / px(1.)).max(0.) == m.scroll

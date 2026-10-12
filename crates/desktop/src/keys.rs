@@ -7,7 +7,7 @@ use filemanager_core::browser;
 use filemanager_core::selection;
 use gpui::{actions, App, Context, Focusable, KeyBinding, ScrollStrategy, Window};
 
-use crate::{Explorer, FolderView, Side};
+use crate::{Explorer, FolderView, GroupId};
 
 actions!(filemanager, [
     PaletteEnter, SettingsToggle, SettingsApply, OpenPalette, OpenSettings, Back, Forward, Up, NewTab, CloseTab, NextTab, PrevTab, Split, Refresh, Stage, Find,
@@ -77,26 +77,22 @@ pub fn bind(cx: &mut App) {
 }
 
 impl Explorer {
-    pub(crate) fn active_side(&self) -> Side {
-        let tab = self.browser.active();
-        if tab.focus_right && tab.right.is_some() { Side::Right } else { Side::Left }
+    pub(crate) fn active_side(&self) -> GroupId {
+        self.browser.active
     }
 
-    pub(crate) fn pane_path(&self, side: Side) -> PathBuf {
-        let tab = self.browser.active();
-        match side {
-            Side::Right => tab.right.as_ref().unwrap_or(&tab.left).path.clone(),
-            Side::Left => tab.left.path.clone(),
-        }
+    pub(crate) fn pane_path(&self, side: GroupId) -> PathBuf {
+        self.browser.group(side).map(|g|g.tabs[g.active_tab].pane.path.clone())
+            .unwrap_or_else(||self.browser.active_pane().path.clone())
     }
 
     /// Visible entries of `folder` in display order. Sorting runs once per
     /// listing snapshot and sort change, never per frame.
-    pub(crate) fn folder_view(&mut self, folder: &Path) -> Option<(Arc<browser::Listing>, Arc<Vec<usize>>)> {
+    pub(crate) fn folder_view(&mut self, group: GroupId, folder: &Path) -> Option<(Arc<browser::Listing>, Arc<Vec<usize>>)> {
         let listing = Arc::clone(self.directory_cache.get(folder)?);
         // The quick filter applies to the focused pane's folder only.
-        let filter = if folder == self.pane_path(self.active_side()) { self.filter.clone() } else { String::new() };
-        if let Some(view) = self.folder_views.get(folder) {
+        let filter = if group == self.browser.active && folder == self.pane_path(group) { self.filter.clone() } else { String::new() };
+        if let Some(view) = self.folder_views.get(&(group,folder.to_path_buf())) {
             if Arc::ptr_eq(&view.listing, &listing)
                 && view.spec == self.sort
                 && view.show_hidden == self.show_hidden
@@ -107,7 +103,7 @@ impl Explorer {
         }
         let indices = selection::visible_indices(&listing.entries,self.sort,self.show_hidden,&filter);
         let indices = Arc::new(indices);
-        self.folder_views.insert(folder.to_path_buf(), FolderView {
+        self.folder_views.insert((group,folder.to_path_buf()), FolderView {
             listing: Arc::clone(&listing),
             spec: self.sort,
             show_hidden: self.show_hidden,
@@ -117,22 +113,22 @@ impl Explorer {
         Some((listing, indices))
     }
 
-    pub(crate) fn scroll_handle(&mut self, folder: &Path) -> gpui::UniformListScrollHandle {
-        self.scroll_handles.entry(folder.to_path_buf()).or_default().clone()
+    pub(crate) fn scroll_handle(&mut self, side: GroupId, folder: &Path) -> gpui::UniformListScrollHandle {
+        self.scroll_handles.entry((side,folder.to_path_buf())).or_default().clone()
     }
 
     /// Makes `side` the focused pane and points it at `folder`, keeping the
     /// selection on `select` (or clearing it).
     pub(crate) fn navigate_side(
         &mut self,
-        side: Side,
+        side: GroupId,
         folder: &Path,
         select: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         self.marquee=None;
+        self.focus_group(side,cx);
         let tab = self.browser.active_mut();
-        tab.focus_right = side == Side::Right && tab.right.is_some();
         if tab.active().path != folder {
             if let Err(error) = tab.navigate(folder) {
                 self.status = format!("Не удалось открыть папку: {error}");
@@ -167,7 +163,7 @@ impl Explorer {
 
     /// Paths of `folder` in display order.
     fn ordered_paths(&mut self, folder: &Path) -> Vec<PathBuf> {
-        self.folder_view(folder)
+        self.folder_view(self.browser.active, folder)
             .map(|(listing, indices)| indices.iter().map(|&i| listing.entries[i].path.clone()).collect())
             .unwrap_or_default()
     }
@@ -176,7 +172,7 @@ impl Explorer {
     /// selects the range from the anchor.
     pub(crate) fn click_entry(
         &mut self,
-        side: Side,
+        side: GroupId,
         folder: &Path,
         path: PathBuf,
         modifiers: gpui::Modifiers,
@@ -220,7 +216,7 @@ impl Explorer {
         self.typeahead.push_str(&text.to_lowercase());
         let side = self.active_side();
         let folder = self.pane_path(side);
-        let Some((listing, indices)) = self.folder_view(&folder) else { return };
+        let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
         let needle = self.typeahead.clone();
         let found = indices.iter().map(|&i| &listing.entries[i])
             .find(|entry| entry.name.to_lowercase().starts_with(&needle))
@@ -234,9 +230,9 @@ impl Explorer {
     pub(crate) fn reveal_selected(&mut self) {
         let Some(selected) = self.selected.clone() else { return };
         let Some(folder) = selected.parent().map(Path::to_path_buf) else { return };
-        let Some((listing, indices)) = self.folder_view(&folder) else { return };
+        let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
         if let Some(position) = indices.iter().position(|&i| listing.entries[i].path == selected) {
-            self.scroll_handle(&folder).scroll_to_item(position, ScrollStrategy::Nearest);
+            self.scroll_handle(self.browser.active, &folder).scroll_to_item(position, ScrollStrategy::Nearest);
         }
     }
 
@@ -244,7 +240,7 @@ impl Explorer {
     fn selected_entry(&mut self) -> Option<browser::Entry> {
         let selected = self.selected.clone()?;
         let folder = selected.parent()?.to_path_buf();
-        let (listing, _) = self.folder_view(&folder)?;
+        let (listing, _) = self.folder_view(self.browser.active, &folder)?;
         listing.entries.iter().find(|entry| entry.path == selected).cloned()
     }
 
@@ -271,7 +267,7 @@ impl Explorer {
     fn move_selection(&mut self, delta: isize, edge: Option<bool>, cx: &mut Context<Self>) {
         let side = self.active_side();
         let folder = self.pane_path(side);
-        let Some((listing, indices)) = self.folder_view(&folder) else { return };
+        let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
         if indices.is_empty() {
             return;
         }
@@ -290,7 +286,7 @@ impl Explorer {
 
     /// Enter / double-click: folders open in place, files in their
     /// associated Windows application.
-    pub(crate) fn open_entry(&mut self, path: PathBuf, is_dir: bool, side: Side, cx: &mut Context<Self>) {
+    pub(crate) fn open_entry(&mut self, path: PathBuf, is_dir: bool, side: GroupId, cx: &mut Context<Self>) {
         if is_dir {
             self.navigate_side(side, &path, None, cx);
             self.select_first_when_loaded = true;
@@ -322,8 +318,8 @@ impl Explorer {
 
     pub(crate) fn switch_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         self.marquee=None;
-        if index < self.browser.tabs.len() {
-            self.browser.active_tab = index;
+        if index < self.browser.active_group().tabs.len() {
+            self.browser.active_group_mut().active_tab = index;
             self.selected = None;
             self.selected_history_event = None;
             self.confirm_recycle = None;
@@ -334,15 +330,19 @@ impl Explorer {
     }
 
     pub(crate) fn close_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.browser.tabs.get(index).is_some_and(|tab|tab.pinned) { return; }
-        self.browser.close_tab(index);
+        if self.browser.active_group().tabs.get(index).is_some_and(|tab|tab.pinned) { return; }
+        self.browser.close_tab(self.browser.active, index);
+        self.prune_group_state();
         self.selected = None;
         self.context_menu = None;
         cx.notify();
     }
 
     pub(crate) fn toggle_split(&mut self, cx: &mut Context<Self>) {
-        self.browser.active_mut().toggle_split();
+        if self.browser.groups.len() == 1 {
+            if let Err(error)=self.browser.split(self.browser.active, crate::Edge::Right, None) { self.status=error.to_string(); }
+        } else { self.browser.close_group(self.browser.active); }
+        self.prune_group_state();
         self.selected = None;
         cx.notify();
     }
@@ -384,16 +384,16 @@ impl Explorer {
     pub(crate) fn key_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) { self.go_up(cx); }
     pub(crate) fn key_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) { self.add_tab(cx); }
     pub(crate) fn key_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
-        let index = self.browser.active_tab;
+        let index = self.browser.active_group().active_tab;
         self.close_tab_at(index, cx);
     }
     pub(crate) fn key_next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
-        let count = self.browser.tabs.len();
-        self.switch_tab((self.browser.active_tab + 1) % count, cx);
+        let count = self.browser.active_group().tabs.len();
+        self.switch_tab((self.browser.active_group().active_tab + 1) % count, cx);
     }
     pub(crate) fn key_prev_tab(&mut self, _: &PrevTab, _: &mut Window, cx: &mut Context<Self>) {
-        let count = self.browser.tabs.len();
-        self.switch_tab((self.browser.active_tab + count - 1) % count, cx);
+        let count = self.browser.active_group().tabs.len();
+        self.switch_tab((self.browser.active_group().active_tab + count - 1) % count, cx);
     }
     pub(crate) fn key_split(&mut self, _: &Split, _: &mut Window, cx: &mut Context<Self>) { self.toggle_split(cx); }
     pub(crate) fn key_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
@@ -407,7 +407,7 @@ impl Explorer {
         cx.notify();
     }
     pub(crate) fn key_address(&mut self, _: &AddressBar, window: &mut Window, cx: &mut Context<Self>) {
-        self.address_editing = true;
+        self.address_editing = Some(self.browser.active);
         self.focus_address(window, cx);
     }
     pub(crate) fn key_rename(&mut self, _: &RenameSelected, window: &mut Window, cx: &mut Context<Self>) {
@@ -421,13 +421,13 @@ impl Explorer {
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(resize) = self.column_resize.take() {
-            self.column_sizes[resize.side_index] = Some((resize.key, resize.widths));
+            self.column_sizes.insert(resize.group,(resize.key,resize.widths));
             cx.notify();
             return;
         }
         if self.escape_marquee(cx) {return;}
         if self.dismiss_interface(window,cx) { return; }
-        let had_popup = self.renaming || self.creating_folder || self.address_editing || self.saving_workspace
+        let had_popup = self.renaming || self.creating_folder || self.address_editing.is_some() || self.saving_workspace
             || self.context_menu.is_some() || self.confirm_recycle.is_some() || self.bulk_rename.is_some() || !self.bulk_rename_errors.is_empty();
         if self.pending_transfer.is_some() {
             self.resolve_transfer(crate::ConflictChoice::Cancel, cx);
@@ -438,7 +438,7 @@ impl Explorer {
         self.bulk_rename_generation = self.bulk_rename_generation.wrapping_add(1);
         self.creating_folder = false;
         self.saving_workspace = false;
-        self.address_editing = false;
+        self.address_editing = None;
         self.context_menu = None;
         self.confirm_recycle = None;
         self.filter_open = false;
@@ -499,12 +499,28 @@ impl Explorer {
     }
 
     pub(crate) fn key_switch_pane(&mut self, _: &SwitchPane, _: &mut Window, cx: &mut Context<Self>) {
-        let tab = self.browser.active_mut();
-        if tab.right.is_some() {
-            tab.focus_right = !tab.focus_right;
-            self.selected = None;
+        let leaves=self.browser.leaves();
+        let current=leaves.iter().position(|id|*id==self.browser.active).unwrap_or(0);
+        self.focus_group(leaves[(current+1)%leaves.len()],cx);
+    }
+
+    pub(crate) fn focus_group(&mut self, id: GroupId, cx: &mut Context<Self>) {
+        if self.browser.active != id && self.browser.group(id).is_some() {
+            self.browser.focus(id);
+            self.selected=None; self.marked.clear(); self.anchor=None; self.marquee=None;
+            self.confirm_recycle=None; self.context_menu=None;
+            self.clear_filter=!self.filter.is_empty(); self.close_search();
             cx.notify();
         }
+    }
+    pub(crate) fn prune_group_state(&mut self) {
+        let ids=self.browser.leaves();
+        self.pane_measured_widths.retain(|id,_|ids.contains(id));
+        self.column_scroll_handles.retain(|id,_|ids.contains(id));
+        self.column_reveal_keys.retain(|id,_|ids.contains(id));
+        self.column_sizes.retain(|id,_|ids.contains(id));
+        self.scroll_handles.retain(|(id,_),_|ids.contains(id));
+        self.folder_views.retain(|(id,_),_|ids.contains(id));
     }
 
     pub(crate) fn key_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {

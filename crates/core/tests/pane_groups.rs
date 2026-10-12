@@ -66,3 +66,31 @@ fn moving_last_tab_collapses_source_and_keeps_target_active() {
     assert_eq!(w.active, first);
     assert_eq!(w.tab_count(), 2);
 }
+
+#[test]
+fn splitting_by_transfer_at_tab_limit_does_not_create_extra_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Workspace::new(dir.path()).unwrap(); let first=w.active;
+    for _ in 1..100 { w.new_tab(first,dir.path()).unwrap(); }
+    assert!(w.new_tab(first,dir.path()).is_err());
+    let second=w.split(first,Edge::Bottom,Some((first,99))).unwrap();
+    assert_eq!(w.tab_count(),100);
+    assert_eq!(w.active,second);
+    assert!(w.split(second,Edge::Right,None).is_err());
+}
+
+#[test]
+fn ratios_titles_navigation_and_closed_stack_are_independent() {
+    let dir=tempfile::tempdir().unwrap(); let sub=dir.path().join("sub"); std::fs::create_dir(&sub).unwrap();
+    let mut w=Workspace::new(dir.path()).unwrap(); let first=w.active;
+    w.active_mut().navigate(&sub).unwrap();
+    let second=w.split(first,Edge::Right,None).unwrap();
+    assert!(!w.active_pane().can_go_back());
+    assert!(w.group(first).unwrap().tabs[0].pane.can_go_back());
+    w.set_ratio(&[],0.99); assert!(w.root.encode().starts_with("h(0.85,"));
+    let signature=w.signature(); w.set_ratio(&[],0.2); assert_eq!(w.signature(),signature);
+    w.focus(first); assert_eq!(w.other_group(first),Some(second));
+    w.new_tab(first,dir.path()).unwrap(); w.close_tab(first,1);
+    w.close_group(first); assert!(w.reopen_closed()); assert_eq!(w.active,second);
+    w.close_group(second); assert_eq!(w.groups.len(),1);
+}

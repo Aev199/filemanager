@@ -11,7 +11,8 @@ mod interface;
 mod layout;
 mod palette;
 
-use filemanager_core::browser::{self, Browser};
+use filemanager_core::browser;
+use filemanager_core::panes::{Workspace, GroupId, Edge};
 use filemanager_core::clipboard;
 use filemanager_core::history::{Event, Journal};
 use filemanager_core::directory_watch::DirectoryWatch;
@@ -37,11 +38,9 @@ use std::sync::Arc;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Side { Left, Right }
 
 struct ColumnResize {
-    side_index: usize,
+    group: GroupId,
     key: String,
     index: usize,
     current: usize,
@@ -58,7 +57,7 @@ struct FileDragPreview { name: String, position: Point<Pixels> }
 
 /// Dragging a tab to reorder it.
 #[derive(Clone)]
-struct TabDrag { index: usize, title: String }
+struct TabDrag { group: GroupId, index: usize, title: String }
 
 impl Render for FileDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -127,7 +126,7 @@ const SESSION_WORKSPACE: &str = "Default";
 enum MenuTarget {
     Entry(PathBuf),
     Folder(PathBuf),
-    Tab(usize),
+    Tab(GroupId, usize),
 }
 
 #[derive(Clone)]
@@ -153,7 +152,7 @@ struct Explorer {
     marquee: Option<interface::Marquee>,
     palette: Option<interface::Palette>,
     settings: Option<interface::Settings>,
-    browser: Browser,
+    browser: Workspace,
     selected: Option<PathBuf>,
     // Inspector data is loaded off the UI thread, never during Render.
     inspector_path: Option<PathBuf>,
@@ -186,17 +185,17 @@ struct Explorer {
     show_hidden: bool,
     show_sidebar: bool,
     show_inspector: bool,
-    folder_views: HashMap<PathBuf, FolderView>,
-    scroll_handles: HashMap<PathBuf, UniformListScrollHandle>,
-    address_editing: bool,
+    folder_views: HashMap<(GroupId, PathBuf), FolderView>,
+    scroll_handles: HashMap<(GroupId, PathBuf), UniformListScrollHandle>,
+    address_editing: Option<GroupId>,
     /// The name filter field is shown in the bottom bar (Ctrl+F or the magnifier).
     filter_open: bool,
     /// Width of one file pane at the last layout, for column dropping.
     pane_width: f32,
-    pane_measured_widths: [Option<f32>; 2],
-    column_scroll_handles: [gpui::ScrollHandle; 2],
-    column_reveal_keys: [Option<String>; 2],
-    column_sizes: [Option<(String, Vec<f32>)>; 2],
+    pane_measured_widths: HashMap<GroupId, f32>,
+    column_scroll_handles: HashMap<GroupId, gpui::ScrollHandle>,
+    column_reveal_keys: HashMap<GroupId, String>,
+    column_sizes: HashMap<GroupId, (String, Vec<f32>)>,
     column_resize: Option<ColumnResize>,
     /// After entering a folder from the keyboard, select its first entry
     /// once the listing arrives.
@@ -294,12 +293,12 @@ impl Explorer {
             match event {
                 InputEvent::PressEnter { .. } => {
                     this.open_address(cx);
-                    this.address_editing = false;
+                    this.address_editing = None;
                     let handle = this.focus_handle.clone();
                     window.focus(&handle, cx);
                 }
                 InputEvent::Blur => {
-                    this.address_editing = false;
+                    this.address_editing = None;
                     cx.notify();
                 }
                 _ => {}
@@ -367,7 +366,7 @@ impl Explorer {
         let (browser, miller_mode) = workspaces.as_ref()
             .and_then(|store| store.load(SESSION_WORKSPACE).ok().flatten())
             .unwrap_or_else(|| (
-                Browser::new(home).or_else(|_| Browser::new("."))
+                Workspace::new(home).or_else(|_| Workspace::new("."))
                     .expect("No starting directory"),
                 true
             ));
@@ -407,7 +406,7 @@ impl Explorer {
             show_inspector: prefs.show_inspector,
             folder_views: HashMap::new(),
             scroll_handles: HashMap::new(),
-            address_editing: false,
+            address_editing: None,
             filter_open: false,
             marked: Vec::new(),
             anchor: None,
@@ -420,10 +419,10 @@ impl Explorer {
             pending_transfer: None,
             typeahead_at: None,
             pane_width: 800.,
-            pane_measured_widths: [None, None],
+            pane_measured_widths: HashMap::new(),
             column_scroll_handles: Default::default(),
-            column_reveal_keys: [None, None],
-            column_sizes: [None, None],
+            column_reveal_keys: HashMap::new(),
+            column_sizes: HashMap::new(),
             column_resize: None,
             select_first_when_loaded: false,
             rename_input, folder_input,
@@ -545,9 +544,9 @@ impl Explorer {
         self.search_results.clear();
     }
 
-    fn go_to(&mut self, path: PathBuf, side: Side, cx: &mut Context<Self>) {
+    fn go_to(&mut self, path: PathBuf, side: GroupId, cx: &mut Context<Self>) {
+        self.browser.focus(side);
         let tab = self.browser.active_mut();
-        tab.focus_right = matches!(side, Side::Right) && tab.right.is_some();
         self.status = match tab.navigate(path) {
             Ok(()) => {
                 self.selected = None;
@@ -564,7 +563,7 @@ impl Explorer {
 
     fn add_tab(&mut self, cx: &mut Context<Self>) {
         let path = self.browser.active().active().path.clone();
-        if let Err(e) = self.browser.new_tab(path) {
+        if let Err(e) = self.browser.new_tab(self.browser.active, path) {
             self.status = e.to_string();
         }
         self.selected = None;
@@ -609,7 +608,7 @@ impl Explorer {
     }
 
     fn open_in_new_tab(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Err(error) = self.browser.new_tab(path) {
+        if let Err(error) = self.browser.new_tab(self.browser.active, path) {
             self.status = format!("Не удалось открыть вкладку: {error}");
         }
         self.selected = None;
@@ -618,16 +617,18 @@ impl Explorer {
     }
 
     fn open_in_other_pane(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        let tab = self.browser.active_mut();
-        if tab.right.is_none() {
-            tab.toggle_split();
-        }
-        let other = if self.active_side() == Side::Right { Side::Left } else { Side::Right };
+        let active = self.browser.active;
+        let other = match self.browser.other_group(active) {
+            Some(id) => id,
+            None => match self.browser.split(active, Edge::Right, None) {
+                Ok(id) => id, Err(error) => { self.status=error.to_string(); cx.notify(); return; }
+            },
+        };
         self.navigate_side(other, path, None, cx);
     }
 
     fn close_other_tabs(&mut self, keep: usize, cx: &mut Context<Self>) {
-        self.browser.close_other_tabs(keep);
+        self.browser.close_other_tabs(self.browser.active, keep);
         self.selected=None; self.marked.clear(); self.context_menu=None; self.close_search(); cx.notify();
     }
 
@@ -1431,7 +1432,7 @@ impl Explorer {
 
     fn open_search_result(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if path.is_dir() {
-            self.go_to(path, Side::Left, cx);
+            self.go_to(path, self.browser.active, cx);
         } else {
             if let Some(parent) = path.parent() {
                 if let Err(error) = self.browser.active_mut().navigate(parent) {
@@ -1630,7 +1631,7 @@ impl Explorer {
                     let dirty = if changes.refresh_all { visible.clone() } else { changes.directories.into_iter().collect() };
                     for folder in dirty {
                         this.directory_cache.remove(&folder);
-                        this.folder_views.remove(&folder);
+                        this.folder_views.retain(|(_,path),_|path != &folder);
                         if visible.contains(&folder) && !this.search_active {
                             this.load_directory(folder, true, cx);
                         }
@@ -1645,9 +1646,9 @@ impl Explorer {
     /// Only currently visible columns are requested. Directory enumeration
     /// runs on a background thread; re-rendering never re-reads the disk.
     fn visible_directories(&self) -> Vec<PathBuf> {
-        let mut folders = self.pane_columns(Side::Left);
-        if self.browser.active().right.is_some() {
-            for folder in self.pane_columns(Side::Right) {
+        let mut folders = Vec::new();
+        for id in self.browser.leaves() {
+            for folder in self.pane_columns(id) {
                 if !folders.contains(&folder) { folders.push(folder); }
             }
         }

@@ -24,14 +24,14 @@ use gpui_component::{ElementExt, InteractiveElementExt};
 
 use crate::keys;
 use crate::theme::*;
-use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, Side, TabDrag};
+use crate::{ContextMenu, Explorer, FileDragInfo, FileDragPreview, MenuTarget, GroupId, TabDrag};
 
 use crate::layout::ROW_HEIGHT;
 
 /// Fixed, as in Atlas: the sidebar does not grow with the window.
 const SIDEBAR_WIDTH: f32 = 220.;
 
-fn column_scroll_area(id: &'static str, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<> {
+fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
     div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
         .overflow_x_scroll().lock_scroll_axis().horizontal_scrollbar(scroll)
 }
@@ -165,11 +165,12 @@ impl Explorer {
     // ---------------------------------------------------------------- tabs
 
     fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let group = self.browser.active;
         let mut strip = div().id("tab-strip").flex_initial().min_w_0().h_full().flex().items_end()
             .gap_1().px_2().overflow_x_scroll();
-        for (index, tab) in self.browser.tabs.iter().enumerate() {
-            let active = index == self.browser.active_tab;
-            let closable = self.browser.tabs.len() > 1 && !tab.pinned;
+        for (index, tab) in self.browser.active_group().tabs.iter().enumerate() {
+            let active = index == self.browser.active_group().active_tab;
+            let closable = self.browser.active_group().tabs.len() > 1 && !tab.pinned;
             strip = strip.child(
                 div().id(("tab", index)).group("tab").flex_none().h(px(32.)).min_w(px(120.))
                     .max_w(px(220.)).pl_3().pr_1().flex().items_center().gap_2()
@@ -194,19 +195,20 @@ impl Explorer {
                             }))
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_tab(index, cx)))
-                    .on_drag(TabDrag { index, title: tab.title.clone() }, |drag: &TabDrag, position, _, cx| {
+                    .on_drag(TabDrag { group: self.browser.active, index, title: tab.title.clone() }, |drag: &TabDrag, position, _, cx| {
                         cx.new(|_| FileDragPreview { name: drag.title.clone(), position })
                     })
                     .drag_over::<TabDrag>(|style, _, _, _| style.border_l_2().border_color(rgb(ACCENT)))
                     .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
-                        this.browser.move_tab(drag.index, index);
+                        if let Err(error)=this.browser.move_tab(drag.group,drag.index,group,index) { this.status=error.to_string(); }
+                        this.prune_group_state();
                         cx.notify();
                     }))
                     .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
                         this.close_tab_at(index, cx);
                     }))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        this.open_menu(event.position, MenuTarget::Tab(index), cx);
+                        this.open_menu(event.position, MenuTarget::Tab(group, index), cx);
                     }))
             );
         }
@@ -249,7 +251,7 @@ impl Explorer {
     // ------------------------------------------------------------- toolbar
 
     fn breadcrumbs(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.address_editing {
+        if self.address_editing.is_some() {
             return div().flex_1().min_w_0().h(px(30.))
                 .child(Input::new(&self.address_input).h(px(30.)))
                 .into_any_element();
@@ -263,7 +265,7 @@ impl Explorer {
             .flex().items_center().gap_0p5().overflow_hidden().rounded_md()
             .hover(|style| style.bg(rgb(HOVER))).cursor_text()
             .on_click(cx.listener(|this, _, window, cx| {
-                this.address_editing = true;
+                this.address_editing = Some(this.browser.active);
                 this.focus_address(window, cx);
             }));
         for (index, folder) in chain.iter().enumerate() {
@@ -470,14 +472,13 @@ impl Explorer {
 
     // --------------------------------------------------------------- panes
 
-    fn pane_width_for(&self, side: Side) -> f32 {
-        let index = if side == Side::Left { 0 } else { 1 };
-        crate::layout::effective_pane_width(self.pane_width, self.pane_measured_widths[index])
+    fn pane_width_for(&self, side: GroupId) -> f32 {
+        crate::layout::effective_pane_width(self.pane_width, self.pane_measured_widths.get(&side).copied())
     }
 
     /// Folders shown in a pane: the trail of the current folder and, in
     /// columns mode, a preview of the selected subfolder.
-    pub(crate) fn pane_columns(&self, side: Side) -> Vec<PathBuf> {
+    pub(crate) fn pane_columns(&self, side: GroupId) -> Vec<PathBuf> {
         let path = self.pane_path(side);
         if !self.miller_mode {
             return vec![path];
@@ -495,8 +496,8 @@ impl Explorer {
         crate::layout::column_paths(&path, preview.as_deref())
     }
 
-    fn pane(&mut self, side: Side, cx: &mut Context<Self>) -> AnyElement {
-        let split = self.browser.active().right.is_some();
+    fn pane(&mut self, side: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        let split = self.browser.groups.len() > 1;
         let focused = side == self.active_side();
         let path = self.pane_path(side);
         let pane_width = self.pane_width_for(side);
@@ -505,20 +506,19 @@ impl Explorer {
             let current_index = folders.iter().position(|folder| folder == &path).unwrap_or(folders.len() - 1);
             let group_id = format!(
                 "miller-{}-{}-{}",
-                self.browser.active_tab,
-                if side == Side::Left { "l" } else { "r" },
+                self.browser.active_group().active_tab,
+                side.0,
                 crate::layout::column_identity(pane_width, folders.len(), current_index),
             );
-            let side_index = if side == Side::Left { 0 } else { 1 };
-            let scroll = self.column_scroll_handles[side_index].clone();
+            let scroll = self.column_scroll_handles.entry(side).or_default().clone();
             let reveal_key = format!("{group_id}-{:?}-{:?}-{}", path, folders.last(), pane_width as u32);
-            if self.column_sizes[side_index].as_ref().is_none_or(|(key, _)| key != &reveal_key) {
-                self.column_sizes[side_index] = Some((reveal_key.clone(), crate::layout::column_widths(pane_width, folders.len(), current_index)));
-                if self.column_resize.as_ref().is_some_and(|resize| resize.side_index == side_index) {
+            if self.column_sizes.get(&side).is_none_or(|(key, _)| key != &reveal_key) {
+                self.column_sizes.insert(side,(reveal_key.clone(), crate::layout::column_widths(pane_width, folders.len(), current_index)));
+                if self.column_resize.as_ref().is_some_and(|resize| resize.group == side) {
                     self.column_resize = None;
                 }
             }
-            let widths = self.column_sizes[side_index].as_ref().unwrap().1.clone();
+            let widths = self.column_sizes.get(&side).unwrap().1.clone();
             let content_width = px(widths.iter().sum::<f32>().max(pane_width));
             let mut group = div().id(group_id).w(content_width).h_full().flex().flex_row().flex_none();
             for (index, folder) in folders.iter().enumerate() {
@@ -538,7 +538,7 @@ impl Explorer {
                             cx.stop_propagation();
                             if this.interface_modal() { return; }
                             this.column_resize = Some(crate::ColumnResize {
-                                side_index, key: resize_key.clone(), index, current: current_index,
+                                group: side, key: resize_key.clone(), index, current: current_index,
                                 start_x: event.position.x, widths: resize_widths.clone(),
                             });
                             this.marquee = None;
@@ -550,7 +550,7 @@ impl Explorer {
                         let reveal_widths = reveal_widths.clone();
                         cx.defer(move |cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                if this.column_reveal_keys[side_index].as_ref() == Some(&reveal_key) {
+                                if this.column_reveal_keys.get(&side) == Some(&reveal_key) {
                                     return;
                                 }
                                 let viewport = reveal_scroll.bounds();
@@ -560,7 +560,7 @@ impl Explorer {
                                 let next = crate::layout::reveal_column_offset(&reveal_widths, current_index,
                                     viewport.size.width / px(1.), start, bounds.size.width / px(1.), offset)
                                     .min(0.).max(-reveal_scroll.max_offset().x / px(1.));
-                                this.column_reveal_keys[side_index] = Some(reveal_key);
+                                this.column_reveal_keys.insert(side,reveal_key);
                                 reveal_scroll.set_offset(gpui::point(px(next), px(0.)));
                                 cx.notify();
                             });
@@ -568,7 +568,7 @@ impl Explorer {
                     }));
                 group = group.child(column);
             }
-            column_scroll_area(if side == Side::Left { "columns-left" } else { "columns-right" }, &scroll)
+            column_scroll_area(gpui::SharedString::from(format!("columns-{}",side.0)), &scroll)
                 .child(group)
                 .into_any_element()
         } else {
@@ -583,9 +583,8 @@ impl Explorer {
                 let width = bounds.size.width / px(1.);
                 cx.defer(move |cx| {
                     let _ = weak.update(cx, |this, cx| {
-                        let index = if side == Side::Left { 0 } else { 1 };
-                        if width > 0. && this.pane_measured_widths[index].is_none_or(|old| (old - width).abs() >= 1.) {
-                            this.pane_measured_widths[index] = Some(width);
+                        if width > 0. && this.pane_measured_widths.get(&side).is_none_or(|old| (*old - width).abs() >= 1.) {
+                            this.pane_measured_widths.insert(side,width);
                             cx.notify();
                         }
                     });
@@ -611,13 +610,7 @@ impl Explorer {
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
-                let tab = this.browser.active_mut();
-                let target = side == Side::Right && tab.right.is_some();
-                if tab.focus_right != target {
-                    tab.focus_right = target;
-                    this.selected = None;
-                    this.marked.clear(); this.anchor=None;
-                }
+                this.focus_group(side,cx);
                 let handle = this.focus_handle.clone();
                 window.focus(&handle, cx);
                 cx.notify();
@@ -626,12 +619,12 @@ impl Explorer {
     }
 
     /// Narrow panes drop the type and date columns, keeping names readable.
-    fn list_columns(&self, side: Side) -> (bool, bool) {
+    fn list_columns(&self, side: GroupId) -> (bool, bool) {
         let width = self.pane_width_for(side);
         (width >= 520., width >= 680.)
     }
 
-    fn list_header(&self, side: Side, cx: &mut Context<Self>) -> impl IntoElement {
+    fn list_header(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
         let spec = self.sort;
         let (show_modified, show_kind) = self.list_columns(side);
         let header = |id: &'static str, label: &'static str, key: SortKey| {
@@ -654,7 +647,7 @@ impl Explorer {
             .child(header("sort-size", "Размер", SortKey::Size).w(px(90.)).flex_none().justify_end())
     }
 
-    fn column(&mut self, folder: PathBuf, side: Side, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
+    fn column(&mut self, folder: PathBuf, side: GroupId, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
         let list_mode = !self.miller_mode;
         let mut column = div().size_full().min_h_0().flex().flex_col()
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
@@ -670,7 +663,7 @@ impl Explorer {
             this.open_menu(event.position, MenuTarget::Folder(background_folder.clone()), cx);
         }));
 
-        if let Some((listing, indices)) = self.folder_view(&folder) {
+        if let Some((listing, indices)) = self.folder_view(side, &folder) {
             if indices.is_empty() {
                 return column.child(
                     div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
@@ -685,9 +678,9 @@ impl Explorer {
                         })
                 ).into_any_element();
             }
-            let handle = self.scroll_handle(&folder);
+            let handle = self.scroll_handle(side, &folder);
             let count = indices.len();
-            let list_id = SharedString::from(format!("list-{}", folder.display()));
+            let list_id = SharedString::from(format!("list-{}-{}", side.0, folder.display()));
             let background_marquee_folder=folder.clone();
             column = column.child(
                 div().flex_1().min_h_0().child(
@@ -732,7 +725,7 @@ impl Explorer {
         column.into_any_element()
     }
 
-    fn row(&self, entry: &Entry, folder: &Path, side: Side, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn row(&self, entry: &Entry, folder: &Path, side: GroupId, on_trail: bool, list_mode: bool, striped: bool, cx: &mut Context<Self>) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_directory;
         let selected = self.is_selected(&path);
@@ -925,7 +918,7 @@ impl Explorer {
             let mut folders = 0usize;
             let mut bytes = 0u64;
             if let Some(folder) = marked[0].parent().map(Path::to_path_buf) {
-                if let Some((listing, _)) = self.folder_view(&folder) {
+                if let Some((listing, _)) = self.folder_view(self.browser.active, &folder) {
                     for entry in listing.entries.iter().filter(|e| marked.contains(&e.path)) {
                         if entry.is_directory { folders += 1 } else { files += 1; bytes += entry.size; }
                     }
@@ -950,7 +943,7 @@ impl Explorer {
         }
         let selected_entry = self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
-            let (listing, _) = self.folder_view(&folder)?;
+            let (listing, _) = self.folder_view(self.browser.active, &folder)?;
             listing.entries.iter().find(|entry| entry.path == selected).cloned()
         });
         let current = self.pane_path(self.active_side());
@@ -1020,7 +1013,7 @@ impl Explorer {
                 panel = panel.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(message));
             }
             None => {
-                let count = self.folder_view(&current).map(|(_, indices)| indices.len());
+                let count = self.folder_view(self.browser.active, &current).map(|(_, indices)| indices.len());
                 panel = panel.child(div().flex().flex_col().gap_1p5()
                     .child(Self::property("Папка", current.display().to_string()))
                     .when_some(count, |this, count| this.child(Self::property("Содержит", items_label(count)))));
@@ -1162,18 +1155,18 @@ impl Explorer {
 
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.pane_path(self.active_side());
-        let count = self.folder_view(&current).map(|(_, indices)| indices.len());
+        let count = self.folder_view(self.browser.active, &current).map(|(_, indices)| indices.len());
         let marked = self.marked.len();
         let selection = if marked > 1 { Some(format!("Выбрано: {marked}")) } else { self.selected.clone().and_then(|selected| {
             let folder = selected.parent()?.to_path_buf();
-            let (listing, _) = self.folder_view(&folder)?;
+            let (listing, _) = self.folder_view(self.browser.active, &folder)?;
             listing.entries.iter().find(|entry| entry.path == selected).map(|entry| {
                 if entry.is_directory { format!("Выбрано: {}", entry.name) }
                 else { format!("Выбрано: {} · {}", entry.name, format_size(entry.size)) }
             })
         }) };
         let filter_shown = self.filter_open || !self.filter.is_empty();
-        let split = self.browser.active().right.is_some();
+        let split = self.browser.groups.len() > 1;
         let mut bar = div().w_full().h(px(32.)).flex_none().pl_1().pr_1().flex().items_center().gap_3()
             .bg(rgb(WINDOW)).border_t_1().border_color(rgb(BORDER))
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
@@ -1385,10 +1378,13 @@ impl Explorer {
                             this.copy_path(&copy_target, cx);
                         })));
             }
-            MenuTarget::Tab(index) => {
+            MenuTarget::Tab(group, index) => {
+                let group = *group;
                 let index = *index;
-                let many = self.browser.tabs.len() > 1;
-                let closable = many && !self.browser.tabs[index].pinned;
+                let Some(tabs) = self.browser.group(group).map(|g| &g.tabs) else { return div().into_any_element(); };
+                if index >= tabs.len() { return div().into_any_element(); }
+                let many = tabs.len() > 1;
+                let closable = (many || self.browser.groups.len() > 1) && !tabs[index].pinned;
                 list = list
                     .child(Self::menu_item("m-tab-new", "fm/plus.svg", "Новая вкладка", "Ctrl+T", false, true)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -1398,19 +1394,19 @@ impl Explorer {
                     .child(Self::menu_item("m-tab-duplicate", "fm/copy.svg", "Дублировать", "", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
-                            if let Some(path) = this.browser.tabs.get(index).map(|tab| tab.active().path.clone()) {
+                            if let Some(path) = this.browser.group(group).and_then(|g|g.tabs.get(index)).map(|tab| tab.active().path.clone()) {
                                 this.open_in_new_tab(&path, cx);
                             }
                         })))
-                    .child(Self::menu_item("m-tab-pin", "fm/folder-fill.svg", if self.browser.tabs[index].pinned { "Открепить вкладку" } else { "Закрепить вкладку" }, "", false, true)
-                        .on_click(cx.listener(move |this,_,_,cx| { this.browser.toggle_pin(index); this.context_menu=None; cx.notify(); })))
+                    .child(Self::menu_item("m-tab-pin", "fm/folder-fill.svg", if tabs[index].pinned { "Открепить вкладку" } else { "Закрепить вкладку" }, "", false, true)
+                        .on_click(cx.listener(move |this,_,_,cx| { this.browser.toggle_pin(group, index); this.context_menu=None; cx.notify(); })))
                     .child(Self::separator())
                     .child(Self::menu_item("m-tab-close", "fm/x.svg", "Закрыть", "Ctrl+W", false, closable)
-                        .when(closable, |this| this.on_click(cx.listener(move |this, _, _, cx| this.close_tab_at(index, cx)))))
+                        .when(closable, |this| this.on_click(cx.listener(move |this, _, _, cx| { this.focus_group(group,cx); this.close_tab_at(index, cx); }))))
                     .child(Self::menu_item("m-tab-close-others", "fm/x.svg", "Закрыть другие", "", false, many)
                         .when(many, |this| this.on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
-                            this.close_other_tabs(index, cx);
+                            this.focus_group(group,cx); this.close_other_tabs(index, cx);
                         }))));
             }
         }
@@ -1534,7 +1530,7 @@ impl Explorer {
         } else if self.saving_workspace {
             ("Сохранить рабочее пространство", div().flex().flex_col().gap_2()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("Вкладок: {}. Сохраняются только пути к папкам и вид окна.", self.browser.tabs.len())))
+                    .child(format!("Вкладок: {}. Сохраняются только пути к папкам и вид окна.", self.browser.active_group().tabs.len())))
                 .child(Input::new(&self.workspace_input)).into_any_element(), "Сохранить", ButtonKind::Primary)
         } else if let Some(plans) = &self.confirm_recycle {
             let what = match plans.as_slice() {
@@ -1605,7 +1601,7 @@ impl Render for Explorer {
         self.load_selected_details(cx);
         if self.select_first_when_loaded && self.selected.is_none() {
             let folder = self.pane_path(self.active_side());
-            if let Some((listing, indices)) = self.folder_view(&folder) {
+            if let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) {
                 self.select_first_when_loaded = false;
                 if let Some(&first) = indices.first() {
                     self.selected = Some(listing.entries[first].path.clone());
@@ -1615,7 +1611,7 @@ impl Render for Explorer {
             self.select_first_when_loaded = false;
         }
 
-        let split = self.browser.active().right.is_some();
+        let split = self.browser.groups.len() > 1;
         // Panels without an explicit size get the group average; give each
         // a size derived from the window so panes split the space evenly.
         let window_width = window.viewport_size().width / px(1.);
@@ -1631,10 +1627,10 @@ impl Render for Explorer {
                 .child(self.search_results(cx)));
         } else {
             panels = panels.child(resizable_panel().size(px(pane_width)).size_range(px(280.)..px(4000.))
-                .child(self.pane(Side::Left, cx)));
+                .child(self.pane(self.browser.leaves()[0], cx)));
             if split {
                 panels = panels.child(resizable_panel().size(px(pane_width)).size_range(px(280.)..px(4000.))
-                    .child(self.pane(Side::Right, cx)));
+                    .child(self.pane(self.browser.leaves()[1], cx)));
             }
         }
         if self.show_inspector {
@@ -1658,7 +1654,7 @@ impl Render for Explorer {
                     let resize = this.column_resize.as_ref().unwrap();
                     let next = crate::layout::resize_column(&resize.widths, resize.index,
                         resize.widths[resize.index] + (event.position.x - resize.start_x) / px(1.), resize.current);
-                    this.column_sizes[resize.side_index] = Some((resize.key.clone(), next));
+                    this.column_sizes.insert(resize.group,(resize.key.clone(),next));
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
