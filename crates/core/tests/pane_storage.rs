@@ -14,9 +14,9 @@ fn roundtrip_three_groups_seven_tabs_preserves_tree_and_pins() {
     w.set_ratio(&[],0.65);
     let path = dir.path().join("ws.sqlite3");
     let store = WorkspaceStore::open(&path).unwrap();
-    store.save("test", &w, true).unwrap();
-    let (loaded, columns) = store.load("test").unwrap().unwrap();
-    assert!(columns);
+    store.save("test", &w).unwrap();
+    let loaded = store.load("test").unwrap().unwrap();
+    assert!(loaded.groups.iter().all(|g| g.miller));
     assert_eq!(loaded.root, w.root);
     assert_eq!(loaded.active, three);
     assert_eq!(loaded.tab_count(), 7);
@@ -35,13 +35,13 @@ fn legacy_split_paths_migrate_without_losing_other_right_tabs() {
       INSERT INTO workspaces VALUES('old',1,1);").unwrap();
     for i in 0..2 { conn.execute("INSERT INTO workspace_tabs VALUES('old',?1,?2,?3,1)",params![i,dirs[0].to_string_lossy(),dirs[i as usize+1].to_string_lossy()]).unwrap(); }
     let store = WorkspaceStore::open(&db).unwrap();
-    let (w,_) = store.load("old").unwrap().unwrap();
+    let w = store.load("old").unwrap().unwrap();
     assert_eq!(w.groups.len(),2);
     let right = w.group(w.leaves()[1]).unwrap();
     assert_eq!(right.tabs.len(),2);
     assert_eq!(right.tabs[right.active_tab].pane.path.file_name().unwrap(),"right2");
-    store.save("old", &w,true).unwrap();
-    assert_eq!(store.load("old").unwrap().unwrap().0.tab_count(),4);
+    store.save("old", &w).unwrap();
+    assert_eq!(store.load("old").unwrap().unwrap().tab_count(),4);
 }
 
 #[test]
@@ -52,12 +52,12 @@ fn missing_group_collapses_tree_and_corrupt_tree_falls_back_to_all_tabs() {
     let second = w.split(w.active,Edge::Right,None).unwrap();
     w.active_pane_mut().navigate(&sub).unwrap();
     let db = dir.path().join("ws.sqlite3"); let store = WorkspaceStore::open(&db).unwrap();
-    store.save("test",&w,false).unwrap();
+    store.save("test", &w).unwrap();
     Connection::open(&db).unwrap().execute("UPDATE workspace_layout SET tree='broken'",[]).unwrap();
-    assert_eq!(store.load("test").unwrap().unwrap().0.tab_count(),2);
-    store.save("test",&w,false).unwrap();
+    assert_eq!(store.load("test").unwrap().unwrap().tab_count(),2);
+    store.save("test", &w).unwrap();
     std::fs::remove_dir(&sub).unwrap();
-    let loaded = store.load("test").unwrap().unwrap().0;
+    let loaded = store.load("test").unwrap().unwrap();
     assert_eq!(loaded.groups.len(),1);
     assert!(loaded.group(second).is_none());
 }
@@ -75,7 +75,7 @@ fn full_legacy_split_session_preserves_every_folder_after_resave() {
         conn.execute("INSERT INTO workspace_tabs VALUES('old',?1,?2,?3,1)",params![i,left.to_string_lossy(),right.to_string_lossy()]).unwrap();
     }
     let store = WorkspaceStore::open(&db).unwrap();
-    let (mut w,_) = store.load("old").unwrap().unwrap();
+    let mut w = store.load("old").unwrap().unwrap();
     assert_eq!(w.tab_count(),200);
     assert_eq!(w.groups.len(),2);
     assert_eq!(w.groups[1].active_tab,99);
@@ -83,8 +83,8 @@ fn full_legacy_split_session_preserves_every_folder_after_resave() {
     let right = w.groups[1].id;
     w.move_tab(w.active,0,right,100).unwrap();
     assert_eq!(w.tab_count(),200);
-    store.save("old",&w,true).unwrap();
-    let restored = store.load("old").unwrap().unwrap().0;
+    store.save("old", &w).unwrap();
+    let restored = store.load("old").unwrap().unwrap();
     assert_eq!(restored.tab_count(),200);
     for group in &w.groups {
         let loaded = restored.group(group.id).unwrap();

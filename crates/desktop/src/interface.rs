@@ -562,7 +562,7 @@ impl Explorer {
             scroll,
             sort: self.sort,
             hidden: self.show_hidden,
-            miller: self.miller_mode,
+            miller: self.miller(side),
             filter: self.filter.clone(),
             start: event.position,
             current: event.position,
@@ -598,7 +598,7 @@ impl Explorer {
             && !self.search_active
             && self.sort == m.sort
             && self.show_hidden == m.hidden
-            && self.miller_mode == m.miller
+            && self.miller(m.side) == m.miller
             && self.filter == m.filter
             && self
                 .directory_cache

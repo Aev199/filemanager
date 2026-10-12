@@ -238,7 +238,6 @@ struct Explorer {
     directory_errors: HashMap<PathBuf, String>,
     directory_cache_order: VecDeque<PathBuf>,
     directory_request: u64,
-    miller_mode: bool,
     workspaces: Option<WorkspaceStore>,
     journal: Option<Arc<Journal>>,
     operation_journal: Option<Arc<OperationJournal>>,
@@ -390,13 +389,10 @@ impl Explorer {
         window.focus(&focus_handle, cx);
         let (workspaces,prefs,prefs_error)=WorkspaceStore::open_with_preferences(WorkspaceStore::default_path());
         let prefs_error=prefs_error.map(|error|format!("Настройки не прочитаны: {error}"));
-        let (browser, miller_mode) = workspaces.as_ref()
+        let browser = workspaces.as_ref()
             .and_then(|store| store.load(SESSION_WORKSPACE).ok().flatten())
-            .unwrap_or_else(|| (
-                Workspace::new(home).or_else(|_| Workspace::new("."))
-                    .expect("No starting directory"),
-                true
-            ));
+            .unwrap_or_else(|| Workspace::new(home).or_else(|_| Workspace::new("."))
+                .expect("No starting directory"));
         theme::set_light(prefs.light);
         Theme::change(if prefs.light { ThemeMode::Light } else { ThemeMode::Dark },Some(window),cx);
         view::apply_component_theme(cx);
@@ -468,7 +464,6 @@ impl Explorer {
             directory_errors: HashMap::new(),
             directory_cache_order: VecDeque::new(),
             directory_request: 0,
-            miller_mode,
             workspaces,
             journal: None,
             operation_journal,
@@ -1530,7 +1525,7 @@ impl Explorer {
             return;
         }
         self.status = match self.workspaces.as_ref() {
-            Some(store) => match store.save(&name, &self.browser, self.miller_mode) {
+            Some(store) => match store.save(&name, &self.browser) {
                 Ok(()) => {
                     self.saving_workspace = false;
                     format!("Рабочее пространство «{name}» сохранено")
@@ -1546,20 +1541,19 @@ impl Explorer {
     /// Silent save of the session, used when the window closes.
     fn persist_workspace(&self) {
         if let Some(store) = self.workspaces.as_ref() {
-            let _ = store.save(SESSION_WORKSPACE, &self.browser, self.miller_mode);
+            let _ = store.save(SESSION_WORKSPACE, &self.browser);
         }
     }
 
     fn restore_workspace(&mut self, name: &str, cx: &mut Context<Self>) {
         self.status = match self.workspaces.as_ref() {
             Some(store) => match store.load(name) {
-                Ok(Some((browser, miller_mode))) => {
+                Ok(Some(browser)) => {
                     self.browser = browser;
                     self.pane_measured_widths.clear();self.column_scroll_handles.clear();self.column_reveal_keys.clear();
                     self.column_sizes.clear();self.pane_bounds.clear();self.tab_scroll.clear();self.tab_reveal.clear();
                     self.scroll_handles.clear();self.folder_views.clear();self.column_resize=None;self.dock_hover=None;
                     self.marquee=None;self.anchor=None;self.address_editing=None;self.select_first_when_loaded=false;
-                    self.miller_mode = miller_mode;
                     self.selected = None;
                     self.marked.clear();
                     self.confirm_recycle = None;

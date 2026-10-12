@@ -93,6 +93,11 @@ impl Explorer {
         self.browser.active
     }
 
+    /// Whether a pane shows columns rather than a list.
+    pub(crate) fn miller(&self, side: GroupId) -> bool {
+        self.browser.group(side).is_none_or(|group| group.miller)
+    }
+
     pub(crate) fn pane_path(&self, side: GroupId) -> PathBuf {
         self.browser.group(side).map(|g|g.tabs[g.active_tab].pane.path.clone())
             .unwrap_or_else(||self.browser.active_pane().path.clone())
@@ -382,7 +387,7 @@ impl Explorer {
     }
 
     pub(crate) fn set_miller(&mut self, miller: bool, cx: &mut Context<Self>) {
-        self.miller_mode = miller;
+        self.browser.active_group_mut().miller = miller;
         cx.notify();
     }
 
@@ -513,11 +518,11 @@ impl Explorer {
     }
 
     pub(crate) fn key_column_left(&mut self, _: &ColumnLeft, _: &mut Window, cx: &mut Context<Self>) {
-        if self.miller_mode { self.go_up(cx); }
+        if self.miller(self.active_side()) { self.go_up(cx); }
     }
 
     pub(crate) fn key_column_right(&mut self, _: &ColumnRight, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.miller_mode { return; }
+        if !self.miller(self.active_side()) { return; }
         if let Some(entry) = self.selected_entry().filter(|entry| entry.is_directory) {
             let side = self.active_side();
             self.open_entry(entry.path, true, side, cx);

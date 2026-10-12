@@ -38,11 +38,11 @@ fn workspace_migrates_legacy_and_roundtrips_pin() {
     rusqlite::Connection::open(&db).unwrap().execute_batch("CREATE TABLE workspace_tabs (workspace_name TEXT NOT NULL,position INTEGER NOT NULL,left_path TEXT NOT NULL,right_path TEXT,focus_right INTEGER NOT NULL,PRIMARY KEY(workspace_name,position));").unwrap();
     let store = WorkspaceStore::open(&db).unwrap();
     let mut browser = Workspace::new(dir.path()).unwrap();
-    store.save("old", &browser, false).unwrap();
-    assert!(!store.load("old").unwrap().unwrap().0.active_group().tabs[0].pinned);
+    store.save("old", &browser).unwrap();
+    assert!(!store.load("old").unwrap().unwrap().active_group().tabs[0].pinned);
     browser.toggle_pin(browser.active, 0);
-    store.save("new", &browser, true).unwrap();
-    assert!(store.load("new").unwrap().unwrap().0.active_group().tabs[0].pinned);
+    store.save("new", &browser).unwrap();
+    assert!(store.load("new").unwrap().unwrap().active_group().tabs[0].pinned);
     WorkspaceStore::open(&db).unwrap(); // migration is repeatable
 }
 #[test]

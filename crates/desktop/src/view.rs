@@ -539,7 +539,7 @@ impl Explorer {
     /// columns mode, a preview of the selected subfolder.
     pub(crate) fn pane_columns(&self, side: GroupId) -> Vec<PathBuf> {
         let path = self.pane_path(side);
-        if !self.miller_mode {
+        if !self.miller(side) {
             return vec![path];
         }
         let preview = (side == self.active_side()).then(|| self.selected.clone()).flatten()
@@ -559,7 +559,7 @@ impl Explorer {
 
         let path = self.pane_path(side);
         let pane_width = self.pane_width_for(side);
-        let body = if self.miller_mode {
+        let body = if self.miller(side) {
             let folders = self.pane_columns(side);
             let current_index = folders.iter().position(|folder| folder == &path).unwrap_or(folders.len() - 1);
             let group_id = format!(
@@ -733,7 +733,7 @@ impl Explorer {
     }
 
     fn column(&mut self, folder: PathBuf, side: GroupId, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
-        let list_mode = !self.miller_mode;
+        let list_mode = !self.miller(side);
         let mut column = div().size_full().min_h_0().flex().flex_col()
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
         if !list_mode {
@@ -1333,9 +1333,9 @@ impl Explorer {
                     this.show_hidden = !this.show_hidden;
                     cx.notify();
                 })))
-            .child(bar_button("bar-list", "fm/list.svg", "Список (Ctrl+1)", !self.miller_mode)
+            .child(bar_button("bar-list", "fm/list.svg", "Список (Ctrl+1)", !self.miller(self.active_side()))
                 .on_click(cx.listener(|this, _, _, cx| this.set_miller(false, cx))))
-            .child(bar_button("bar-columns", "fm/columns.svg", "Колонки (Ctrl+2)", self.miller_mode)
+            .child(bar_button("bar-columns", "fm/columns.svg", "Колонки (Ctrl+2)", self.miller(self.active_side()))
                 .on_click(cx.listener(|this, _, _, cx| this.set_miller(true, cx)))))
     }
 

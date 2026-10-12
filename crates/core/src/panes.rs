@@ -19,7 +19,8 @@ impl Tab {
     }
 }
 #[derive(Clone, Debug)]
-pub struct Group { pub id: GroupId, pub tabs: Vec<Tab>, pub active_tab: usize }
+/// `miller`: columns view, otherwise a list; each pane chooses its own.
+pub struct Group { pub id: GroupId, pub tabs: Vec<Tab>, pub active_tab: usize, pub miller: bool }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis { Horizontal, Vertical }
 #[derive(Clone, Debug, PartialEq)]
@@ -105,7 +106,7 @@ pub struct Workspace {
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 impl Workspace {
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::from_parts(vec![Group { id: GroupId(1), tabs: vec![Tab::new(path)?], active_tab: 0 }], Node::Leaf(GroupId(1)), GroupId(1))
+        Self::from_parts(vec![Group { id: GroupId(1), tabs: vec![Tab::new(path)?], active_tab: 0, miller: true }], Node::Leaf(GroupId(1)), GroupId(1))
     }
     pub fn from_parts(groups: Vec<Group>, root: Node, active: GroupId) -> io::Result<Self> {
         let mut ids = Vec::new(); root.leaves(&mut ids);
@@ -185,6 +186,7 @@ impl Workspace {
     pub fn split(&mut self, id: GroupId, edge: Edge, source: Option<(GroupId, usize)>) -> io::Result<GroupId> {
         if self.groups.len() >= MAX_GROUPS { return Err(invalid("Не больше четырёх панелей")); }
         let g = self.group(id).ok_or_else(|| invalid("Панель закрыта"))?;
+        let miller = g.miller;
         if source == Some((id,0)) && g.tabs.len() == 1 { return Err(invalid("Нельзя разделить единственную вкладку переносом")); }
         let copy = if let Some((src,index)) = source {
             self.group(src).and_then(|g|g.tabs.get(index)).ok_or_else(|| invalid("Вкладка закрыта"))?.clone()
@@ -195,7 +197,7 @@ impl Workspace {
         let new = GroupId(self.next_id); self.next_id = self.next_id.checked_add(1).ok_or_else(||invalid("Неверный идентификатор панели"))?;
         let (first,second) = if matches!(edge,Edge::Left|Edge::Top) { (Node::Leaf(new),Node::Leaf(id)) } else { (Node::Leaf(id),Node::Leaf(new)) };
         self.root.replace(id,&Node::Split { axis: if matches!(edge,Edge::Left|Edge::Right) { Axis::Horizontal } else { Axis::Vertical }, ratio: 0.5, first: Box::new(first), second: Box::new(second) });
-        self.groups.push(Group { id: new, tabs: vec![copy], active_tab: 0 });
+        self.groups.push(Group { id: new, tabs: vec![copy], active_tab: 0, miller });
         if let Some((src,index)) = source {
             self.remove_tab(src,index);
             if self.group(src).unwrap().tabs.is_empty() { self.close_group(src); }
