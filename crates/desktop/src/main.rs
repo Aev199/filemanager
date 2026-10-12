@@ -231,6 +231,10 @@ struct Explorer {
     live_watch_started: bool,
     live_watch_error: Option<String>,
     watched_root: Option<PathBuf>,
+    /// Set by «Остановить»: history stays off until switched on again.
+    history_paused: bool,
+    /// Visible folders the OS would not watch (no access, offline share).
+    unwatched_folders: std::collections::HashSet<PathBuf>,
     /// Validated Recycle plans awaiting confirmation. Confirming submits
     /// exactly these plans, never re-prepared ones.
     confirm_recycle: Option<Vec<(PathBuf, Plan)>>,
@@ -453,7 +457,7 @@ impl Explorer {
             operation_review_epoch: 0,
             operation_alerts: Vec::new(),
             watcher: None, live_watch_started: false, live_watch_error: None,
-            watched_root: None, confirm_recycle: None,
+            watched_root: None, history_paused: false, unwatched_folders: Default::default(), confirm_recycle: None,
             status: prefs_error.unwrap_or(operation_status),
             search_input, address_input, comment_input, author_input, search_query: String::new(),
             search_results: Vec::new(), search_root: None,
@@ -528,11 +532,8 @@ impl Explorer {
                 this.load_selected_thumbnail(cx);
                 match history {
                     Ok(history) => this.inspector_history = history,
-                    Err(error) => {
-                        let reason = format!("История недоступна: {error}");
-                        this.status = reason.clone();
-                        this.live_watch_error = Some(reason);
-                    }
+                    // One unreadable file is not a lasting fault of the journal.
+                    Err(error) => this.status = format!("История этого файла недоступна: {error}"),
                 }
                 this.inspector_loading = false;
                 cx.notify();
@@ -1568,11 +1569,13 @@ impl Explorer {
     fn watch(&mut self, cx: &mut Context<Self>) {
         if self.watched_root.is_some() {
             self.watched_root = None;
+            self.history_paused = true;
             self.status = "Запись истории остановлена".into();
         } else if self.journal.is_some() {
             self.watched_root = Some(self.browser.active().active().path.clone());
+            self.history_paused = false;
             self.inspector_dirty = true;
-            self.status = "История видимых папок записывается, пока окно открыто".into();
+            self.status = "История записывается".into();
         } else {
             self.status = self.live_watch_error.clone()
                 .unwrap_or_else(|| "История ещё загружается".into());
@@ -1601,7 +1604,15 @@ impl Explorer {
             let result = journal_task.await;
             let _ = weak.update(cx, |this, cx| {
                 match result {
-                    Ok(journal) => { this.journal = Some(journal); this.inspector_dirty = true; }
+                    Ok(journal) => {
+                        this.journal = Some(journal);
+                        this.inspector_dirty = true;
+                        // History is recorded by default; «Остановить» pauses it.
+                        if !this.history_paused && this.watched_root.is_none() {
+                            this.watched_root = Some(this.browser.active().active().path.clone());
+                            this.configure_live_watch();
+                        }
+                    }
                     Err(error) => {
                         let reason = format!("История недоступна: {error}");
                         this.status = reason.clone();
@@ -1626,10 +1637,15 @@ impl Explorer {
                 let running = weak.update(cx, |this, cx| {
                     let Some(watcher) = &this.watcher else { return false; };
                     let changes = watcher.drain();
+                    // A passing problem (a burst of changes, one unreadable
+                    // file) is reported once, never left on screen.
                     if let Some(error) = changes.error {
-                        let reason = format!("Автообновление: {error}");
-                        this.status = reason.clone();
-                        this.live_watch_error = Some(reason);
+                        this.status = format!("Автообновление: {error}");
+                        cx.notify();
+                    }
+                    let unwatched = watcher.unwatched();
+                    if unwatched != this.unwatched_folders {
+                        this.unwatched_folders = unwatched;
                         cx.notify();
                     }
                     if changes.refresh_all || this.selected.as_ref().is_some_and(|selected| {

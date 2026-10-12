@@ -181,7 +181,10 @@ pub fn scan_directory(dir: &Path, max_entries: usize) -> io::Result<Listing> {
             truncated = true;
             break;
         }
-        let metadata = match fs::symlink_metadata(item.path()) {
+        // From the directory enumeration itself (no link following): on
+        // Windows no file is opened, so folders without read rights are
+        // still listed, and a network share needs no round trip per entry.
+        let metadata = match item.metadata() {
             Ok(metadata) => metadata,
             Err(_) => { truncated = true; continue; }
         };
@@ -224,7 +227,7 @@ pub fn list_directory(dir: &Path, limit: usize) -> io::Result<Listing> {
     for item in fs::read_dir(dir)? {
         let item = item?;
         if entries.len() == limit { truncated = true; break; }
-        let metadata = fs::symlink_metadata(item.path())?;
+        let metadata = item.metadata()?;
         entries.push(Entry::from_metadata(&item, &metadata));
     }
     entries.sort_by(|a, b| match (a.is_directory, b.is_directory) {

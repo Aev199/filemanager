@@ -118,6 +118,8 @@ impl Journal {
         let metadata = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return self.mark_missing(path),
+            // A file the user may not read is simply not part of their history.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
             Err(e) => return Err(e),
         };
         if !metadata.is_file() || metadata.file_type().is_symlink() { return Ok(false); }

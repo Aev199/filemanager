@@ -39,6 +39,9 @@ struct Configuration {
 #[derive(Default)]
 struct State {
     configuration: Mutex<Configuration>,
+    /// Visible folders the OS refused to watch (no access, offline share).
+    /// Not an error: their listings just do not refresh by themselves.
+    unwatched: Mutex<HashSet<PathBuf>>,
     changes: Mutex<WatchChanges>,
     overflow: AtomicBool,
     stop: AtomicBool,
@@ -88,6 +91,11 @@ impl DirectoryWatch {
             config.journal = journal;
             config.generation = config.generation.wrapping_add(1);
         }
+    }
+
+    /// Visible folders without notifications, for a quiet note in the UI.
+    pub fn unwatched(&self) -> HashSet<PathBuf> {
+        self.state.unwatched.lock().unwrap().clone()
     }
 
     /// Takes pending dirty flags atomically; subsequent events accumulate in
@@ -157,6 +165,7 @@ fn run(state: Arc<State>) {
                 }
             }
             watched.retain(|path| roots.contains(path));
+            state.unwatched.lock().unwrap().retain(|path| roots.contains(path));
             {
                 let mut changes = state.changes.lock().unwrap();
                 changes.ready.retain(|path| roots.contains(path));
@@ -168,13 +177,16 @@ fn run(state: Arc<State>) {
             for root in roots.difference(&watched).cloned().collect::<Vec<_>>() {
                 match watcher.watch(&root, RecursiveMode::NonRecursive) {
                     Ok(()) => {
+                        state.unwatched.lock().unwrap().remove(&root);
                         watched.insert(root.clone());
                         let mut changes = state.changes.lock().unwrap();
                         changes.ready.insert(root.clone());
                         changes.directories.insert(root);
                     }
-                    Err(error) => {
-                        report_error(&state, format!("Cannot watch {}: {error}", root.display()))
+                    // Retried only when the visible folders change, so a
+                    // folder without access never causes a refresh loop.
+                    Err(_) => {
+                        state.unwatched.lock().unwrap().insert(root);
                     }
                 }
             }
@@ -409,14 +421,30 @@ mod tests {
     }
 
     #[test]
-    fn inaccessible_watch_root_reports_a_visible_reason() {
+    fn inaccessible_watch_root_is_noted_without_an_error() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("does-not-exist");
-        let watch = DirectoryWatch::start(vec![root.clone()], None).unwrap();
-        let change = until(&watch, |change| change.error.is_some());
-        assert!(change.refresh_all);
-        assert!(change.error.unwrap().contains("Cannot watch"));
+        let other = temp.path().to_path_buf();
+        let watch = DirectoryWatch::start(vec![root.clone(), other.clone()], None).unwrap();
+        until(&watch, |change| change.ready.contains(&other));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !watch.unwatched().contains(&root) {
+            assert!(Instant::now() < deadline, "root was never reported as unwatched");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let change = watch.drain();
+        assert!(change.error.is_none() && !change.refresh_all);
         assert!(!change.ready.contains(&root));
+        // The other folder is still watched.
+        fs::write(other.join("new.txt"), b"x").unwrap();
+        until(&watch, |change| change.paths.contains(&other.join("new.txt")));
+        // Once it is no longer visible it is not reported any more.
+        watch.configure(vec![other.clone()], None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while watch.unwatched().contains(&root) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

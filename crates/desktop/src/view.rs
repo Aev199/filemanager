@@ -782,6 +782,12 @@ impl Explorer {
                     .on_mouse_down(MouseButton::Left,cx.listener({ let folder=background_marquee_folder.clone(); move |this,event,window,cx|this.begin_marquee(&folder,side,event,window,cx) }))
                 )
             );
+            if self.unwatched_folders.contains(&background_marquee_folder) {
+                column = column.child(
+                    div().px_3().py_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                        .child("Без автообновления — F5 обновит")
+                );
+            }
             if listing.truncated {
                 column = column.child(
                     div().px_3().py_1().text_size(px(11.)).text_color(rgb(WARNING))
@@ -1181,7 +1187,7 @@ impl Explorer {
             let tint = if self.live_watch_error.is_some() { DANGER } else { SUCCESS };
             section = section.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(tint))
                 .child(small_icon("fm/eye-watch.svg", tint))
-                .child(div().flex_1().min_w_0().truncate().child("История видимых папок")));
+                .child(div().flex_1().min_w_0().truncate().child("Записывается")));
         }
         if let Some(reason) = &self.live_watch_error {
             section = section.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(reason.clone()));

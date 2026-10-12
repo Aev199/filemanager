@@ -2,6 +2,14 @@
 //! for the CLI and logs). Unknown text is shown unchanged.
 
 const PHRASES: &[(&str, &str)] = &[
+    ("Filesystem notification queue overflowed; history may be incomplete", "слишком много изменений сразу, часть истории могла не записаться"),
+    ("Filesystem notifications lost events; history may be incomplete", "часть уведомлений потеряна, история может быть неполной"),
+    ("Filesystem event batch overflowed; history may be incomplete", "слишком много изменений сразу, часть истории могла не записаться"),
+    ("Pending notifications overflowed; history may be incomplete", "слишком много изменений сразу, часть истории могла не записаться"),
+    ("History observation failed for", "не удалось записать историю для"),
+    ("Filesystem notification failed", "ошибка уведомлений файловой системы"),
+    ("Too many visible directories to watch (maximum 32)", "открыто больше 32 папок, автообновление — только для первых"),
+    ("Filesystem watcher unavailable", "уведомления файловой системы недоступны"),
     ("Created file or folder changed since the action; undo refused", "Созданный файл или папка изменились после операции, отмена запрещена"),
     ("Destination already exists", "Объект с таким именем уже существует, замена запрещена"),
     ("No-overwrite moves are implemented for Windows only", "Безопасный перенос без перезаписи работает только в Windows"),
