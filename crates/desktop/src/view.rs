@@ -15,7 +15,8 @@ use gpui::{
     ExternalPaths, MouseButton, MouseDownEvent, SharedString, Stateful, Window,
 };
 use gpui_component::input::Input;
-use gpui_component::resizable::{h_resizable, resizable_panel};
+use gpui_component::resizable::{h_resizable, v_resizable, resizable_panel};
+use filemanager_core::panes::{Node, Axis, Edge, tab_titles};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
 use gpui_component::tooltip::Tooltip;
@@ -164,65 +165,117 @@ fn entry_icon(entry: &Entry) -> (&'static str, u32) {
 impl Explorer {
     // ---------------------------------------------------------------- tabs
 
-    fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let group = self.browser.active;
-        let mut strip = div().id("tab-strip").flex_initial().min_w_0().h_full().flex().items_end()
-            .gap_1().px_2().overflow_x_scroll();
-        for (index, tab) in self.browser.active_group().tabs.iter().enumerate() {
-            let active = index == self.browser.active_group().active_tab;
-            let closable = self.browser.active_group().tabs.len() > 1 && !tab.pinned;
-            strip = strip.child(
-                div().id(("tab", index)).group("tab").flex_none().h(px(32.)).min_w(px(120.))
-                    .max_w(px(220.)).pl_3().pr_1().flex().items_center().gap_2()
-                    .rounded_t_md().cursor_pointer()
-                    .when(active, |this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT))
-                        .border_t_2().border_color(rgb(ACCENT)))
-                    .when(!active, |this| this.text_color(rgb(TEXT_MUTED))
-                        .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
-                    .child(small_icon("fm/folder-fill.svg", if active { FOLDER } else { TEXT_DIM }))
-                    .when(tab.pinned, |row| row.child(div().text_color(rgb(ACCENT)).child("●")))
-                    .child(div().flex_1().min_w_0().truncate().child(tab.title.clone()))
-                    .when(closable, |this| this.child(
-                        div().id(("tab-close", index)).flex_none().size(px(20.)).rounded_sm()
-                            .flex().items_center().justify_center()
-                            .invisible().group_hover("tab", |style| style.visible())
-                            .when(active, |this| this.visible())
-                            .hover(|style| style.bg(rgb(PRESSED)))
-                            .child(small_icon("fm/x.svg", TEXT_MUTED))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab_at(index, cx);
-                            }))
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| this.switch_tab(index, cx)))
-                    .on_drag(TabDrag { group: self.browser.active, index, title: tab.title.clone() }, |drag: &TabDrag, position, _, cx| {
-                        cx.new(|_| FileDragPreview { name: drag.title.clone(), position })
-                    })
-                    .drag_over::<TabDrag>(|style, _, _, _| style.border_l_2().border_color(rgb(ACCENT)))
-                    .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
-                        if let Err(error)=this.browser.move_tab(drag.group,drag.index,group,index) { this.status=error.to_string(); }
-                        this.prune_group_state();
-                        cx.notify();
-                    }))
-                    .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
-                        this.close_tab_at(index, cx);
-                    }))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        this.open_menu(event.position, MenuTarget::Tab(group, index), cx);
-                    }))
-            );
+    fn tab_strip(&mut self, group: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = self.browser.group(group).unwrap().tabs.clone();
+        let active_index = self.browser.group(group).unwrap().active_tab;
+        let titles = tab_titles(&tabs.iter().map(|t|t.pane.path.clone()).collect::<Vec<_>>());
+        let scroll = self.tab_scroll.entry(group).or_default().clone();
+        let reveal = (active_index,tabs.len());
+        if self.tab_reveal.get(&group) != Some(&reveal) {
+            scroll.scroll_to_item(active_index); self.tab_reveal.insert(group,reveal);
         }
-        strip.child(
-            icon_button("new-tab", "fm/plus.svg", "Новая вкладка (Ctrl+T)", false, true)
-                .mb(px(1.))
-                .on_click(cx.listener(|this, _, _, cx| this.add_tab(cx)))
-        )
+        let wheel = scroll.clone();
+        let mut strip = div().id(SharedString::from(format!("tabs-{}",group.0)))
+            .flex_1().min_w_0().h_full().flex().items_end().gap_1().px_1()
+            .overflow_x_scroll().track_scroll(&scroll)
+            .on_scroll_wheel(move |event,window,cx| {
+                let delta=event.delta.pixel_delta(px(32.));
+                let x=(wheel.offset().x+delta.x+delta.y).min(px(0.)).max(-wheel.max_offset().x);
+                wheel.set_offset(gpui::point(x,px(0.))); window.refresh(); cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Left,cx.listener(move |this,event: &MouseDownEvent,_,cx| {
+                if event.click_count==2 { this.focus_group(group,cx); this.add_tab(cx); }
+            }))
+            .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {
+                let end=this.browser.group(group).map(|g|g.tabs.len()).unwrap_or(0);
+                this.move_tab_to(drag,group,end,cx);
+            }));
+        for (index,tab) in tabs.iter().enumerate() {
+            let active=index==active_index;
+            let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
+            let tip=tab.pane.path.display().to_string();
+            strip=strip.child(div().id(("tab",index)).group("tab").flex_none().h(px(32.))
+                .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
+                .rounded_t_md().cursor_pointer()
+                .when(active,|row|row.bg(rgb(SURFACE)).text_color(rgb(TEXT)).border_t_2().border_color(rgb(ACCENT)))
+                .when(!active,|row|row.text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
+                .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
+                .child(small_icon("fm/folder-fill.svg",if active {FOLDER} else {TEXT_DIM}))
+                .when(tab.pinned,|row|row.child(div().text_color(rgb(ACCENT)).child("●")))
+                .child(div().flex_1().min_w_0().truncate().child(titles[index].clone()))
+                .when(closable,|row|row.child(div().id(("tab-close",index)).flex_none().size(px(20.)).rounded_sm()
+                    .flex().items_center().justify_center().invisible().group_hover("tab",|style|style.visible())
+                    .when(active,|row|row.visible()).hover(|style|style.bg(rgb(PRESSED)))
+                    .child(small_icon("fm/x.svg",TEXT_MUTED))
+                    .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);}))))
+                .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.switch_group_tab(group,index,cx);} ))
+                .on_drag(TabDrag {group,index,title:titles[index].clone()},|drag: &TabDrag,position,_,cx|
+                    cx.new(|_|FileDragPreview {name:drag.title.clone(),position}))
+                .drag_over::<TabDrag>(|style,_,_,_|style.border_l_2().border_color(rgb(ACCENT)))
+                .on_drop(cx.listener(move |this,drag: &TabDrag,_,cx| {cx.stop_propagation();this.move_tab_to(drag,group,index,cx);} ))
+                .on_mouse_down(MouseButton::Middle,cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);} ))
+                .on_mouse_down(MouseButton::Left,cx.listener(|_,_,_,cx|cx.stop_propagation()))
+                .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx| {
+                    this.focus_group(group,cx);
+                    this.open_menu(event.position,MenuTarget::Tab(group,index),cx);
+                })));
+        }
+        div().h(px(34.)).flex_none().min_w_0().flex().items_center().bg(rgb(WINDOW))
+            .child(strip)
+            .child(icon_button("new-tab","fm/plus.svg","Новая вкладка (Ctrl+T)",false,true)
+                .on_click(cx.listener(move |this,_,_,cx| {this.focus_group(group,cx);this.add_tab(cx);})))
+            .child(icon_button("tab-list","fm/chevron-down.svg","Все вкладки",false,true)
+                .on_mouse_down(MouseButton::Left,cx.listener(move |this,event: &MouseDownEvent,window,cx| {
+                    cx.stop_propagation(); this.focus_group(group,cx); window.focus(&this.focus_handle,cx);
+                    this.open_menu(event.position,MenuTarget::TabList(group),cx);
+                })))
+            .into_any_element()
+    }
+
+    fn move_tab_to(&mut self, drag: &TabDrag, group: GroupId, index: usize, cx: &mut Context<Self>) {
+        if let Err(error)=self.browser.move_tab(drag.group,drag.index,group,index) {self.status=error.to_string();}
+        self.prune_group_state(); self.selected=None; self.marked.clear(); self.anchor=None;
+        self.marquee=None; self.context_menu=None; self.clear_filter=!self.filter.is_empty(); self.close_search(); cx.notify();
+    }
+
+    fn group_view(&mut self, group: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        let tabs=self.tab_strip(group,cx);
+        let navigation=self.nav_row(group,cx).into_any_element();
+        let body=self.pane(group,cx);
+        div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
+            .flex().flex_col().overflow_hidden().border_1()
+            .border_color(rgb(if group==self.browser.active {ACCENT} else {BORDER}))
+            .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx|this.focus_group(group,cx)))
+            .child(tabs).child(navigation).child(div().flex_1().min_h_0().child(body)).into_any_element()
+    }
+
+    fn layout_view(&mut self, node: &Node, path: Vec<bool>, width: f32, height: f32, cx: &mut Context<Self>) -> AnyElement {
+        match node {
+            Node::Leaf(id)=>self.group_view(*id,cx),
+            Node::Split {axis,ratio,first,second}=>{
+                let horizontal=*axis==Axis::Horizontal;
+                let mut a=path.clone();a.push(false);let mut b=path.clone();b.push(true);
+                let one=self.layout_view(first,a,if horizontal {width*ratio} else {width},if horizontal {height} else {height*ratio},cx);
+                let two=self.layout_view(second,b,if horizontal {width*(1.-ratio)} else {width},if horizontal {height} else {height*(1.-ratio)},cx);
+                let key=SharedString::from(format!("split-{}-{:?}",self.browser.signature(),path));
+                let group=if horizontal {h_resizable(key)} else {v_resizable(key)};
+                let available=if horizontal {width} else {height};
+                group.child(resizable_panel().size(px(available*ratio)).size_range(px(240.)..px(10000.)).child(one))
+                    .child(resizable_panel().size(px(available*(1.-ratio))).size_range(px(240.)..px(10000.)).child(two))
+                    .on_resize(cx.listener(move |this,state: &gpui::Entity<gpui_component::resizable::ResizableState>,_,cx| {
+                        let sizes=state.read(cx).sizes();
+                        if sizes.len()==2 && sizes[0]+sizes[1]>px(0.) {
+                            this.browser.set_ratio(&path,sizes[0]/(sizes[0]+sizes[1])); cx.notify();
+                        }
+                    })).into_any_element()
+            }
+        }
     }
 
     /// Our own title bar: tabs live in it, as in Atlas. The empty space
     /// after the tabs drags the window; Windows draws the system buttons.
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        TitleBar::new().h(px(40.)).pl_0().bg(rgb(WINDOW)).border_color(rgb(BORDER))
+        TitleBar::new().h(px(32.)).pl_0().bg(rgb(WINDOW)).border_color(rgb(BORDER))
             .child(
                 div().h_full().flex_1().min_w_0().flex().items_end()
                     .when(!self.show_sidebar, |bar| bar.child(
@@ -234,7 +287,6 @@ impl Explorer {
                                 })))
                     ))
                     .when(self.show_sidebar, |bar| bar.child(div().w_1()))
-                    .child(self.tab_strip(cx))
                     // Free space: window drag area.
                     .child(div().flex_1().h_full())
                     .child(
@@ -250,13 +302,12 @@ impl Explorer {
 
     // ------------------------------------------------------------- toolbar
 
-    fn breadcrumbs(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.address_editing.is_some() {
+    fn breadcrumbs(&self, side: GroupId, cx: &mut Context<Self>) -> AnyElement {
+        if self.address_editing == Some(side) {
             return div().flex_1().min_w_0().h(px(30.))
                 .child(Input::new(&self.address_input).h(px(30.)))
                 .into_any_element();
         }
-        let side = self.active_side();
         let path = self.pane_path(side);
         let chain = browser::ancestors_from_root(&path);
         // Long paths keep the root and the last folders, like Explorer.
@@ -264,8 +315,9 @@ impl Explorer {
         let mut crumbs = div().id("breadcrumbs").flex_1().min_w_0().h(px(30.)).px_1()
             .flex().items_center().gap_0p5().overflow_hidden().rounded_md()
             .hover(|style| style.bg(rgb(HOVER))).cursor_text()
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.address_editing = Some(this.browser.active);
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.focus_group(side,cx);
+                this.address_editing = Some(side);
                 this.focus_address(window, cx);
             }));
         for (index, folder) in chain.iter().enumerate() {
@@ -289,7 +341,6 @@ impl Explorer {
                     .child(browser::display_name(folder))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        let side = this.active_side();
                         this.navigate_side(side, &target, None, cx);
                     }))
             );
@@ -297,21 +348,22 @@ impl Explorer {
         crumbs.into_any_element()
     }
 
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let pane = self.browser.active().active();
+    fn nav_row(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
+        let group = self.browser.group(side).unwrap();
+        let pane = &group.tabs[group.active_tab].pane;
         let can_back = pane.can_go_back();
         let can_forward = pane.can_go_forward();
         let can_up = pane.path.parent().is_some();
-        div().w_full().h(px(40.)).flex_none().flex().items_center().gap_1().px_2()
+        div().w_full().h(px(36.)).flex_none().flex().items_center().gap_1().px_2()
             .bg(rgb(SURFACE)).border_b_1().border_color(rgb(BORDER))
             .child(icon_button("back", "fm/arrow-left.svg", "Назад (Alt+←)", false, can_back)
-                .on_click(cx.listener(|this, _, _, cx| this.go_back(false, cx))))
+                .on_click(cx.listener(move |this, _, _, cx| {this.focus_group(side,cx);this.go_back(false,cx);})))
             .child(icon_button("forward", "fm/arrow-right.svg", "Вперёд (Alt+→)", false, can_forward)
-                .on_click(cx.listener(|this, _, _, cx| this.go_back(true, cx))))
+                .on_click(cx.listener(move |this, _, _, cx| {this.focus_group(side,cx);this.go_back(true,cx);})))
             .child(icon_button("up", "fm/arrow-up.svg", "Вверх (Backspace)", false, can_up)
-                .on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
+                .on_click(cx.listener(move |this, _, _, cx| {this.focus_group(side,cx);this.go_up(cx);})))
             .child(div().w_2())
-            .child(self.breadcrumbs(cx))
+            .child(self.breadcrumbs(side,cx))
     }
 
     // ------------------------------------------------------------- sidebar
@@ -497,8 +549,7 @@ impl Explorer {
     }
 
     fn pane(&mut self, side: GroupId, cx: &mut Context<Self>) -> AnyElement {
-        let split = self.browser.groups.len() > 1;
-        let focused = side == self.active_side();
+
         let path = self.pane_path(side);
         let pane_width = self.pane_width_for(side);
         let body = if self.miller_mode {
@@ -590,16 +641,6 @@ impl Explorer {
                     });
                 });
             })
-            .when(split, |this| this.child(
-                div().h(px(28.)).flex_none().px_3().flex().items_center().gap_2()
-                    .border_b_1().border_color(rgb(BORDER))
-                    .bg(rgb(if focused { RAISED } else { PANEL }))
-                    .when(focused, |this| this.border_t_2().border_color(rgb(ACCENT)))
-                    .child(small_icon("fm/folder-fill.svg", if focused { FOLDER } else { TEXT_DIM }))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.))
-                        .text_color(rgb(if focused { TEXT } else { TEXT_MUTED }))
-                        .child(path.display().to_string()))
-            ))
             .child(body)
             // Files from Explorer are copied into the pane's folder.
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
@@ -1378,6 +1419,20 @@ impl Explorer {
                             this.copy_path(&copy_target, cx);
                         })));
             }
+            MenuTarget::TabList(group) => {
+                let group=*group;
+                list=list.w(px(440.)).max_h(px(420.)).overflow_y_scroll();
+                if let Some(g)=self.browser.group(group) {
+                    let titles=tab_titles(&g.tabs.iter().map(|t|t.pane.path.clone()).collect::<Vec<_>>());
+                    for (index,tab) in g.tabs.iter().enumerate() {
+                        list=list.child(div().id(("all-tab",index)).px_3().py_2().cursor_pointer().rounded_sm()
+                            .hover(|style|style.bg(rgb(HOVER)))
+                            .child(div().text_color(rgb(if index==g.active_tab {ACCENT} else {TEXT})).child(titles[index].clone()))
+                            .child(div().max_w(px(420.)).truncate().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(tab.pane.path.display().to_string()))
+                            .on_click(cx.listener(move |this,_,_,cx|this.switch_group_tab(group,index,cx))));
+                    }
+                }
+            }
             MenuTarget::Tab(group, index) => {
                 let group = *group;
                 let index = *index;
@@ -1403,6 +1458,16 @@ impl Explorer {
                     .child(Self::separator())
                     .child(Self::menu_item("m-tab-close", "fm/x.svg", "Закрыть", "Ctrl+W", false, closable)
                         .when(closable, |this| this.on_click(cx.listener(move |this, _, _, cx| { this.focus_group(group,cx); this.close_tab_at(index, cx); }))))
+                    .child(Self::menu_item("m-tab-move","fm/split.svg","Переместить в другую панель","",false,self.browser.groups.len()>1)
+                        .on_click(cx.listener(move |this,_,_,cx| {
+                            if let Some(target)=this.browser.other_group(group) {
+                                this.move_tab_to(&TabDrag {group,index,title:String::new()},target,usize::MAX,cx);
+                            }
+                        })))
+                    .child(Self::menu_item("m-tab-split-right","fm/split.svg","Разделить вправо","Ctrl+Shift+S",false,true)
+                        .on_click(cx.listener(move |this,_,window,cx|this.split_group(group,Edge::Right,if this.browser.group(group).is_some_and(|g|g.tabs.len()>1) {Some((group,index))} else {None},window,cx))))
+                    .child(Self::menu_item("m-tab-split-down","fm/split.svg","Разделить вниз","Ctrl+Alt+S",false,true)
+                        .on_click(cx.listener(move |this,_,window,cx|this.split_group(group,Edge::Bottom,if this.browser.group(group).is_some_and(|g|g.tabs.len()>1) {Some((group,index))} else {None},window,cx))))
                     .child(Self::menu_item("m-tab-close-others", "fm/x.svg", "Закрыть другие", "", false, many)
                         .when(many, |this| this.on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
@@ -1611,28 +1676,18 @@ impl Render for Explorer {
             self.select_first_when_loaded = false;
         }
 
-        let split = self.browser.groups.len() > 1;
-        // Panels without an explicit size get the group average; give each
-        // a size derived from the window so panes split the space evenly.
-        let window_width = window.viewport_size().width / px(1.);
-        let sidebar_width = if self.show_sidebar { SIDEBAR_WIDTH } else { 0. };
-        let inspector_width = if self.show_inspector { 260. } else { 0. };
-        let pane_count = if split && !self.search_active { 2. } else { 1. };
-        let pane_width = ((window_width - sidebar_width - inspector_width) / pane_count).max(280.);
-        self.pane_width = pane_width;
-        let group_id = format!("main-{}-{}-{}-{}", self.show_sidebar, self.show_inspector, pane_count, self.search_active);
-        let mut panels = h_resizable(SharedString::from(group_id));
-        if self.search_active {
-            panels = panels.child(resizable_panel().size(px(pane_width)).size_range(px(320.)..px(4000.))
-                .child(self.search_results(cx)));
-        } else {
-            panels = panels.child(resizable_panel().size(px(pane_width)).size_range(px(280.)..px(4000.))
-                .child(self.pane(self.browser.leaves()[0], cx)));
-            if split {
-                panels = panels.child(resizable_panel().size(px(pane_width)).size_range(px(280.)..px(4000.))
-                    .child(self.pane(self.browser.leaves()[1], cx)));
-            }
-        }
+        let window_width=window.viewport_size().width/px(1.);
+        let sidebar_width=if self.show_sidebar {SIDEBAR_WIDTH} else {0.};
+        let inspector_width=if self.show_inspector {260.} else {0.};
+        let pane_width=(window_width-sidebar_width-inspector_width).max(240.);
+        self.pane_width=pane_width/self.browser.groups.len() as f32;
+        let height=(window.viewport_size().height/px(1.)-64.).max(240.);
+        let group_id=format!("main-{}-{}-{}",self.browser.signature(),self.show_inspector,self.search_active);
+        let mut panels=h_resizable(SharedString::from(group_id));
+        let body=if self.search_active {self.search_results(cx).into_any_element()} else {
+            self.layout_view(&self.browser.root.clone(),Vec::new(),pane_width,height,cx)
+        };
+        panels=panels.child(resizable_panel().size(px(pane_width)).size_range(px(240.)..px(10000.)).child(body));
         if self.show_inspector {
             panels = panels.child(resizable_panel().size(px(inspector_width)).size_range(px(220.)..px(520.))
                 .child(self.inspector(cx)));
@@ -1718,8 +1773,7 @@ impl Render for Explorer {
                 .when(self.show_sidebar, |row| row.child(self.sidebar(cx)))
                 .child(div().flex_1().min_w_0().h_full().flex().flex_col()
                     .child(self.title_bar(cx))
-                    .child(self.toolbar(cx))
-                    .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
+                        .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
                     .child(self.status_bar(cx))));
         if let Some(menu) = self.context_menu.clone() {
             root = root.child(self.context_menu_view(&menu, cx));

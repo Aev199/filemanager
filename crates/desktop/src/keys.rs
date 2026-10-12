@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use filemanager_core::browser;
 use filemanager_core::selection;
-use gpui::{actions, App, Context, Focusable, KeyBinding, ScrollStrategy, Window};
+use gpui::{px, actions, App, Context, Focusable, KeyBinding, ScrollStrategy, Window};
 
 use crate::{Explorer, FolderView, GroupId};
 
@@ -316,6 +316,11 @@ impl Explorer {
         }
     }
 
+    pub(crate) fn switch_group_tab(&mut self, group: GroupId, index: usize, cx: &mut Context<Self>) {
+        self.focus_group(group,cx);
+        self.switch_tab(index,cx);
+    }
+
     pub(crate) fn switch_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         self.marquee=None;
         if index < self.browser.active_group().tabs.len() {
@@ -336,6 +341,21 @@ impl Explorer {
         self.selected = None;
         self.context_menu = None;
         cx.notify();
+    }
+
+    pub(crate) fn split_group(&mut self, group: GroupId, mut edge: crate::Edge,
+        tab: Option<(GroupId,usize)>, window: &mut Window, cx: &mut Context<Self>) {
+        let available=window.viewport_size().width/px(1.)
+            - if self.show_sidebar {220.} else {0.} - if self.show_inspector {260.} else {0.};
+        let width=self.pane_measured_widths.get(&group).copied().unwrap_or(available/self.browser.groups.len() as f32).min(available);
+        if width<480. && matches!(edge,crate::Edge::Left|crate::Edge::Right) {
+            edge=if edge==crate::Edge::Left {crate::Edge::Top} else {crate::Edge::Bottom};
+        }
+        // A sole tab dragged onto its own edge must not destroy its source.
+        if tab.is_some_and(|(src,_)|src==group && self.browser.group(group).is_some_and(|g|g.tabs.len()==1)) {return;}
+        if let Err(error)=self.browser.split(group,edge,tab) {self.status=error.to_string();}
+        self.prune_group_state();self.selected=None;self.marked.clear();self.anchor=None;
+        self.marquee=None;self.context_menu=None;self.clear_filter=!self.filter.is_empty();self.close_search();cx.notify();
     }
 
     pub(crate) fn toggle_split(&mut self, cx: &mut Context<Self>) {
@@ -521,6 +541,8 @@ impl Explorer {
         self.column_sizes.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));
         self.folder_views.retain(|(id,_),_|ids.contains(id));
+        self.tab_scroll.retain(|id,_|ids.contains(id));
+        self.tab_reveal.retain(|id,_|ids.contains(id));
     }
 
     pub(crate) fn key_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {

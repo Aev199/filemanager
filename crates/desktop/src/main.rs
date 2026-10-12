@@ -127,6 +127,7 @@ enum MenuTarget {
     Entry(PathBuf),
     Folder(PathBuf),
     Tab(GroupId, usize),
+    TabList(GroupId),
 }
 
 #[derive(Clone)]
@@ -197,6 +198,8 @@ struct Explorer {
     column_reveal_keys: HashMap<GroupId, String>,
     column_sizes: HashMap<GroupId, (String, Vec<f32>)>,
     column_resize: Option<ColumnResize>,
+    tab_scroll: HashMap<GroupId, gpui::ScrollHandle>,
+    tab_reveal: HashMap<GroupId, (usize, usize)>,
     /// After entering a folder from the keyboard, select its first entry
     /// once the listing arrives.
     select_first_when_loaded: bool,
@@ -424,6 +427,8 @@ impl Explorer {
             column_reveal_keys: HashMap::new(),
             column_sizes: HashMap::new(),
             column_resize: None,
+            tab_scroll: HashMap::new(),
+            tab_reveal: HashMap::new(),
             select_first_when_loaded: false,
             rename_input, folder_input,
             bulk_template_input, bulk_rename: None, bulk_rename_errors: Vec::new(), bulk_rename_generation: 0,

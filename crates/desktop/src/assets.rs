@@ -12,6 +12,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("fm/arrow-left.svg", include_bytes!("../assets/fm/arrow-left.svg")),
     ("fm/arrow-right.svg", include_bytes!("../assets/fm/arrow-right.svg")),
     ("fm/arrow-up.svg", include_bytes!("../assets/fm/arrow-up.svg")),
+    ("fm/chevron-down.svg", include_bytes!("../assets/fm/chevron-down.svg")),
     ("fm/chevron-right.svg", include_bytes!("../assets/fm/chevron-right.svg")),
     ("fm/clipboard.svg", include_bytes!("../assets/fm/clipboard.svg")),
     ("fm/code.svg", include_bytes!("../assets/fm/code.svg")),
@@ -72,5 +73,14 @@ impl AssetSource for Assets {
             .collect();
         found.extend(gpui_component_assets::Assets.list(path)?);
         Ok(found)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tab_list_chevron_is_embedded() {
+        assert!(Assets.load("fm/chevron-down.svg").unwrap().is_some());
     }
 }
