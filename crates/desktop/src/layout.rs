@@ -203,3 +203,47 @@ mod tests {
         assert_eq!(resize_column(&widths, 5, 50., 5)[5], CURRENT_MIN);
     }
 }
+
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+    #[test]
+    fn dock_regions_follow_center_edges_and_nearest_corner() {
+        assert_eq!(dock_zone(50.,50.,100.,100.),DockZone::Center);
+        assert_eq!(dock_zone(5.,50.,100.,100.),DockZone::Left);
+        assert_eq!(dock_zone(95.,50.,100.,100.),DockZone::Right);
+        assert_eq!(dock_zone(50.,5.,100.,100.),DockZone::Top);
+        assert_eq!(dock_zone(50.,95.,100.,100.),DockZone::Bottom);
+        assert_eq!(dock_zone(20.,5.,100.,100.),DockZone::Top);
+        assert_eq!(dock_zone(95.,80.,100.,100.),DockZone::Right);
+        assert_eq!(dock_zone(1.,1.,0.,100.),DockZone::Center);
+        assert_eq!(dock_zone(1.,1.,100.,0.),DockZone::Center);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockZone { Left, Right, Top, Bottom, Center }
+pub fn dock_zone(x: f32, y: f32, w: f32, h: f32) -> DockZone {
+    if ![x,y,w,h].iter().all(|n|n.is_finite()) || w<=0. || h<=0. {return DockZone::Center;}
+    let x=x.clamp(0.,w); let y=y.clamp(0.,h);
+    [(DockZone::Left,x,x<w*0.3),(DockZone::Right,w-x,x>w*0.7),
+     (DockZone::Top,y,y<h*0.3),(DockZone::Bottom,h-y,y>h*0.7)]
+        .into_iter().filter(|(_,_,hit)|*hit).min_by(|a,b|a.1.total_cmp(&b.1))
+        .map(|(zone,_,_)|zone).unwrap_or(DockZone::Center)
+}
+
+#[cfg(test)]
+mod dock_hit_tests {
+    use super::*;
+    #[test]
+    fn a_drag_source_outside_its_bounds_cannot_override_the_target() {
+        assert_eq!(dock_hit(-510.,200.,550.,380.),None);
+        assert_eq!(dock_hit(42.,200.,550.,700.),Some(DockZone::Left));
+        assert_eq!(dock_hit(551.,20.,550.,380.),None);
+    }
+}
+
+pub fn dock_hit(x: f32, y: f32, w: f32, h: f32) -> Option<DockZone> {
+    if ![x,y,w,h].iter().all(|n|n.is_finite()) || w<=0. || h<=0. || x<0. || y<0. || x>w || y>h {return None;}
+    Some(dock_zone(x,y,w,h))
+}

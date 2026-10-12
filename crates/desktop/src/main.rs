@@ -200,6 +200,8 @@ struct Explorer {
     column_resize: Option<ColumnResize>,
     tab_scroll: HashMap<GroupId, gpui::ScrollHandle>,
     tab_reveal: HashMap<GroupId, (usize, usize)>,
+    dock_hover: Option<(GroupId, layout::DockZone)>,
+    pane_bounds: HashMap<GroupId, Bounds<Pixels>>,
     /// After entering a folder from the keyboard, select its first entry
     /// once the listing arrives.
     select_first_when_loaded: bool,
@@ -429,6 +431,8 @@ impl Explorer {
             column_resize: None,
             tab_scroll: HashMap::new(),
             tab_reveal: HashMap::new(),
+            dock_hover: None,
+            pane_bounds: HashMap::new(),
             select_first_when_loaded: false,
             rename_input, folder_input,
             bulk_template_input, bulk_rename: None, bulk_rename_errors: Vec::new(), bulk_rename_generation: 0,

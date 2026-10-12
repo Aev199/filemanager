@@ -634,6 +634,7 @@ impl Explorer {
                 let width = bounds.size.width / px(1.);
                 cx.defer(move |cx| {
                     let _ = weak.update(cx, |this, cx| {
+                        this.pane_bounds.insert(side,bounds);
                         if width > 0. && this.pane_measured_widths.get(&side).is_none_or(|old| (*old - width).abs() >= 1.) {
                             this.pane_measured_widths.insert(side,width);
                             cx.notify();
@@ -642,6 +643,39 @@ impl Explorer {
                 });
             })
             .child(body)
+            .drag_over::<TabDrag>(|style,_,_,_|style)
+            .on_drag_move::<TabDrag>(cx.listener(move |this,event: &gpui::DragMoveEvent<TabDrag>,_,cx| {
+                let Some(zone)=crate::layout::dock_hit((event.event.position.x-event.bounds.origin.x)/px(1.),
+                    (event.event.position.y-event.bounds.origin.y)/px(1.),event.bounds.size.width/px(1.),event.bounds.size.height/px(1.)) else {
+                    if this.dock_hover.is_some_and(|(id,_)|id==side) {this.dock_hover=None;cx.notify();}
+                    return;
+                };
+                if this.dock_hover!=Some((side,zone)) {this.dock_hover=Some((side,zone));cx.notify();}
+            }))
+            .on_drop(cx.listener(move |this,drag: &TabDrag,window,cx| {
+                use crate::layout::DockZone::*;
+                let zone=this.dock_hover.take().filter(|(id,_)|*id==side).map(|(_,zone)|zone).unwrap_or(Center);
+                if zone==Center || this.browser.groups.len()>=filemanager_core::panes::MAX_GROUPS {
+                    this.move_tab_to(drag,side,usize::MAX,cx);
+                    if zone!=Center {this.status="Не больше четырёх панелей".into();}
+                } else {
+                    let edge=match zone {Left=>Edge::Left,Right=>Edge::Right,Top=>Edge::Top,Bottom=>Edge::Bottom,Center=>unreachable!()};
+                    this.split_group(side,edge,Some((drag.group,drag.index)),window,cx);
+                }
+                cx.notify();
+            }))
+            .when_some(self.dock_hover.filter(|(id,_)|*id==side).map(|(_,zone)|zone),|pane,zone| {
+                use crate::layout::DockZone::*;
+                let overlay=div().absolute().bg(rgba(0x5E8BFF22)).border_2().border_color(rgb(ACCENT)).rounded(px(6.));
+                let overlay=match zone {
+                    Left=>overlay.left_0().top_0().bottom_0().w(gpui::relative(0.5)),
+                    Right=>overlay.right_0().top_0().bottom_0().w(gpui::relative(0.5)),
+                    Top=>overlay.top_0().left_0().right_0().h(gpui::relative(0.5)),
+                    Bottom=>overlay.bottom_0().left_0().right_0().h(gpui::relative(0.5)),
+                    Center=>overlay.inset_0(),
+                };
+                pane.child(overlay)
+            })
             // Files from Explorer are copied into the pane's folder.
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
             .on_drop(cx.listener({
@@ -1700,6 +1734,9 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,_: &keys::PaletteEnter,window,cx|this.palette_enter(window,cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsToggle,_,cx|this.settings_toggle(cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsApply,_,cx|this.apply_settings(cx)))
+            .on_drag_move::<TabDrag>(cx.listener(|this,event: &gpui::DragMoveEvent<TabDrag>,_,cx| {
+                if !this.pane_bounds.values().any(|bounds|bounds.contains(&event.event.position)) && this.dock_hover.take().is_some() {cx.notify();}
+            }))
             .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {
                 if this.column_resize.is_some() {
                     if !event.dragging() || this.interface_modal() {
@@ -1713,8 +1750,8 @@ impl Render for Explorer {
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.column_resize=None;this.finish_marquee(cx);}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.column_resize=None;this.finish_marquee(cx);}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_marquee(cx);cx.notify();}))
             .on_action(cx.listener(|this,_: &keys::OpenPalette,window,cx|this.open_palette(window,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenSettings,window,cx|this.open_settings(window,cx)))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_back(this,event,window,cx); } }))

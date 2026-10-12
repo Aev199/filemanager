@@ -440,6 +440,7 @@ impl Explorer {
     /// Escape never submits a filesystem change or silently cancels a copy.
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock_hover=None;
         if let Some(resize) = self.column_resize.take() {
             self.column_sizes.insert(resize.group,(resize.key,resize.widths));
             cx.notify();
@@ -535,6 +536,8 @@ impl Explorer {
     }
     pub(crate) fn prune_group_state(&mut self) {
         let ids=self.browser.leaves();
+        self.pane_bounds.retain(|id,_|ids.contains(id));
+        if self.dock_hover.is_some_and(|(id,_)|!ids.contains(&id)) {self.dock_hover=None;}
         self.pane_measured_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
