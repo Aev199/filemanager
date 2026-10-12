@@ -1,5 +1,6 @@
 //! Lightweight, explicit workspace bookmarks. File contents are never stored.
-use crate::browser::{Browser, Pane, Tab};
+use crate::panes::{Workspace, Group, GroupId, Node, Tab, MAX_GROUPS, MAX_TABS};
+use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::io;
@@ -53,6 +54,29 @@ impl WorkspaceStore {
             cols.collect::<Result<Vec<_>, _>>().map_err(db_error)?.iter().any(|name| name == "pinned")
         };
         if !has_pin { conn.execute_batch("ALTER TABLE workspace_tabs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;").map_err(db_error)?; }
+        let has_group = {
+            let mut stmt = conn.prepare("PRAGMA table_info(workspace_tabs)").map_err(db_error)?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(db_error)?;
+            cols.collect::<Result<Vec<_>, _>>().map_err(db_error)?.iter().any(|name| name == "group_id")
+        };
+        if !has_group {
+            // Rebuild the old global-position primary key for per-group positions.
+            conn.execute_batch("ALTER TABLE workspace_tabs RENAME TO workspace_tabs_legacy;
+                CREATE TABLE workspace_tabs (
+                    workspace_name TEXT NOT NULL, group_id INTEGER NOT NULL DEFAULT 0,
+                    position INTEGER NOT NULL, left_path TEXT NOT NULL, right_path TEXT,
+                    focus_right INTEGER NOT NULL, pinned INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(workspace_name,group_id,position),
+                    FOREIGN KEY(workspace_name) REFERENCES workspaces(name) ON DELETE CASCADE);
+                INSERT INTO workspace_tabs SELECT workspace_name,0,position,left_path,right_path,focus_right,pinned FROM workspace_tabs_legacy;
+                DROP TABLE workspace_tabs_legacy;").map_err(db_error)?;
+        }
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_groups (
+            workspace_name TEXT NOT NULL, group_id INTEGER NOT NULL, active_tab INTEGER NOT NULL,
+            PRIMARY KEY(workspace_name,group_id), FOREIGN KEY(workspace_name) REFERENCES workspaces(name) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS workspace_layout (
+            workspace_name TEXT PRIMARY KEY, tree TEXT NOT NULL, active_group INTEGER NOT NULL,
+            FOREIGN KEY(workspace_name) REFERENCES workspaces(name) ON DELETE CASCADE);").map_err(db_error)?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS interface_preferences (
             id INTEGER PRIMARY KEY CHECK(id=1),light INTEGER NOT NULL,
             show_hidden INTEGER NOT NULL,show_sidebar INTEGER NOT NULL,show_inspector INTEGER NOT NULL
@@ -86,38 +110,27 @@ impl WorkspaceStore {
     }
 
     /// Replaces exactly one named workspace in a single SQLite transaction.
-    pub fn save(&self, name: &str, browser: &Browser, miller_mode: bool) -> io::Result<()> {
+    pub fn save(&self, name: &str, browser: &Workspace, miller_mode: bool) -> io::Result<()> {
         Self::valid_name(name)?;
-        if browser.tabs.is_empty() || browser.tabs.len() > 100 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "A workspace needs 1-100 tabs"));
-        }
-
+        Workspace::from_parts(browser.groups.clone(), browser.root.clone(), browser.active)?;
         let mut conn = self.connection()?;
-        let transaction = conn.transaction().map_err(db_error)?;
-        transaction.execute(
-            "INSERT INTO workspaces(name,active_tab,miller_mode) VALUES(?1,?2,?3)
-             ON CONFLICT(name) DO UPDATE SET
-                active_tab=excluded.active_tab, miller_mode=excluded.miller_mode",
-            params![name, browser.active_tab as i64, miller_mode],
-        ).map_err(db_error)?;
-        transaction.execute("DELETE FROM workspace_tabs WHERE workspace_name=?1", params![name])
-            .map_err(db_error)?;
-        for (position, tab) in browser.tabs.iter().enumerate() {
-            transaction.execute(
-                "INSERT INTO workspace_tabs
-                 (workspace_name,position,left_path,right_path,focus_right,pinned)
-                 VALUES (?1,?2,?3,?4,?5,?6)",
-                params![
-                    name,
-                    position as i64,
-                    tab.left.path.to_string_lossy().to_string(),
-                    tab.right.as_ref().map(|p| p.path.to_string_lossy().to_string()),
-                    tab.focus_right, tab.pinned
-                ],
-            ).map_err(db_error)?;
+        let tx = conn.transaction().map_err(db_error)?;
+        tx.execute("INSERT INTO workspaces(name,active_tab,miller_mode) VALUES(?1,?2,?3)
+            ON CONFLICT(name) DO UPDATE SET active_tab=excluded.active_tab,miller_mode=excluded.miller_mode",
+            params![name,browser.active_group().active_tab as i64,miller_mode]).map_err(db_error)?;
+        for table in ["workspace_tabs","workspace_groups","workspace_layout"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE workspace_name=?1"),params![name]).map_err(db_error)?;
         }
-        transaction.commit().map_err(db_error)?;
-        Ok(())
+        for group in &browser.groups {
+            let id = i64::try_from(group.id.0).map_err(|_|io::Error::new(io::ErrorKind::InvalidInput,"Неверный идентификатор панели"))?;
+            tx.execute("INSERT INTO workspace_groups VALUES(?1,?2,?3)",params![name,id,group.active_tab as i64]).map_err(db_error)?;
+            for (position,tab) in group.tabs.iter().enumerate() {
+                tx.execute("INSERT INTO workspace_tabs(workspace_name,group_id,position,left_path,right_path,focus_right,pinned)
+                    VALUES(?1,?2,?3,?4,NULL,0,?5)",params![name,id,position as i64,tab.pane.path.to_string_lossy(),tab.pinned]).map_err(db_error)?;
+            }
+        }
+        tx.execute("INSERT INTO workspace_layout VALUES(?1,?2,?3)",params![name,browser.root.encode(),browser.active.0 as i64]).map_err(db_error)?;
+        tx.commit().map_err(db_error)?; Ok(())
     }
 
     pub fn save_preferences(&self, prefs: &crate::interface::Preferences) -> io::Result<()> {
@@ -166,46 +179,83 @@ impl WorkspaceStore {
     }
 
     /// Missing folders are skipped. A damaged/empty workspace is not used.
-    pub fn load(&self, name: &str) -> io::Result<Option<(Browser, bool)>> {
+    pub fn load(&self, name: &str) -> io::Result<Option<(Workspace, bool)>> {
         Self::valid_name(name)?;
         let conn = self.connection()?;
-        let settings = conn.query_row(
-            "SELECT active_tab,miller_mode FROM workspaces WHERE name=?1",
-            params![name],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
-        );
-        let (active_tab, miller_mode) = match settings {
-            Ok(value) => value,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(error) => return Err(db_error(error)),
-        };
-
-        let mut stmt = conn.prepare(
-            "SELECT left_path,right_path,focus_right,pinned
-             FROM workspace_tabs WHERE workspace_name=?1 ORDER BY position"
-        ).map_err(db_error)?;
-        let rows = stmt.query_map(params![name], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
-        }).map_err(db_error)?;
-
-        let mut tabs = Vec::new();
-        for row in rows {
-            let (left, right, focus_right, pinned) = row.map_err(db_error)?;
-            let Ok(mut tab) = Tab::new(&left) else { continue; };
-            if let Some(right) = right {
-                // If right pane no longer exists, keep the left pane usable.
-                tab.right = Pane::new(&right).ok();
+        let settings = conn.query_row("SELECT active_tab,miller_mode FROM workspaces WHERE name=?1",params![name],
+            |r|Ok((r.get::<_,i64>(0)?,r.get::<_,bool>(1)?))).optional().map_err(db_error)?;
+        let Some((old_active,miller)) = settings else { return Ok(None); };
+        let layout = conn.query_row("SELECT tree,active_group FROM workspace_layout WHERE workspace_name=?1",params![name],
+            |r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?))).optional().map_err(db_error)?;
+        let mut stmt = conn.prepare("SELECT group_id,position,left_path,right_path,pinned FROM workspace_tabs
+            WHERE workspace_name=?1 ORDER BY group_id,position LIMIT 101").map_err(db_error)?;
+        let rows = stmt.query_map(params![name], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?)))
+            .map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+        if rows.len() > MAX_TABS { return Ok(None); }
+        if let Some((tree,active)) = &layout {
+            let parsed = Node::decode(tree);
+            let mut groups = Vec::new();
+            let mut group_stmt = conn.prepare("SELECT group_id,active_tab FROM workspace_groups WHERE workspace_name=?1 ORDER BY group_id LIMIT 5").map_err(db_error)?;
+            let saved = group_stmt.query_map(params![name],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))
+                .map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+            let mut saved_ids = Vec::new();
+            for (id,active_tab) in &saved {
+                if *id < 0 { continue; } saved_ids.push(GroupId(*id as u64));
+                let mut tabs = Vec::new(); let mut selected = 0;
+                for (_,position,path,_,pin) in rows.iter().filter(|row|row.0 == *id) {
+                    let Ok(mut tab) = Tab::new(path) else { continue; }; tab.pinned = *pin;
+                    if *position <= *active_tab { selected = tabs.len(); } tabs.push(tab);
+                }
+                if !tabs.is_empty() { groups.push(Group { id: GroupId(*id as u64), tabs, active_tab: selected }); }
             }
-            tab.focus_right = focus_right && tab.right.is_some();
-            tab.pinned = pinned;
-            tabs.push(tab);
+            if let Some(root) = parsed {
+                // Validate the original topology before pruning missing directories.
+                let mut leaves = Vec::new();
+                fn collect(n: &Node, ids: &mut Vec<GroupId>) { match n { Node::Leaf(id)=>ids.push(*id),Node::Split {first,second,..}=>{collect(first,ids);collect(second,ids);} } }
+                collect(&root,&mut leaves);
+                let valid = saved.len() <= MAX_GROUPS && leaves.len() == saved_ids.len()
+                    && saved_ids.iter().all(|id|leaves.iter().filter(|leaf|*leaf == id).count()==1)
+                    && rows.iter().all(|row|saved.iter().any(|g|g.0 == row.0));
+                if valid {
+                    if groups.is_empty() { return Ok(None); }
+                    let ids: Vec<_> = groups.iter().map(|g|g.id).collect();
+                    if let Some(root) = root.retain(&ids) {
+                        let active = GroupId((*active).max(0) as u64);
+                        let active = if ids.contains(&active) { active } else { ids[0] };
+                        if let Ok(w) = Workspace::from_parts(groups,root,active) { return Ok(Some((w,miller))); }
+                    }
+                }
+            }
         }
-
-        if tabs.is_empty() { return Ok(None); }
-        // If a tab disappeared, use the nearest still valid index.
-        let index = usize::try_from(active_tab).unwrap_or_default().min(tabs.len() - 1);
-        Ok(Some((Browser { tabs, active_tab: index }, miller_mode)))
+        // Legacy saves and damaged layouts open every accessible tab in one group.
+        let mut tabs = Vec::new(); let mut selected = 0; let mut right_paths = Vec::new(); let mut right_active = None;
+        for (_,position,left,right,pin) in &rows {
+            if let Ok(mut tab) = Tab::new(left) {
+                tab.pinned = *pin; if *position <= old_active { selected = tabs.len(); } tabs.push(tab);
+            }
+            if layout.is_none() {
+                if let Some(path) = right {
+                    if Path::new(path).is_dir() {
+                        if *position == old_active { right_active = Some(path.clone()); }
+                        if !right_paths.contains(path) { right_paths.push(path.clone()); }
+                    }
+                }
+            }
+        }
+        if tabs.is_empty() && right_paths.is_empty() { return Ok(None); }
+        let mut groups = Vec::new();
+        if !tabs.is_empty() { groups.push(Group { id: GroupId(1), tabs, active_tab: selected }); }
+        if !right_paths.is_empty() {
+            let active_tab = right_active.as_ref().and_then(|path|right_paths.iter().position(|p|p==path)).unwrap_or(0);
+            let budget = MAX_TABS - groups.iter().map(|g|g.tabs.len()).sum::<usize>();
+            let tabs: Vec<_> = right_paths.iter().take(budget).filter_map(|path|Tab::new(path).ok()).collect();
+            if !tabs.is_empty() { let active_tab=active_tab.min(tabs.len()-1); groups.push(Group {id:GroupId(2),tabs,active_tab}); }
+        }
+        let root = if groups.len()==2 { Node::Split {axis:crate::panes::Axis::Horizontal,ratio:0.5,first:Box::new(Node::Leaf(groups[0].id)),second:Box::new(Node::Leaf(groups[1].id))} } else { Node::Leaf(groups[0].id) };
+        let active = groups[0].id;
+        Ok(Some((Workspace::from_parts(groups,root,active)?,miller)))
     }
+
 }
 
 #[cfg(test)]
@@ -216,7 +266,7 @@ mod tests {
     fn named_workspaces_can_be_listed_and_deleted() {
         let tmp = tempfile::tempdir().unwrap();
         let store = WorkspaceStore::open(tmp.path().join("ws.sqlite3")).unwrap();
-        let browser = Browser::new(tmp.path()).unwrap();
+        let browser = Workspace::new(tmp.path()).unwrap();
         store.save("Проект Б", &browser, true).unwrap();
         store.save("архив", &browser, false).unwrap();
         assert_eq!(store.list().unwrap(), ["архив", "Проект Б"]);
@@ -233,19 +283,19 @@ mod tests {
         let two = tmp.path().join("two");
         fs::create_dir(&one).unwrap();
         fs::create_dir(&two).unwrap();
-        let mut browser = Browser::new(&one).unwrap();
-        browser.new_tab(&two).unwrap();
-        browser.active_mut().toggle_split();
+        let mut browser = Workspace::new(&one).unwrap();
+        browser.new_tab(browser.active, &two).unwrap();
+        browser.split(browser.active, crate::panes::Edge::Right, None).unwrap();
         browser.active_mut().navigate(&one).unwrap();
 
         let store = WorkspaceStore::open(tmp.path().join("ws.sqlite3")).unwrap();
         store.save("default", &browser, true).unwrap();
         let (restored, miller) = store.load("default").unwrap().unwrap();
         assert!(miller);
-        assert_eq!(restored.tabs.len(), 2);
-        assert_eq!(restored.active_tab, 1);
-        assert_eq!(restored.active().left.path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&two).unwrap()));
-        assert_eq!(restored.active().right.as_ref().unwrap().path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&one).unwrap()));
+        assert_eq!(restored.group(restored.leaves()[0]).unwrap().tabs.len(), 2);
+        assert_eq!(restored.group(restored.leaves()[0]).unwrap().active_tab, 1);
+        assert_eq!(restored.group(restored.leaves()[0]).unwrap().tabs[1].pane.path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&two).unwrap()));
+        assert_eq!(restored.active_pane().path, crate::path_utils::normalize_extended_path(&fs::canonicalize(&one).unwrap()));
     }
 
     #[test]
@@ -257,8 +307,8 @@ mod tests {
         fs::create_dir(&two).unwrap();
         let secret = one.join("private.txt");
         fs::write(&secret, b"SECRET_DOCUMENT_CONTENT").unwrap();
-        let mut browser = Browser::new(&one).unwrap();
-        browser.new_tab(&two).unwrap();
+        let mut browser = Workspace::new(&one).unwrap();
+        browser.new_tab(browser.active, &two).unwrap();
         let path = tmp.path().join("workspaces.sqlite3");
         let store = WorkspaceStore::open(&path).unwrap();
         store.save("default", &browser, false).unwrap();
@@ -266,15 +316,15 @@ mod tests {
         fs::remove_dir_all(&two).unwrap();
         let (loaded, miller) = store.load("default").unwrap().unwrap();
         assert!(!miller);
-        assert_eq!(loaded.tabs.len(), 1);
-        assert_eq!(loaded.active_tab, 0);
+        assert_eq!(loaded.active_group().tabs.len(), 1);
+        assert_eq!(loaded.active_group().active_tab, 0);
     }
 
     #[test]
     fn workspace_missing_or_invalid_name_does_not_affect_existing_save() {
         let tmp = tempfile::tempdir().unwrap();
         let store = WorkspaceStore::open(tmp.path().join("ws.sqlite3")).unwrap();
-        let browser = Browser::new(tmp.path()).unwrap();
+        let browser = Workspace::new(tmp.path()).unwrap();
         assert!(store.load("absent").unwrap().is_none());
         store.save("default", &browser, true).unwrap();
         assert!(store.save("", &browser, false).is_err());

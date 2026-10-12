@@ -1,5 +1,5 @@
 use filemanager_core::{
-    browser::Browser,
+    panes::Workspace,
     interface::{CommandId, Preferences, commands},
     workspace::WorkspaceStore,
 };
@@ -13,23 +13,23 @@ fn pinned_tabs_survive_all_close_routes_and_reorder() {
     for p in [&a, &b, &c] {
         std::fs::create_dir(p).unwrap();
     }
-    let mut browser = Browser::new(&a).unwrap();
-    browser.new_tab(&b).unwrap();
-    browser.new_tab(&c).unwrap();
-    browser.toggle_pin(0);
-    browser.close_tab(0);
-    assert_eq!(browser.tabs.len(), 3);
-    browser.move_tab(0, 2);
-    assert_eq!(browser.active_tab, 1);
-    assert!(browser.tabs[2].pinned);
-    browser.close_other_tabs(1);
-    assert_eq!(browser.tabs.len(), 2);
-    assert_eq!(browser.active_tab, 0);
+    let mut browser = Workspace::new(&a).unwrap();
+    browser.new_tab(browser.active, &b).unwrap();
+    browser.new_tab(browser.active, &c).unwrap();
+    browser.toggle_pin(browser.active, 0);
+    browser.close_tab(browser.active, 0);
+    assert_eq!(browser.active_group().tabs.len(), 3);
+    browser.move_tab_within(browser.active, 0, 2);
+    assert_eq!(browser.active_group().active_tab, 1);
+    assert!(browser.active_group().tabs[2].pinned);
+    browser.close_other_tabs(browser.active, 1);
+    assert_eq!(browser.active_group().tabs.len(), 2);
+    assert_eq!(browser.active_group().active_tab, 0);
     assert_eq!(browser.active().title, "c");
-    assert!(browser.tabs[1].pinned);
-    browser.toggle_pin(1);
-    browser.close_tab(1);
-    assert_eq!(browser.tabs.len(), 1);
+    assert!(browser.active_group().tabs[1].pinned);
+    browser.toggle_pin(browser.active, 1);
+    browser.close_tab(browser.active, 1);
+    assert_eq!(browser.active_group().tabs.len(), 1);
 }
 #[test]
 fn workspace_migrates_legacy_and_roundtrips_pin() {
@@ -37,12 +37,12 @@ fn workspace_migrates_legacy_and_roundtrips_pin() {
     let db = dir.path().join("ws.sqlite3");
     rusqlite::Connection::open(&db).unwrap().execute_batch("CREATE TABLE workspace_tabs (workspace_name TEXT NOT NULL,position INTEGER NOT NULL,left_path TEXT NOT NULL,right_path TEXT,focus_right INTEGER NOT NULL,PRIMARY KEY(workspace_name,position));").unwrap();
     let store = WorkspaceStore::open(&db).unwrap();
-    let mut browser = Browser::new(dir.path()).unwrap();
+    let mut browser = Workspace::new(dir.path()).unwrap();
     store.save("old", &browser, false).unwrap();
-    assert!(!store.load("old").unwrap().unwrap().0.tabs[0].pinned);
-    browser.toggle_pin(0);
+    assert!(!store.load("old").unwrap().unwrap().0.active_group().tabs[0].pinned);
+    browser.toggle_pin(browser.active, 0);
     store.save("new", &browser, true).unwrap();
-    assert!(store.load("new").unwrap().unwrap().0.tabs[0].pinned);
+    assert!(store.load("new").unwrap().unwrap().0.active_group().tabs[0].pinned);
     WorkspaceStore::open(&db).unwrap(); // migration is repeatable
 }
 #[test]
