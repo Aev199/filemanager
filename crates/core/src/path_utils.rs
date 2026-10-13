@@ -47,6 +47,25 @@ pub fn is_network_path(path: &Path) -> bool {
     }
 }
 
+/// The program's folder in the user profile, `%LOCALAPPDATA%\Papka`.
+pub fn app_data_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    app_data_dir_in(&base)
+}
+
+/// Settings saved under the earlier name `Filemanager` move to `Papka` on
+/// first use. While an older copy keeps that folder open, it stays in use.
+fn app_data_dir_in(base: &Path) -> PathBuf {
+    let dir = base.join("Papka");
+    let old = base.join("Filemanager");
+    if !dir.exists() && old.is_dir() && fs::rename(&old, &dir).is_err() && !dir.exists() {
+        return old;
+    }
+    dir
+}
+
 /// Whether deleting here can go to the Windows Recycle Bin. Network shares
 /// and removable drives have none: Explorer deletes there permanently after
 /// asking, and so does the program.
@@ -174,6 +193,18 @@ pub(crate) fn same_place(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settings_move_from_the_old_name() {
+        let base = tempfile::tempdir().unwrap();
+        assert_eq!(app_data_dir_in(base.path()), base.path().join("Papka"));
+        fs::create_dir(base.path().join("Filemanager")).unwrap();
+        fs::write(base.path().join("Filemanager/workspaces.sqlite3"), b"x").unwrap();
+        let dir = app_data_dir_in(base.path());
+        assert_eq!(dir, base.path().join("Papka"));
+        assert!(dir.join("workspaces.sqlite3").exists());
+        assert!(!base.path().join("Filemanager").exists());
+        assert_eq!(app_data_dir_in(base.path()), dir);
+    }
     #[test]
     fn network_folders_have_no_recycle_bin() {
         let temp = tempfile::tempdir().unwrap();

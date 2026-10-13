@@ -27,7 +27,7 @@ fn execute_audited(plan: Plan) -> io::Result<filemanager_core::operations::Recei
 }
 
 fn usage() {
-    eprintln!("Filemanager CLI (metadata only)
+    eprintln!("Papka CLI (metadata only)
   fmctl history FILE
   fmctl comment EVENT_ID AUTHOR COMMENT
   fmctl watch FOLDER

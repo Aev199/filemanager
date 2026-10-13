@@ -18,6 +18,8 @@ pub const SELECTED_BORDER: u32 = 0x3D6BD8;
 pub const TRAIL: u32 = 0x24456B;
 pub const ACCENT: u32 = 0x5E8BFF;
 pub const ACCENT_SOFT: u32 = 0x1D2A47;
+/// Frame of the active pane: visible, but quieter than the accent.
+pub const ACTIVE_PANE: u32 = 0x34497A;
 
 pub const TEXT: u32 = 0xDEDEE2;
 pub const TEXT_MUTED: u32 = 0x9C9CA3;
@@ -56,6 +58,7 @@ pub fn resolve(light: bool, color: u32) -> u32 {
             TRAIL => 0xCFDFF2,
             ACCENT => 0x285DC7,
             ACCENT_SOFT => 0xE3EBFC,
+            ACTIVE_PANE => 0x9DB5E4,
             TEXT => 0x202631,
             TEXT_MUTED => 0x505B6D,
             TEXT_DIM => 0x626D80,

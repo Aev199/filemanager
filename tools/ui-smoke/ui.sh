@@ -10,7 +10,7 @@ set -u
 D=$1; OUT=$2; shift 2
 export DISPLAY=:$D
 mkdir -p "$OUT"
-read CX CY CW CH < <(xwininfo -name Filemanager | awk '/Absolute upper-left X/{x=$4}/Absolute upper-left Y/{y=$4}/Width/{w=$2}/Height/{h=$2}END{print x,y,w,h}')
+read CX CY CW CH < <(xwininfo -name Papka | awk '/Absolute upper-left X/{x=$4}/Absolute upper-left Y/{y=$4}/Width/{w=$2}/Height/{h=$2}END{print x,y,w,h}')
 OX=$((CX-1)); OY=$((CY-20)); WW=$((CW+2)); WH=$((CH+30))
 while [ $# -gt 0 ]; do
   case $1 in

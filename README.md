@@ -223,7 +223,7 @@ cargo test -p filemanager-core
 cargo run -p filemanager-desktop
 ```
 
-Если Rust на компьютере устанавливать нельзя, добавлен **ручной** GitHub Actions workflow `.github/workflows/windows-portable.yml`. Он запускается только через **Actions → Windows portable EXE (manual) → Run workflow** для этой ветки. При успешном прохождении тестов и сборки появится ZIP-артефакт `Filemanager-Windows-x64`, внутри `Filemanager-win64.zip` и исполняемый `Filemanager.exe`. **Автоматических сборок по push нет**, чтобы не тратить лимит бесплатного GitHub. Предыдущий запуск №2 завершился успешно. После текущей доработки потребуется **один новый ручной запуск**, не после каждого коммита.
+Если Rust на компьютере устанавливать нельзя, добавлен **ручной** GitHub Actions workflow `.github/workflows/windows-portable.yml`. Он запускается только через **Actions → Windows portable EXE (manual) → Run workflow** для этой ветки. При успешном прохождении тестов и сборки появится ZIP-артефакт `Papka-Windows-x64`, внутри `Papka-win64.zip` и исполняемый `Papka.exe`. **Автоматических сборок по push нет**, чтобы не тратить лимит бесплатного GitHub. Предыдущий запуск №2 завершился успешно. После текущей доработки потребуется **один новый ручной запуск**, не после каждого коммита.
 
 ## Дополнительная работа после первой успешной сборки
 
@@ -315,7 +315,7 @@ cargo run -p filemanager-desktop
 - **Предпросмотр** в панели сведений: изображения напрямую, PDF, документы
   Office и видео — миниатюрой Windows (та же, что в Проводнике; нужен
   установленный обработчик формата). Миниатюры кэшируются в
-  `%LOCALAPPDATA%\Filemanager\thumbnails`.
+  `%LOCALAPPDATA%\Papka\thumbnails`.
 - **История изменений.** «Следить за папкой» в панели сведений; у файла
   видны записи истории, к записи можно добавить автора и комментарий.
   Хранятся только метаданные, копий файлов нет.
@@ -340,8 +340,9 @@ cargo run -p filemanager-desktop
 | `Ctrl+H`, `Ctrl+B`, `Ctrl+I` | скрытые файлы, боковая панель, панель сведений |
 | `F5`, `Esc` | обновить, закрыть меню / диалог / поиск |
 
-Данные приложения: `%LOCALAPPDATA%\Filemanager\` (`native-history.sqlite3`,
+Данные приложения: `%LOCALAPPDATA%\Papka\` (`native-history.sqlite3`,
 `workspaces.sqlite3`, `operation-queue.sqlite3`, `file-index.sqlite3`).
+При первом запуске Papka переносит сюда прежнюю папку `Filemanager`.
 
 ## Комментарии, поиск и другие операции до появления GUI
 

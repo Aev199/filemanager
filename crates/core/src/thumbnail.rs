@@ -58,10 +58,7 @@ pub(crate) fn prune_cache(cache: &Path, keep: &Path) -> io::Result<()> {
 }
 
 pub fn cache_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("Filemanager").join("thumbnails")
+    crate::path_utils::app_data_dir().join("thumbnails")
 }
 
 /// Cache file for `path` at its current size and modification time, so

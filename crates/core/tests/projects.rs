@@ -7,10 +7,25 @@ fn real(path: impl AsRef<Path>) -> PathBuf { Workspace::new(path).unwrap().activ
 fn folders(root: &Path, names: &[&str]) { for n in names { std::fs::create_dir(root.join(n)).unwrap(); } }
 
 #[test]
-fn closing_pin_is_allowed() {
+fn pinned_tabs_cannot_be_closed() {
     let dir=tempfile::tempdir().unwrap(); let mut w=Workspace::new(dir.path()).unwrap();
     w.new_tab(w.active,dir.path()).unwrap(); w.toggle_pin(w.active,1); w.close_tab(w.active,1);
+    assert_eq!(w.tab_count(),2);
+    w.toggle_pin(w.active,1); w.close_tab(w.active,1);
     assert_eq!(w.tab_count(),1);
+}
+#[test]
+fn closing_a_pane_keeps_its_pinned_tabs() {
+    let dir=tempfile::tempdir().unwrap(); folders(dir.path(),&["kept","dropped"]);
+    let mut w=Workspace::new(dir.path()).unwrap(); let left=w.active;
+    let right=w.split(left,Edge::Right,None).unwrap();
+    w.new_tab(right,dir.path().join("kept")).unwrap(); w.new_tab(right,dir.path().join("dropped")).unwrap();
+    let kept=w.group(right).unwrap().tabs.iter().position(|t|t.pane.path==real(dir.path().join("kept"))).unwrap();
+    w.toggle_pin(right,kept);
+    w.close_group(right);
+    let tabs=&w.group(left).unwrap().tabs;
+    assert_eq!(tabs.len(),2);
+    assert!(tabs[1].pinned && tabs[1].pane.path==real(dir.path().join("kept")));
 }
 #[test]
 fn anchor_and_last_path_roundtrip() {

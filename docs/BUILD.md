@@ -12,9 +12,9 @@ After this workflow exists on the repository's default branch:
 2. Pick **Windows portable EXE (manual)**.
 3. Click **Run workflow**, choose the branch, and confirm.
 4. When green, open the run, under **Artifacts** download
-   `Filemanager-Windows-x64`.
-5. Unzip the artifact ZIP, then unzip `Filemanager-win64.zip`.
-6. Run `Filemanager.exe`. Windows may show an unsigned-app warning.
+   `Papka-Windows-x64`.
+5. Unzip the artifact ZIP, then unzip `Papka-win64.zip`.
+6. Run `Papka.exe`. Windows may show an unsigned-app warning.
 
 If the build is red, open its failed step logs. Do not test file operations
 against irreplaceable files. EXE remains an untested development build until
@@ -24,12 +24,12 @@ a Windows test verifies navigation, safe copy and Recycle Bin behavior.
 
 Ручной workflow дополнительно пытается **запустить собранный EXE** в
 одноразовом Windows runner и сохранить снимок окна в отдельный
-`Filemanager-UI-Screenshot` artifact (`Filemanager-UI.png`).
+`Papka-UI-Screenshot` artifact (`Papka-UI.png`).
 Это реальный снимок запущенного приложения, **не нарисованный макет**.
 
 На некоторых GitHub-hosted runner графический сеанс недоступен:
 тогда снимок не появится и в логе будет предупреждение, но сборка
-`Filemanager-Windows-x64` останется доступной. Успешный снимок
+`Papka-Windows-x64` останется доступной. Успешный снимок
 не доказывает работоспособность файловых операций — нужен отдельный
 безопасный smoke-test из `SMOKE_TEST.md`.
 

@@ -41,10 +41,7 @@ fn action_name(action: Action) -> &'static str {
 
 impl OperationJournal {
     pub fn default_path() -> PathBuf {
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .unwrap_or_else(std::env::temp_dir);
-        base.join("Filemanager").join("operation-queue.sqlite3")
+        crate::path_utils::app_data_dir().join("operation-queue.sqlite3")
     }
 
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -101,7 +98,7 @@ impl OperationJournal {
             if io::Error::from(err).kind() == io::ErrorKind::WouldBlock {
                 io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    "Another Filemanager window is modifying files; retry after it finishes",
+                    "Another Papka window is modifying files; retry after it finishes",
                 )
             } else {
                 io::Error::other("Cannot lock operation journal; filesystem action refused")

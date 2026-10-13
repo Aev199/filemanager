@@ -58,10 +58,7 @@ pub struct PersistentIndex { database: PathBuf }
 
 impl PersistentIndex {
     pub fn default_path() -> PathBuf {
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .unwrap_or_else(std::env::temp_dir);
-        base.join("Filemanager").join("file-index.sqlite3")
+        crate::path_utils::app_data_dir().join("file-index.sqlite3")
     }
 
     pub fn open(database: impl AsRef<Path>) -> io::Result<Self> {
@@ -137,7 +134,7 @@ impl PersistentIndex {
                 continue;
             };
             // Do not index the index's own files if the monitored root
-            // happens to contain LOCALAPPDATA/Filemanager.
+            // happens to contain LOCALAPPDATA/Papka.
             if index_files.iter().any(|file| entry.path() == file.as_path()) {
                 continue;
             }

@@ -5,7 +5,7 @@ use filemanager_core::{
 };
 
 #[test]
-fn pinned_tabs_survive_close_others_but_allow_explicit_close() {
+fn pinned_tabs_survive_close_others_and_explicit_close() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a");
     let b = dir.path().join("b");
@@ -26,6 +26,10 @@ fn pinned_tabs_survive_close_others_but_allow_explicit_close() {
     assert_eq!(browser.active_group().active_tab, 0);
     assert_eq!(browser.active().title, "c");
     assert!(browser.active_group().tabs[1].pinned);
+    // A pinned tab does not close until it is unpinned.
+    browser.close_tab(browser.active, 1);
+    assert_eq!(browser.active_group().tabs.len(), 2);
+    browser.toggle_pin(browser.active, 1);
     browser.close_tab(browser.active, 1);
     assert_eq!(browser.active_group().tabs.len(), 1);
 }

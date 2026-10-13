@@ -23,7 +23,7 @@ fn copy_creates_audited_sqlite_record_without_old_versions() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(fs::read(&dst).unwrap(), b"temporary test data");
 
-    let database = sandbox.path().join("Filemanager").join("operation-queue.sqlite3");
+    let database = sandbox.path().join("Papka").join("operation-queue.sqlite3");
     let journal = filemanager_core::operation_journal::OperationJournal::open(&database).unwrap();
     assert!(journal.unresolved(30).unwrap().is_empty());
     let sqlite = fs::read(database).unwrap();
@@ -34,7 +34,7 @@ fn copy_creates_audited_sqlite_record_without_old_versions() {
 #[test]
 fn corrupted_journal_refuses_cli_mutation_without_touching_files() {
     let sandbox = tempfile::tempdir().unwrap();
-    let settings = sandbox.path().join("Filemanager");
+    let settings = sandbox.path().join("Papka");
     fs::create_dir(&settings).unwrap();
     fs::write(settings.join("operation-queue.sqlite3"), b"corrupt SQLite").unwrap();
     let src = sandbox.path().join("source.txt");

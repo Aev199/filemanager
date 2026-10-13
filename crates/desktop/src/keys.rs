@@ -354,6 +354,12 @@ impl Explorer {
     }
 
     pub(crate) fn close_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.browser.active_group().tabs.get(index).is_some_and(|tab|tab.pinned) {
+            self.status = "Закреплённая вкладка не закрывается — сначала открепите её".into();
+            self.context_menu = None;
+            cx.notify();
+            return;
+        }
         self.browser.close_tab(self.browser.active, index);
         self.prune_group_state();
         self.selected = None;
@@ -418,6 +424,12 @@ impl Explorer {
     // Action handlers.
 
     pub(crate) fn key_back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) { self.go_back(false, cx); }
+    pub(crate) fn mouse_history(&mut self, event: &gpui::MouseDownEvent, forward: bool, cx: &mut Context<Self>) {
+        if self.interface_modal() { return; }
+        let under = self.pane_bounds.iter().find(|(_, bounds)| bounds.contains(&event.position)).map(|(group, _)| *group);
+        if let Some(group) = under.filter(|group| *group != self.browser.active) { self.focus_group(group, cx); }
+        self.go_back(forward, cx);
+    }
     pub(crate) fn key_forward(&mut self, _: &Forward, _: &mut Window, cx: &mut Context<Self>) { self.go_back(true, cx); }
     pub(crate) fn key_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) { self.go_up(cx); }
     pub(crate) fn key_new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) { self.add_tab(cx); }

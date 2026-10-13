@@ -29,7 +29,7 @@ const PHRASES: &[(&str, &str)] = &[
     ("Cannot operate on a filesystem root", "Нельзя выполнять операции с корнем диска"),
     ("Cannot stage a filesystem root", "Корень диска нельзя отложить для переноса"),
     ("Folder has more than 100,000 items; narrow the operation", "В папке больше 100 000 элементов, выберите меньшую часть"),
-    ("Another Filemanager window is modifying files; retry after it finishes", "Другое окно Filemanager изменяет файлы, повторите после завершения"),
+    ("Another Papka window is modifying files; retry after it finishes", "Другое окно Papka изменяет файлы, повторите после завершения"),
     ("No filesystem changes while another executor is active", "Другое окно выполняет операции, изменения отложены"),
     ("Cannot lock operation journal; filesystem action refused", "Журнал операций занят, действие отменено"),
     ("Destination changed or was replaced; undo refused", "Объект изменён после операции, отмена невозможна"),

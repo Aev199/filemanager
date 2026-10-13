@@ -22,10 +22,7 @@ fn db_error(err: rusqlite::Error) -> io::Error {
 
 impl WorkspaceStore {
     pub fn default_path() -> PathBuf {
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-            .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir));
-        base.join("Filemanager").join("workspaces.sqlite3")
+        crate::path_utils::app_data_dir().join("workspaces.sqlite3")
     }
 
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {

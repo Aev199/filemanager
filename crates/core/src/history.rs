@@ -92,9 +92,7 @@ impl Journal {
     }
 
     pub fn default_path() -> PathBuf {
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-            .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir));
-        base.join("Filemanager").join("native-history.sqlite3")
+        crate::path_utils::app_data_dir().join("native-history.sqlite3")
     }
 
     pub(crate) fn is_database_path(&self, path: &Path) -> bool {

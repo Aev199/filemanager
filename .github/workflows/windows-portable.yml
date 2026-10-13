@@ -63,10 +63,10 @@ jobs:
       - name: Package portable executable and checksum
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/filemanager-desktop.exe" "dist/Filemanager.exe"
-          $sha = (Get-FileHash "dist/Filemanager.exe" -Algorithm SHA256).Hash
-          Set-Content -Path "dist/SHA256.txt" -Value "$sha  Filemanager.exe"
-          Compress-Archive -Path "dist/Filemanager.exe", "dist/SHA256.txt" -DestinationPath "Filemanager-win64.zip" -Force
+          Copy-Item "target/x86_64-pc-windows-msvc/release/filemanager-desktop.exe" "dist/Papka.exe"
+          $sha = (Get-FileHash "dist/Papka.exe" -Algorithm SHA256).Hash
+          Set-Content -Path "dist/SHA256.txt" -Value "$sha  Papka.exe"
+          Compress-Archive -Path "dist/Papka.exe", "dist/SHA256.txt" -DestinationPath "Papka-win64.zip" -Force
 
       # Runs only on manually dispatched CI, not on every commit.
       # Some hosted runners do not expose a visible desktop; do not fail
@@ -95,14 +95,14 @@ jobs:
               public static extern bool ShowWindow(IntPtr handle, int command);
           }
           '@
-          $exe = (Resolve-Path "dist/Filemanager.exe").Path
+          $exe = (Resolve-Path "dist/Papka.exe").Path
           $app = Start-Process -FilePath $exe -WorkingDirectory (Resolve-Path "dist").Path -PassThru
           try {
               for ($attempt = 0; $attempt -lt 30; $attempt++) {
                   Start-Sleep -Milliseconds 500
                   $app.Refresh()
                   if ($app.HasExited) {
-                      throw "Filemanager exited before a window could be captured (exit $($app.ExitCode))"
+                      throw "Papka exited before a window could be captured (exit $($app.ExitCode))"
                   }
                   if ($app.MainWindowHandle -ne [IntPtr]::Zero) { break }
               }
@@ -133,7 +133,7 @@ jobs:
                       $graphics.Dispose()
                   }
                   $bitmap.Save(
-                      (Join-Path (Resolve-Path "dist").Path "Filemanager-UI.png"),
+                      (Join-Path (Resolve-Path "dist").Path "Papka-UI.png"),
                       [System.Drawing.Imaging.ImageFormat]::Png
                   )
               } finally {
@@ -149,15 +149,15 @@ jobs:
       - name: Upload native UI screenshot when available
         uses: actions/upload-artifact@v4
         with:
-          name: Filemanager-UI-Screenshot
-          path: dist/Filemanager-UI.png
+          name: Papka-UI-Screenshot
+          path: dist/Papka-UI.png
           retention-days: 7
           if-no-files-found: warn
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Filemanager-Windows-x64
-          path: Filemanager-win64.zip
+          name: Papka-Windows-x64
+          path: Papka-win64.zip
           retention-days: 7
           if-no-files-found: error

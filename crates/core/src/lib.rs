@@ -1,4 +1,4 @@
-//! Native filesystem core for Filemanager. No GUI dependencies.
+//! Native filesystem core for Papka. No GUI dependencies.
 pub mod directory_watch;
 pub mod browser;
 pub mod history;

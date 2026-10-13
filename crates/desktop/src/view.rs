@@ -192,7 +192,7 @@ impl Explorer {
             }));
         for (index,tab) in tabs.iter().enumerate() {
             let active=index==active_index;
-            let closable=tabs.len()>1 || self.browser.groups.len()>1;
+            let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
             let tip=tab.pane.path.display().to_string();
             strip=strip.child(div().id(("tab",index)).group("tab").flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
@@ -258,7 +258,7 @@ impl Explorer {
         let body=self.pane(group,cx);
         div().id(SharedString::from(format!("group-{}",group.0))).size_full().min_w_0().min_h_0()
             .flex().flex_col().overflow_hidden().border_1()
-            .border_color(rgb(if group==self.browser.active {ACCENT} else {BORDER}))
+            .border_color(rgb(if group==self.browser.active {ACTIVE_PANE} else {BORDER}))
             .on_mouse_down(MouseButton::Left,cx.listener(move |this,_,_,cx|this.focus_group(group,cx)))
             .child(tabs).child(navigation).child(div().flex_1().min_h_0().child(body)).into_any_element()
     }
@@ -272,7 +272,11 @@ impl Explorer {
                 let one=self.layout_view(first,a,if horizontal {width*ratio} else {width},if horizontal {height} else {height*ratio},cx);
                 let two=self.layout_view(second,b,if horizontal {width*(1.-ratio)} else {width},if horizontal {height} else {height*(1.-ratio)},cx);
                 let key=SharedString::from(format!("split-{}-{:?}",self.browser.signature(),path));
-                let group=if horizontal {h_resizable(key)} else {v_resizable(key)};
+                // Each pane draws its own frame. The divider's built-in line
+                // would cover the left or top edge of the active pane's frame,
+                // so it paints nothing; dragging still works.
+                let group=if horizontal {h_resizable(key)} else {v_resizable(key)}
+                    .with_handle_appearance(std::rc::Rc::new(|_,_,_| Some(div().into_any_element())));
                 let available=if horizontal {width} else {height};
                 group.child(resizable_panel().size(px(available*ratio)).size_range(px(240.)..px(10000.)).child(one))
                     .child(resizable_panel().size(px(available*(1.-ratio))).size_range(px(240.)..px(10000.)).child(two))
@@ -488,7 +492,7 @@ impl Explorer {
                 .child(div().flex_1().min_w_0().h_full().flex().items_center().truncate().text_size(px(13.)).text_color(rgb(TEXT_MUTED))
                     .window_control_area(gpui::WindowControlArea::Drag)
                     .on_mouse_down(MouseButton::Left,|_,window,_| {if cfg!(any(target_os="linux",target_os="macos")) {window.start_window_move();}})
-                    .child("Filemanager"))
+                    .child("Papka"))
                 .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Скрыть боковую панель (Ctrl+B)", false, true)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_sidebar = false;
@@ -1587,7 +1591,7 @@ impl Explorer {
                 let Some(tabs) = self.browser.group(group).map(|g| &g.tabs) else { return div().into_any_element(); };
                 if index >= tabs.len() { return div().into_any_element(); }
                 let many = tabs.len() > 1;
-                let closable = many || self.browser.groups.len() > 1;
+                let closable = (many || self.browser.groups.len() > 1) && !tabs[index].pinned;
                 list = list
                     .child(Self::menu_item("m-tab-new", "fm/plus.svg", "Новая вкладка", "Ctrl+T", false, true)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -1919,6 +1923,9 @@ impl Render for Explorer {
                 cx.notify();
             }))
             .on_mouse_up_out(MouseButton::Right,cx.listener(|this,_,_,cx| {this.right_drag=None;cx.notify();}))
+            // Mouse Back/Forward buttons, as in Explorer: they act on the pane under the cursor.
+            .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Back),cx.listener(|this,event: &MouseDownEvent,_,cx| this.mouse_history(event,false,cx)))
+            .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Forward),cx.listener(|this,event: &MouseDownEvent,_,cx| this.mouse_history(event,true,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenPalette,window,cx|this.open_palette(window,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenSettings,window,cx|this.open_settings(window,cx)))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_back(this,event,window,cx); } }))

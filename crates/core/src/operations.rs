@@ -180,7 +180,7 @@ impl OperationQueue {
         // Do not turn a successful filesystem Undo into an operation failure
         // if only the final SQLite status update fails.
         if let Err(error) = journal.finish_undo(id, &result) {
-            eprintln!("Filemanager: could not persist Undo result: {error}");
+            eprintln!("Papka: could not persist Undo result: {error}");
         }
         result
     }
@@ -224,7 +224,7 @@ impl OperationQueue {
                             // A success has already changed disk; never
                             // requeue it as a failure. The unfinished
                             // journal record will be flagged on restart.
-                            eprintln!("Filemanager: operation audit write failed: {error}");
+                            eprintln!("Papka: operation audit write failed: {error}");
                         }
                         result
                     }

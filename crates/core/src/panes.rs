@@ -167,7 +167,8 @@ impl Workspace {
     }
     pub fn close_tab(&mut self, id: GroupId, index: usize) {
         let Some(g) = self.group(id) else { return; };
-        if index >= g.tabs.len() || (g.tabs.len() == 1 && self.groups.len() == 1) { return; }
+        // A pinned tab stays until it is unpinned: that is what pinning is for.
+        if index >= g.tabs.len() || g.tabs[index].pinned || (g.tabs.len() == 1 && self.groups.len() == 1) { return; }
         let tab = self.remove_tab(id,index); self.remember(id,&tab);
         if self.group(id).unwrap().tabs.is_empty() { self.close_group(id); } self.check();
     }
@@ -225,6 +226,9 @@ impl Workspace {
         if self.groups.len() <= 1 || self.group(id).is_none() { return; }
         let leaves = self.leaves(); let pos = leaves.iter().position(|leaf|*leaf == id).unwrap();
         let next = if pos > 0 { leaves[pos-1] } else { leaves[pos+1] };
+        // Closing a pane keeps its pinned tabs: they move to the neighbour.
+        let pinned: Vec<Tab> = self.group(id).unwrap().tabs.iter().filter(|t|t.pinned).cloned().collect();
+        self.group_mut(next).unwrap().tabs.extend(pinned);
         self.groups.retain(|g|g.id != id); self.recent.retain(|old| *old != id);
         let ids: Vec<_> = self.groups.iter().map(|g|g.id).collect(); self.root = self.root.retain(&ids).unwrap();
         if self.active == id { self.focus(next); } self.check();
