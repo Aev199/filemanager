@@ -1,4 +1,8 @@
 use filemanager_core::{panes::Workspace, workspace::WorkspaceStore, projects::ProjectSession};
+use std::path::{Path, PathBuf};
+
+/// A folder as the program stores it (Windows long names, not `RUNNER~1`).
+fn real(path: impl AsRef<Path>) -> PathBuf { Workspace::new(path).unwrap().active_pane().path.clone() }
 
 #[test]
 fn closing_pin_is_allowed() {
@@ -10,15 +14,16 @@ fn closing_pin_is_allowed() {
 fn anchor_and_last_path_roundtrip() {
     let dir=tempfile::tempdir().unwrap(); let a=dir.path().join("a"); let b=dir.path().join("b");
     std::fs::create_dir(&a).unwrap(); std::fs::create_dir(&b).unwrap();
+    let (a_real,b_real)=(real(&a),real(&b));
     let store=WorkspaceStore::open(dir.path().join("db")).unwrap();
     let mut w=Workspace::new(&a).unwrap(); w.toggle_pin(w.active,0); w.active_mut().navigate(&b).unwrap();
     w.new_tab(w.active,&b).unwrap(); store.save("project",&w).unwrap();
     let restored=store.load_project("project").unwrap().unwrap();
-    assert_eq!(restored.active_group().tabs[0].pane.path,a);
-    assert_eq!(restored.active_group().tabs[1].pane.path,b);
-    assert_eq!(store.load("project").unwrap().unwrap().active_group().tabs[0].pane.path,b);
+    assert_eq!(restored.active_group().tabs[0].pane.path,a_real);
+    assert_eq!(restored.active_group().tabs[1].pane.path,b_real);
+    assert_eq!(store.load("project").unwrap().unwrap().active_group().tabs[0].pane.path,b_real);
     std::fs::remove_dir(&a).unwrap();
-    assert_eq!(store.load_project("project").unwrap().unwrap().active_group().tabs[0].pane.path,a);
+    assert_eq!(store.load_project("project").unwrap().unwrap().active_group().tabs[0].pane.path,a_real);
 }
 #[test]
 fn favorites_order_and_deduplication() {
@@ -37,10 +42,10 @@ fn switching_and_restart_preserve_return_window() {
     for n in ["a","b"] {store.save(n,&Workspace::new(dir.path().join(n)).unwrap()).unwrap();}
     let mut session=ProjectSession::default(); session.open(&store,"a",&mut w).unwrap();
     w.active_mut().navigate(dir.path().join("changed")).unwrap(); session.open(&store,"b",&mut w).unwrap();
-    assert_eq!(store.load_project("a").unwrap().unwrap().active_pane().path,dir.path().join("changed"));
+    assert_eq!(store.load_project("a").unwrap().unwrap().active_pane().path,real(dir.path().join("changed")));
     let (mut w,mut session)=ProjectSession::restore(&store).unwrap().unwrap();
     assert_eq!(session.name.as_deref(),Some("b")); session.close(&store,&mut w).unwrap();
-    assert_eq!(w.active_pane().path,dir.path().join("ordinary")); assert!(session.name.is_none());
+    assert_eq!(w.active_pane().path,real(dir.path().join("ordinary"))); assert!(session.name.is_none());
 }
 #[test]
 fn failed_save_leaves_current_project_and_return_point_intact() {
@@ -66,7 +71,7 @@ fn legacy_reserved_bookmark_is_migrated_without_losing_tabs() {
     rusqlite::Connection::open(&db).unwrap().execute_batch("DROP TABLE project_session;").unwrap();
     let store=WorkspaceStore::open(&db).unwrap();
     ProjectSession::default().checkpoint(&store,&workspace).unwrap();
-    assert_eq!(store.load_project("Восстановленный проект 2").unwrap().unwrap().active_pane().path,dir.path());
+    assert_eq!(store.load_project("Восстановленный проект 2").unwrap().unwrap().active_pane().path,real(dir.path()));
     assert!(ProjectSession::valid_name("__other"));
     assert!(store.load_project("__other").unwrap().is_some());
     assert!(!store.list().unwrap().iter().any(|name|name=="__project_return__"));
