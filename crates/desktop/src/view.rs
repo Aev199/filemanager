@@ -12,7 +12,7 @@ use filemanager_core::sort::SortKey;
 use gpui::{
     anchored, deferred, div, img, rgb_to_hsla, ObjectFit, ease_out_quint, prelude::*, px, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
-    ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Window,
+    ExternalPaths, MouseButton, MouseDownEvent, SharedString, Stateful, Window,
 };
 use gpui_component::input::Input;
 use gpui_component::resizable::{h_resizable, v_resizable, resizable_panel};
@@ -220,21 +220,8 @@ impl Explorer {
                     this.open_menu(event.position,MenuTarget::Tab(group,index),cx);
                 })));
         }
-        // A project lives in this pane: its name leads the tab strip.
-        let project = self.browser.group(group).and_then(|g|g.project.as_ref()).map(|p|p.name.clone());
         // Never wider than its pane: overflowing tabs scroll inside the strip.
         div().h(px(34.)).w_full().flex_none().min_w_0().overflow_hidden().flex().items_center().bg(rgb(WINDOW))
-            .when_some(project, |bar,name| bar.child(div().id(SharedString::from(format!("project-{}",group.0)))
-                .flex_none().max_w(px(180.)).h(px(24.)).ml_1().pl_2().pr_0p5().flex().items_center().gap_1p5()
-                .rounded_md().bg(rgb(ACCENT_SOFT)).text_size(px(12.)).text_color(rgb(TEXT))
-                .tooltip({let name=name.clone(); move |window,cx|Tooltip::new(format!("Проект «{name}» открыт в этой панели")).build(window,cx)})
-                .child(small_icon("fm/layers.svg",ACCENT))
-                .child(div().min_w_0().truncate().child(name))
-                .child(div().id(SharedString::from(format!("project-close-{}",group.0))).flex_none().size(px(20.)).rounded_sm()
-                    .flex().items_center().justify_center().hover(|style|style.bg(rgb(PRESSED)))
-                    .child(small_icon("fm/x.svg",TEXT_MUTED))
-                    .tooltip(|window,cx|Tooltip::new("Закрыть проект — вернуть прежние вкладки").build(window,cx))
-                    .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.close_project(group,cx);})))))
             .child(strip)
             .child(icon_button("new-tab","fm/plus.svg","Новая вкладка (Ctrl+T)",false,true)
                 .on_click(cx.listener(move |this,_,_,cx| {this.focus_group(group,cx);this.add_tab(cx);})))
@@ -297,7 +284,10 @@ impl Explorer {
             .child(div().flex_1().min_w_0().h_full().px_3().flex().items_center()
                 .window_control_area(gpui::WindowControlArea::Drag)
                 .on_mouse_down(MouseButton::Left,|_,window,_| {if cfg!(any(target_os="linux",target_os="macos")) {window.start_window_move();}})
-            )
+                .child(div().truncate().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                    .child(self.project.name.clone().unwrap_or_default())))
+            .when(self.project.name.is_some(), |bar|bar.child(icon_button("close-project","fm/x.svg","Закрыть проект",false,true)
+                .on_click(cx.listener(|this,_,_,cx|this.close_project(cx)))))
             .child(icon_button("toggle-inspector","fm/panel-right.svg","Панель сведений (Ctrl+I)",self.show_inspector,true)
                 .on_click(cx.listener(|this,_,_,cx| {this.show_inspector=!this.show_inspector;cx.notify();})))
             .when(controls, |bar|bar.child(icon_button("window-minimize","fm/window-minimize.svg","Свернуть",false,true)
@@ -459,7 +449,7 @@ impl Explorer {
             side = side.child(
                 div().id(("workspace", index)).group("workspace").mx_2().h(px(28.)).px_2().flex().items_center()
                     .gap_2().rounded_md().cursor_pointer().text_color(rgb(TEXT_MUTED))
-                    .when(self.browser.project_group(name).is_some(),|row|row.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
+                    .when(self.project.name.as_ref()==Some(name),|row|row.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .child(icon("fm/layers.svg", TEXT_MUTED))
                     .child(div().flex_1().min_w_0().truncate().child(name.clone()))
@@ -576,10 +566,7 @@ impl Explorer {
         if !self.miller(side) {
             return vec![path];
         }
-        // A marquee reaching a folder must not open its preview: the columns
-        // would shift under the gesture and cancel it.
-        let marquee_here = self.marquee.as_ref().is_some_and(|m| m.side == side);
-        let preview = (side == self.active_side() && !marquee_here).then(|| self.selected.clone()).flatten()
+        let preview = (side == self.active_side()).then(|| self.selected.clone()).flatten()
             .filter(|selected| {
                 selected.parent() == Some(path.as_path())
                     && self.directory_cache.get(&path).is_some_and(|listing| {
@@ -1743,7 +1730,7 @@ impl Explorer {
         } else if self.saving_workspace {
             ("Создать проект", div().flex().flex_col().gap_2()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("Вкладки активной панели: {}", self.browser.active_group().tabs.len())))
+                    .child(format!("Вкладок: {}", self.browser.tab_count())))
                 .child(Input::new(&self.workspace_input))
                 .when_some(self.project_error.clone(), |body,error|body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error)))
                 .into_any_element(), "Сохранить", ButtonKind::Primary)
@@ -1855,22 +1842,10 @@ impl Render for Explorer {
             .on_drag_move::<TabDrag>(cx.listener(|this,event: &gpui::DragMoveEvent<TabDrag>,_,cx| {
                 if !this.pane_bounds.values().any(|bounds|bounds.contains(&event.event.position)) && this.dock_hover.take().is_some() {cx.notify();}
             }))
-            // Leaving the window hands the files to Windows for other programs.
-            .on_drag_move::<FileDragInfo>(cx.listener(|this,event: &gpui::DragMoveEvent<FileDragInfo>,window,cx| {
-                if outside_window(event.event.position, window) {
-                    let paths = event.drag(cx).paths.clone();
-                    this.drag_out(paths, window, cx);
-                }
-            }))
-            .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,window,cx| {
+            .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {
                 // Root runs after rows and columns: they have claimed the target.
                 if let Some(drag) = this.right_drag.as_mut() {
                     if event.pressed_button == Some(MouseButton::Right) {
-                        if drag.active && outside_window(event.position, window) {
-                            let paths = drag.paths.clone();
-                            this.drag_out(paths, window, cx);
-                            return;
-                        }
                         let moved = (event.position.x - drag.start.x).abs() + (event.position.y - drag.start.y).abs();
                         if !drag.active && moved > px(6.) { drag.active = true; }
                         drag.position = event.position;
@@ -1997,9 +1972,4 @@ impl Render for Explorer {
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
         root
     }
-}
-
-fn outside_window(position: Point<Pixels>, window: &Window) -> bool {
-    let size = window.viewport_size();
-    position.x < px(0.) || position.y < px(0.) || position.x >= size.width || position.y >= size.height
 }
