@@ -290,6 +290,32 @@ impl Explorer {
         }
     }
 
+    /// «О программе» under its titlebar button, as in SoilStiffness:
+    /// a click elsewhere or Esc closes it.
+    fn about_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let data = filemanager_core::path_utils::app_data_dir().display().to_string();
+        div().id("about-backdrop").absolute().inset_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.about_open=false;cx.notify();}))
+            .child(div().id("about-panel").absolute().top(px(36.)).right(px(12.)).w(px(340.)).p_4()
+                .flex().flex_col().gap_2().rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG))
+                .shadow_lg().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
+                .child(div().flex().items_center().gap_2()
+                    .child(img("app/icon.png").size(px(28.)))
+                    .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT))
+                        .child(format!("Papka {}", env!("CARGO_PKG_VERSION")))))
+                .child(div().child("Файловый менеджер для проектных папок: колонки и списки, \
+                    панели с вкладками, проекты, журнал изменений файлов без хранения их содержимого."))
+                .child(div().flex().flex_wrap().gap_1()
+                    .child("Автор:")
+                    .child(div().id("about-author").text_color(rgb(ACCENT)).cursor_pointer()
+                        .hover(|style| style.underline())
+                        .child("Евдокимов Александр")
+                        .on_click(|_,_,cx| cx.open_url("https://t.me/aevd19"))))
+                .child(div().text_color(rgb(TEXT_DIM)).child(format!("Настройки и журналы: {data}"))))
+            .into_any_element()
+    }
+
     /// Window strip above the panes: it drags the window and holds the
     /// system buttons; each pane has its own tab strip.
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -302,6 +328,10 @@ impl Explorer {
                 .window_control_area(gpui::WindowControlArea::Drag)
                 .on_mouse_down(MouseButton::Left,|_,window,_| {if cfg!(any(target_os="linux",target_os="macos")) {window.start_window_move();}})
             )
+            .child(icon_button("open-settings","fm/settings.svg","Настройки (Ctrl+,)",self.settings.is_some(),true)
+                .on_click(cx.listener(|this,_,window,cx| {this.about_open=false;this.open_settings(window,cx);})))
+            .child(icon_button("about","fm/help.svg","О программе",self.about_open,true)
+                .on_click(cx.listener(|this,_,_,cx| {this.about_open=!this.about_open;cx.notify();})))
             .child(icon_button("toggle-inspector","fm/panel-right.svg","Панель сведений (Ctrl+I)",self.show_inspector,true)
                 .on_click(cx.listener(|this,_,_,cx| {this.show_inspector=!this.show_inspector;cx.notify();})))
             .when(controls, |bar|bar.child(icon_button("window-minimize","fm/window-minimize.svg","Свернуть",false,true)
@@ -2015,6 +2045,7 @@ impl Render for Explorer {
                 .px_3().py_1().rounded_md().bg(rgb(SELECTED)).border_1().border_color(rgb(SELECTED_BORDER))
                 .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
         }
+        if self.about_open { root=root.child(self.about_panel(cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
         root
     }

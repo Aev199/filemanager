@@ -199,6 +199,8 @@ struct Explorer {
     /// A system drag to another program is running.
     #[cfg_attr(not(windows), allow(dead_code))]
     dragging_out: bool,
+    /// The «О программе» panel under its titlebar button.
+    about_open: bool,
     menu_serial: u64,
     focus_handle: FocusHandle,
     places: Vec<Place>,
@@ -432,7 +434,7 @@ impl Explorer {
             operation_busy: false,
             copy_control: None,
             context_menu: None,
-            right_drag: None, dragging_out: false,
+            right_drag: None, dragging_out: false, about_open: false,
             menu_serial: 0,
             focus_handle,
             places: places::user_places(),

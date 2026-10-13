@@ -7,6 +7,8 @@ use gpui::{AssetSource, Result, SharedString};
 
 const ICONS: &[(&str, &[u8])] = &[
     ("fm/star.svg", include_bytes!("../assets/fm/star.svg")),
+    ("fm/settings.svg", include_bytes!("../assets/fm/settings.svg")),
+    ("fm/help.svg", include_bytes!("../assets/fm/help.svg")),
     ("fm/window-minimize.svg", include_bytes!("../assets/fm/window-minimize.svg")),
     ("fm/window-maximize.svg", include_bytes!("../assets/fm/window-maximize.svg")),
     ("fm/alert.svg", include_bytes!("../assets/fm/alert.svg")),
@@ -57,6 +59,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("fm/usb.svg", include_bytes!("../assets/fm/usb.svg")),
     ("fm/x.svg", include_bytes!("../assets/fm/x.svg")),
     ("fm/check.svg", include_bytes!("../assets/fm/check.svg")),
+    ("app/icon.png", include_bytes!("../assets/app/icon.png")),
 ];
 
 pub struct Assets;
