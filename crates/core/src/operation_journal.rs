@@ -34,6 +34,7 @@ fn action_name(action: Action) -> &'static str {
         Action::Move => "move",
         Action::Rename => "rename",
         Action::Recycle => "recycle",
+        Action::Delete => "delete",
         Action::CreateFolder => "create_folder",
     }
 }

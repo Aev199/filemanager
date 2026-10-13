@@ -40,6 +40,7 @@ const PHRASES: &[(&str, &str)] = &[
     ("Destination parent is not a directory", "Папка назначения недоступна"),
     ("Index limit reached; change rolled back", "Достигнут предел индекса, изменения отменены"),
     ("Too many files to index; choose a smaller folder", "Слишком много файлов для индекса, выберите папку поменьше"),
+    ("This folder has no Recycle Bin; the item was not deleted", "здесь нет Корзины Windows, файл не удалён"),
     ("Access is denied.", "Доступ запрещён."),
     ("Permission denied", "Доступ запрещён"),
     ("No such file or directory", "Файл или папка не найдены"),

@@ -1296,7 +1296,10 @@ impl Explorer {
             _ => {
                 let mut prepared = Vec::new();
                 for path in &paths {
-                    match Plan::prepare(Action::Recycle, path, None) {
+                    // Like Explorer: where there is no Recycle Bin (network
+                    // shares) the confirmed deletion is permanent.
+                    let action = if filemanager_core::path_utils::has_recycle_bin(path) { Action::Recycle } else { Action::Delete };
+                    match Plan::prepare(action, path, None) {
                         Ok(plan) => prepared.push((path.clone(), plan)),
                         Err(error) => {
                             self.status = format!("Удаление невозможно ({}): {error}", browser::display_name(path));
@@ -1305,8 +1308,9 @@ impl Explorer {
                         }
                     }
                 }
+                let permanent = prepared.iter().any(|(_, plan)| plan.action == Action::Delete);
                 self.confirm_recycle = Some(prepared);
-                self.status = "Подтвердите удаление в Корзину".into();
+                self.status = if permanent { "Подтвердите безвозвратное удаление" } else { "Подтвердите удаление в Корзину" }.into();
                 cx.notify();
                 return;
             }
@@ -1320,7 +1324,7 @@ impl Explorer {
             return;
         };
         self.operation_busy = true;
-        self.status = "Удаление в Корзину…".into();
+        self.status = "Удаление…".into();
         let task = cx.background_spawn(async move {
             let mut queue = OperationQueue::default();
             for (_, plan) in plans {
@@ -1333,10 +1337,15 @@ impl Explorer {
             let _ = weak.update(cx, |this, cx| {
                 this.operation_busy = false;
                 let mut done = 0;
+                let mut deleted = 0;
                 let mut first_error = None;
                 let mut recycled = Vec::new();
                 for (plan, result) in &results {
                     match result {
+                        Ok(receipt) if receipt.action == Action::Delete => {
+                            deleted += 1;
+                            this.refresh_parent_of(&receipt.source, cx);
+                        }
                         Ok(receipt) => {
                             done += 1;
                             recycled.push(receipt.clone());
@@ -1347,10 +1356,13 @@ impl Explorer {
                         }
                     }
                 }
-                this.status = match first_error {
-                    None if done == 1 => "Перемещено в Корзину. Ctrl+Z — восстановить.".into(),
-                    None => format!("Перемещено в Корзину: {done}"),
-                    Some(error) => format!("В Корзину: {done}, ошибка: {error}"),
+                this.status = match (first_error, deleted) {
+                    (None, 0) if done == 1 => "Перемещено в Корзину. Ctrl+Z — восстановить.".into(),
+                    (None, 0) => format!("Перемещено в Корзину: {done}"),
+                    (None, _) if done == 0 => format!("Удалено безвозвратно: {deleted}"),
+                    (None, _) => format!("В Корзину: {done}, удалено безвозвратно: {deleted}"),
+                    (Some(error), 0) => format!("В Корзину: {done}, ошибка: {error}"),
+                    (Some(error), _) => format!("В Корзину: {done}, удалено безвозвратно: {deleted}, ошибка: {error}"),
                 };
                 if !recycled.is_empty() {
                     let label = if recycled.len() == 1 {

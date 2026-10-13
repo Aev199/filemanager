@@ -1477,7 +1477,12 @@ impl Explorer {
                         })))
                     .child(Self::separator())
                     .child(Self::menu_item("m-recycle", "fm/trash.svg",
-                        if count > 1 { format!("Удалить в Корзину ({count})") } else { "Удалить в Корзину".into() }, "Del", true, true)
+                        match (filemanager_core::path_utils::has_recycle_bin(path), count > 1) {
+                            (true, true) => format!("Удалить в Корзину ({count})"),
+                            (true, false) => "Удалить в Корзину".into(),
+                            (false, true) => format!("Удалить безвозвратно ({count})"),
+                            (false, false) => "Удалить безвозвратно".into(),
+                        }, "Del", true, true)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.context_menu = None;
                             this.recycle(cx);
@@ -1753,11 +1758,20 @@ impl Explorer {
                 many => format!("Элементов: {} («{}» и другие)", many.len(),
                     many.first().map(|(p, _)| browser::display_name(p)).unwrap_or_default()),
             };
-            ("Удалить в Корзину?", div().flex().flex_col().gap_1().text_size(px(13.))
+            let permanent = plans.iter().filter(|(_, plan)| plan.action == filemanager_core::operations::Action::Delete).count();
+            let (title, note, confirm) = if permanent == 0 {
+                ("Удалить в Корзину?", "Объект можно будет восстановить из Корзины Windows.".to_owned(), "В Корзину")
+            } else if permanent == plans.len() {
+                ("Удалить безвозвратно?", "Здесь нет Корзины Windows (сетевая папка или съёмный диск). \
+                    Удалённое нельзя будет восстановить, Ctrl+Z не поможет.".to_owned(), "Удалить навсегда")
+            } else {
+                ("Удалить?", format!("{permanent} из {} — в папках без Корзины Windows: они будут удалены \
+                    безвозвратно. Остальные — в Корзину.", plans.len()), "Удалить")
+            };
+            (title, div().flex().flex_col().gap_1().text_size(px(13.))
                 .child(div().text_color(rgb(TEXT)).child(what))
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child("Объект можно будет восстановить из Корзины Windows."))
-                .into_any_element(), "В Корзину", ButtonKind::Danger)
+                .child(div().text_size(px(12.)).text_color(rgb(if permanent == 0 { TEXT_MUTED } else { DANGER })).child(note))
+                .into_any_element(), confirm, ButtonKind::Danger)
         } else {
             return None;
         };

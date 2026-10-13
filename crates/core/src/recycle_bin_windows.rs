@@ -10,6 +10,9 @@ use windows::core::{HRESULT, PCWSTR, Ref, implement};
 type Capture = Arc<Mutex<Option<Result<OsString, String>>>>;
 type Failure = Arc<Mutex<Option<String>>>;
 
+/// Windows could only delete permanently, so nothing was deleted.
+const NO_RECYCLE_BIN: &str = "This folder has no Recycle Bin; the item was not deleted";
+
 fn completed(hr: HRESULT) -> Result<(), String> {
     hr.ok().map_err(|error| error.to_string())?;
     if [
@@ -75,6 +78,8 @@ fn same_path(a: &Path, b: &Path) -> bool {
 struct Sink {
     capture: Capture,
     failure: Failure,
+    /// Windows offered only permanent deletion (no Recycle Bin there).
+    no_bin: Arc<std::sync::atomic::AtomicBool>,
     source: PathBuf,
     restoring: bool,
 }
@@ -92,6 +97,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
     }
     fn PreDeleteItem(&self, flags: u32, item: Ref<IShellItem>) -> windows::core::Result<()> {
         if flags & TSF_DELETE_RECYCLE_IF_POSSIBLE.0 as u32 == 0 {
+            self.no_bin.store(true, std::sync::atomic::Ordering::SeqCst);
             return Err(windows::core::Error::from_hresult(HRESULT(
                 0x80070005_u32 as i32,
             )));
@@ -263,12 +269,14 @@ fn recycle_sta(path: &Path) -> io::Result<Option<RecycleToken>> {
     let _com = ComApartment::enter()?;
     let capture: Capture = Arc::new(Mutex::new(None));
     let failure: Failure = Arc::new(Mutex::new(None));
+    let no_bin: Arc<std::sync::atomic::AtomicBool> = Default::default();
     // The Shell reports long names; a path given with 8.3 short folders
     // (`RUNNER~1`) would otherwise never match and lose its receipt.
     let source = crate::path_utils::canonicalize_parent(path);
     let sink: IFileOperationProgressSink = Sink {
         capture: capture.clone(),
         failure: failure.clone(),
+        no_bin: no_bin.clone(),
         source: source.clone(),
         restoring: false,
     }
@@ -290,7 +298,13 @@ fn recycle_sta(path: &Path) -> io::Result<Option<RecycleToken>> {
         let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(parsing_name.as_ptr()), None)
             .map_err(io::Error::other)?;
         op.DeleteItem(&item, &sink).map_err(io::Error::other)?;
-        op.PerformOperations().map_err(io::Error::other)?;
+        let performed = op.PerformOperations();
+        // Refusing permanent deletion surfaces as "access denied": name the
+        // real reason instead. Nothing was deleted.
+        if no_bin.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::other(NO_RECYCLE_BIN));
+        }
+        performed.map_err(io::Error::other)?;
         if op
             .GetAnyOperationsAborted()
             .map_err(io::Error::other)?
@@ -349,6 +363,7 @@ fn restore_sta(token: &RecycleToken) -> io::Result<PathBuf> {
     let sink: IFileOperationProgressSink = Sink {
         capture: capture.clone(),
         failure: failure.clone(),
+        no_bin: Default::default(),
         source: token.original.clone(),
         restoring: true,
     }

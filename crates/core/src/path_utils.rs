@@ -47,6 +47,30 @@ pub fn is_network_path(path: &Path) -> bool {
     }
 }
 
+/// Whether deleting here can go to the Windows Recycle Bin. Network shares
+/// and removable drives have none: Explorer deletes there permanently after
+/// asking, and so does the program.
+pub fn has_recycle_bin(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if is_network_path(path) { return false; }
+        let path = normalize_extended_path(path);
+        let bytes = path.as_os_str().as_encoded_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            use std::os::windows::ffi::OsStrExt;
+            const DRIVE_REMOVABLE: u32 = 2;
+            let root: Vec<u16> = std::ffi::OsStr::new(&format!("{}:\\", bytes[0] as char))
+                .encode_wide().chain(std::iter::once(0)).collect();
+            return unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) } != DRIVE_REMOVABLE;
+        }
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        !is_network_path(path)
+    }
+}
+
 /// `fs::canonicalize`, except that a network path keeps the name it was
 /// opened by. On Windows canonicalize asks for the final path of an open
 /// handle, which for a DFS folder is the target server's own share
@@ -150,6 +174,15 @@ pub(crate) fn same_place(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_folders_have_no_recycle_bin() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(has_recycle_bin(temp.path()));
+        #[cfg(unix)]
+        assert!(!has_recycle_bin(&temp.path().join("fm-poll-test")));
+        #[cfg(windows)]
+        assert!(!has_recycle_bin(Path::new(r"\\server\share\file.docx")));
+    }
     #[test]
     fn one_folder_tree_is_one_volume() {
         let temp = tempfile::tempdir().unwrap();

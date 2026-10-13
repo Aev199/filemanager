@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action { Copy, Move, Rename, Recycle, CreateFolder }
+/// `Delete` removes permanently. It exists only for folders without a
+/// Recycle Bin (network shares), after an explicit confirmation, like Explorer.
+pub enum Action { Copy, Move, Rename, Recycle, Delete, CreateFolder }
 
 #[derive(Clone, Debug, Default)]
 pub struct UndoOutcome {
@@ -335,7 +337,7 @@ impl Plan {
             return Err(invalid("Symbolic links must be handled separately"));
         }
         let dest = match action {
-            Action::Recycle => {
+            Action::Recycle | Action::Delete => {
                 if destination.is_some() { return Err(invalid("Recycle does not accept a destination")); }
                 None
             }
@@ -519,6 +521,9 @@ impl Plan {
             Action::Recycle => {
                 recycled = crate::recycle_bin::recycle(&self.source)?;
             }
+            Action::Delete => {
+                if meta.is_dir() { fs::remove_dir_all(&self.source)?; } else { fs::remove_file(&self.source)?; }
+            }
             Action::CreateFolder => {
                 let dest = destination.as_ref().ok_or_else(|| invalid("Missing new folder path"))?;
                 // create_dir never replaces an existing path; safe if a
@@ -552,6 +557,7 @@ impl Receipt {
         match self.action {
             Action::Copy | Action::CreateFolder => self.created_snapshot.is_some(),
             Action::Recycle => self.recycled.is_some(),
+            Action::Delete => false,
             Action::Move | Action::Rename => self.completed_stamp.is_some(),
         }
     }
@@ -1339,5 +1345,33 @@ mod tests {
         let results = zone.copy_to(tmp.path());
         assert!(results[0].1.is_err());
         assert_eq!(zone.items().len(), 1);
+    }
+
+    #[test]
+    fn permanent_delete_removes_files_and_folders_without_undo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("report.docx");
+        let folder = tmp.path().join("old");
+        fs::write(&file, b"x").unwrap();
+        fs::create_dir_all(folder.join("inner")).unwrap();
+        fs::write(folder.join("inner/a.txt"), b"a").unwrap();
+        for path in [&file, &folder] {
+            let receipt = Plan::prepare(Action::Delete, path, None).unwrap().execute().unwrap();
+            assert!(!path.exists());
+            assert!(!receipt.can_undo());
+        }
+        assert!(Plan::prepare(Action::Delete, &file, Some(&folder)).is_err());
+    }
+
+    #[test]
+    fn permanent_delete_refuses_a_file_changed_after_confirmation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("report.docx");
+        fs::write(&file, b"x").unwrap();
+        let plan = Plan::prepare(Action::Delete, &file, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&file, b"changed content").unwrap();
+        assert!(plan.execute().is_err());
+        assert!(file.exists());
     }
 }
