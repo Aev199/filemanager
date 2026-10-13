@@ -38,6 +38,7 @@ pub enum CommandId {
     Columns,
     PinTab,
     Settings,
+    Tour,
 }
 #[derive(Clone, Copy)]
 pub struct CommandSpec {
@@ -94,6 +95,7 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (List, "Вид список", "Ctrl+1", VIEW),
         (Columns, "Вид колонки", "Ctrl+2", VIEW),
         (Settings, "Настройки", "Ctrl+,", VIEW),
+        (Tour, "Экскурс по возможностям", "", VIEW),
     ]
     .into_iter()
     .map(|(id, label, shortcut, group)| CommandSpec {

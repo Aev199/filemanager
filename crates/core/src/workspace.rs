@@ -122,6 +122,7 @@ impl WorkspaceStore {
         }
         conn.execute_batch("CREATE TABLE IF NOT EXISTS favorites (position INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE);
             CREATE TABLE IF NOT EXISTS project_session (id INTEGER PRIMARY KEY CHECK(id=1),name TEXT);
+            CREATE TABLE IF NOT EXISTS app_flags (name TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS pane_projects (
                 workspace_name TEXT NOT NULL, group_id INTEGER NOT NULL, project TEXT NOT NULL,
                 previous_active INTEGER NOT NULL, previous_miller INTEGER NOT NULL,
@@ -239,6 +240,15 @@ impl WorkspaceStore {
             if let Some(window) = self.load_inner(LEGACY_RETURN, true)? { return Ok(Some(window)); }
         }
         self.load_inner(SESSION, true)
+    }
+
+    /// One-time marks such as "the tour was shown".
+    pub fn flag(&self, name: &str) -> io::Result<bool> {
+        self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM app_flags WHERE name=?1)",params![name],|r|r.get(0)).map_err(db_error)
+    }
+    pub fn set_flag(&self, name: &str) -> io::Result<()> {
+        self.connection()?.execute("INSERT OR IGNORE INTO app_flags VALUES(?1)",params![name]).map_err(db_error)?;
+        Ok(())
     }
 
     pub fn save_preferences(&self, prefs: &crate::interface::Preferences) -> io::Result<()> {
@@ -475,6 +485,16 @@ mod tests {
         store.save("default", &browser).unwrap();
         assert!(store.save("", &browser).is_err());
         assert!(store.load("default").unwrap().unwrap().active_group().miller);
+    }
+
+    #[test]
+    fn flags_are_remembered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore::open(tmp.path().join("ws.sqlite3")).unwrap();
+        assert!(!store.flag("tour_seen").unwrap());
+        store.set_flag("tour_seen").unwrap();
+        store.set_flag("tour_seen").unwrap();
+        assert!(WorkspaceStore::open(tmp.path().join("ws.sqlite3")).unwrap().flag("tour_seen").unwrap());
     }
 
     #[test]

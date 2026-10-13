@@ -290,6 +290,50 @@ impl Explorer {
         }
     }
 
+    pub(crate) fn open_tour(&mut self, cx: &mut Context<Self>) {
+        self.palette=None; self.settings=None; self.context_menu=None; self.about_open=false;
+        self.tour=Some(0); cx.notify();
+    }
+    /// Closing the tour, finished or skipped, means it was seen.
+    pub(crate) fn close_tour(&mut self, cx: &mut Context<Self>) {
+        self.tour=None;
+        if let Some(store)=&self.workspaces { let _=store.set_flag(crate::TOUR_SEEN); }
+        cx.notify();
+    }
+    fn tour_view(&self, step: usize, cx: &mut Context<Self>) -> AnyElement {
+        let (icon, title, text) = TOUR[step.min(TOUR.len()-1)];
+        let last = step + 1 >= TOUR.len();
+        let dots = div().flex().gap_1().children((0..TOUR.len()).map(|i| div().size(px(6.)).rounded_full()
+            .bg(rgb(if i == step { ACCENT } else { BORDER_STRONG }))));
+        let card = div().id("tour").w(px(460.)).p_5().flex().flex_col().gap_3()
+            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
+            .child(div().flex().items_center().gap_3()
+                .child(if step == 0 { img("app/icon.png").size(px(32.)).into_any_element() }
+                    else { div().size(px(32.)).rounded_md().bg(rgb(ACCENT_SOFT)).flex().items_center().justify_center()
+                        .child(svg().path(icon).size(px(18.)).text_color(rgb(ACCENT))).into_any_element() })
+                .child(div().text_size(px(16.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(title)))
+            // One height for every step: the buttons stay under the cursor.
+            .child(div().min_h(px(120.)).text_size(px(13.)).line_height(px(20.)).text_color(rgb(TEXT_MUTED)).child(text))
+            .child(div().pt_2().flex().items_center().gap_2()
+                .child(dots)
+                .child(div().flex_1())
+                .when(!last, |row| row.child(text_button("tour-skip", "Пропустить", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this,_,_,cx| this.close_tour(cx)))))
+                .when(step > 0, |row| row.child(text_button("tour-back", "Назад", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this,_,_,cx| {this.tour=this.tour.map(|s| s.saturating_sub(1));cx.notify();}))))
+                .child(text_button("tour-next", if last { "Начать работу" } else { "Далее" }, ButtonKind::Primary)
+                    .on_click(cx.listener(move |this,_,_,cx| {
+                        if last { this.close_tour(cx); } else { this.tour=Some(step+1); cx.notify(); }
+                    }))));
+        div().id("tour-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C))
+            .child(card)
+            .with_animation("tour-appear", Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
+                |this, delta| this.opacity(delta))
+            .into_any_element()
+    }
+
     /// «О программе» under its titlebar button, as in SoilStiffness:
     /// a click elsewhere or Esc closes it.
     fn about_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -312,7 +356,9 @@ impl Explorer {
                         .hover(|style| style.underline())
                         .child("Евдокимов Александр")
                         .on_click(|_,_,cx| cx.open_url("https://t.me/aevd19"))))
-                .child(div().text_color(rgb(TEXT_DIM)).child(format!("Настройки и журналы: {data}"))))
+                .child(div().text_color(rgb(TEXT_DIM)).child(format!("Настройки и журналы: {data}")))
+                .child(div().pt_1().child(text_button("about-tour", "Экскурс по возможностям", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.open_tour(cx);})))))
             .into_any_element()
     }
 
@@ -2046,6 +2092,7 @@ impl Render for Explorer {
                 .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
         }
         if self.about_open { root=root.child(self.about_panel(cx)); }
+        if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
         root
     }
@@ -2055,3 +2102,33 @@ fn outside_window(position: Point<Pixels>, window: &Window) -> bool {
     let size = window.viewport_size();
     position.x < px(0.) || position.y < px(0.) || position.x >= size.width || position.y >= size.height
 }
+
+/// The feature tour: icon, title, text. Shown once at first start and again
+/// from «О программе» or the command palette.
+const TOUR: &[(&str, &str, &str)] = &[
+    ("fm/app.svg", "Добро пожаловать в Papka",
+        "Короткий экскурс по возможностям — 7 шагов. Его можно открыть снова: кнопка «?» в заголовке окна \
+        или палитра команд (Ctrl+K)."),
+    ("fm/columns.svg", "Колонки и список",
+        "Колонки показывают весь путь к папке: → открывает папку, ← возвращает к родительской. \
+        Ctrl+1 — список с датами и размерами, Ctrl+2 — колонки; у каждой панели вид свой. \
+        Боковые кнопки мыши листают историю, как в Проводнике."),
+    ("fm/split.svg", "Панели и вкладки",
+        "Ctrl+Shift+S делит окно справа, Ctrl+Alt+S — снизу, до четырёх панелей. У каждой панели свои вкладки: \
+        Ctrl+T — новая, Ctrl+W — закрыть. Вкладку можно перетащить в другую панель или на край. \
+        Закреплённая вкладка (правая кнопка → «Закрепить вкладку») не закрывается."),
+    ("fm/layers.svg", "Проекты и избранное",
+        "«Создать проект…» в боковой панели запоминает вкладки активной панели. Проект открывается в одной панели, \
+        остальные не меняются; крестик на плашке проекта возвращает прежние вкладки. \
+        Звезда в строке пути добавляет папку в избранное."),
+    ("fm/move.svg", "Перетаскивание и удаление",
+        "Перетащите файлы в другую панель: на том же диске — перенос, на другом — копия; с Ctrl — копия, с Shift — перенос. \
+        Правой кнопкой — меню «Копировать / Переместить». За край окна — в Проводник или расчётную программу. \
+        Del — в Корзину, Ctrl+Z — отменить."),
+    ("fm/search.svg", "Поиск и команды",
+        "Ctrl+F — поиск файлов, Ctrl+L — ввести путь, Ctrl+K — все команды с клавишами. \
+        Набор в английской раскладке тоже находит: «yfcnh» — это «настр»."),
+    ("fm/history.svg", "История и версии",
+        "Ctrl+I открывает панель сведений: история изменений файла, его версии вида «Отчёт_v_1_6» и комментарии. \
+        Хранятся только сведения о файлах, не их копии. «Журнал операций» в боковой панели показывает, что сделала Papka."),
+];

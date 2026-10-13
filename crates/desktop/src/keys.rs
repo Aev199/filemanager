@@ -472,6 +472,7 @@ impl Explorer {
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_error.take().is_some() {cx.notify();return;}
         if std::mem::take(&mut self.about_open) {cx.notify();return;}
+        if self.tour.is_some() {self.close_tour(cx);return;}
         self.dock_hover=None;
         if cx.stop_active_drag(window) { cx.notify(); return; }
         if let Some(resize) = self.column_resize.take() {

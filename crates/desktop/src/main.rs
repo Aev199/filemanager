@@ -119,6 +119,9 @@ fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
     path.map(|path| filemanager_core::path_utils::normalize_extended_path(&path))
 }
 
+/// Marks that the feature tour was shown once at first start.
+const TOUR_SEEN: &str = "tour_seen";
+
 /// Internal name of the session restored at startup.
 
 
@@ -201,6 +204,8 @@ struct Explorer {
     dragging_out: bool,
     /// The «О программе» panel under its titlebar button.
     about_open: bool,
+    /// Step of the feature tour, while it is shown.
+    tour: Option<usize>,
     menu_serial: u64,
     focus_handle: FocusHandle,
     places: Vec<Place>,
@@ -480,6 +485,7 @@ impl Explorer {
             directory_errors: HashMap::new(),
             directory_cache_order: VecDeque::new(),
             directory_request: 0,
+            tour: workspaces.as_ref().and_then(|store| store.flag(TOUR_SEEN).ok()).is_some_and(|seen| !seen).then_some(0),
             workspaces, favorites, saved_layout: String::new(), history_expanded: false, versions_expanded: false, project_error: None, close_error: None, session_restore_error,
             journal: None,
             operation_journal,

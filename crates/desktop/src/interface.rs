@@ -27,7 +27,7 @@ pub(crate) struct Settings {
 
 impl Explorer {
     pub(crate) fn interface_modal(&self) -> bool {
-        self.palette.is_some() || self.settings.is_some() || self.close_error.is_some()
+        self.palette.is_some() || self.settings.is_some() || self.close_error.is_some() || self.tour.is_some()
     }
     fn can_open_interface(&self) -> bool {
         !self.renaming
@@ -161,6 +161,7 @@ impl Explorer {
                 cx.notify();
             }
             Settings => self.open_settings(window, cx),
+            Tour => self.open_tour(cx),
         }
     }
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -755,6 +756,7 @@ fn command_icon(id: CommandId) -> &'static str {
         Inspector => "fm/panel-right.svg",
         List => "fm/list.svg",
         Columns => "fm/columns.svg",
-        Settings => "fm/command.svg",
+        Settings => "fm/settings.svg",
+        Tour => "fm/help.svg",
     }
 }
