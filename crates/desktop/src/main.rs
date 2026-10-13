@@ -196,6 +196,9 @@ struct Explorer {
     /// Pressed right button on files: a plain click opens their menu, a
     /// drag ends in the «Копировать сюда / Переместить сюда» menu.
     right_drag: Option<RightDrag>,
+    /// A system drag to another program is running.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    dragging_out: bool,
     menu_serial: u64,
     focus_handle: FocusHandle,
     places: Vec<Place>,
@@ -241,7 +244,6 @@ struct Explorer {
     directory_cache_order: VecDeque<PathBuf>,
     directory_request: u64,
     workspaces: Option<WorkspaceStore>,
-    project: filemanager_core::projects::ProjectSession,
     favorites: Vec<PathBuf>,
     saved_layout: String,
     history_expanded: bool,
@@ -399,9 +401,9 @@ impl Explorer {
         window.focus(&focus_handle, cx);
         let (workspaces,prefs,prefs_error)=WorkspaceStore::open_with_preferences(WorkspaceStore::default_path());
         let prefs_error=prefs_error.map(|error|format!("Настройки не прочитаны: {error}"));
-        let restored = workspaces.as_ref().map(filemanager_core::projects::ProjectSession::restore).transpose();
-        let (browser, project) = restored.as_ref().ok().and_then(|r|r.clone().flatten()).unwrap_or_else(||
-            (Workspace::new(home).or_else(|_| Workspace::new(".")).expect("No starting directory"), Default::default()));
+        let restored = workspaces.as_ref().map(WorkspaceStore::load_session).transpose();
+        let browser = restored.as_ref().ok().and_then(|r|r.clone().flatten()).unwrap_or_else(||
+            Workspace::new(home).or_else(|_| Workspace::new(".")).expect("No starting directory"));
         let session_restore_error = restored.err().map(|e|e.to_string());
         let prefs_error = session_restore_error.as_ref().map(|e|format!("Проект не восстановлен: {e}")).or(prefs_error);
         let favorites = workspaces.as_ref().and_then(|s|s.favorites().ok()).unwrap_or_default();
@@ -430,7 +432,7 @@ impl Explorer {
             operation_busy: false,
             copy_control: None,
             context_menu: None,
-            right_drag: None,
+            right_drag: None, dragging_out: false,
             menu_serial: 0,
             focus_handle,
             places: places::user_places(),
@@ -476,7 +478,7 @@ impl Explorer {
             directory_errors: HashMap::new(),
             directory_cache_order: VecDeque::new(),
             directory_request: 0,
-            workspaces, project, favorites, saved_layout: String::new(), history_expanded: false, versions_expanded: false, project_error: None, close_error: None, session_restore_error,
+            workspaces, favorites, saved_layout: String::new(), history_expanded: false, versions_expanded: false, project_error: None, close_error: None, session_restore_error,
             journal: None,
             operation_journal,
             operation_review: false,
@@ -711,6 +713,36 @@ impl Explorer {
     /// Files dropped on a folder: copied, or moved when `copy` is false.
     /// A left-button drop inside the app, decided like Explorer: Ctrl copies,
     /// Shift moves, otherwise moves within one volume and copies across.
+    /// Hands dragged files to Windows once the cursor leaves the window, so
+    /// they can be dropped into Explorer or any program that takes files.
+    fn drag_out(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if self.dragging_out || paths.is_empty() { return; }
+            let Some(hwnd) = window.window_handle().ok().and_then(|handle| match handle.as_raw() {
+                RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                _ => None,
+            }) else { return };
+            cx.stop_active_drag(window);
+            self.right_drag = None;
+            self.dragging_out = true;
+            cx.notify();
+            // The system drag runs its own message loop: start it from the
+            // executor, outside this event handler.
+            cx.spawn(async move |this, cx| {
+                let result = filemanager_core::shell_drag::drag_out(hwnd, &paths);
+                let _ = this.update(cx, |this, cx| {
+                    this.dragging_out = false;
+                    if let Err(error) = result { this.status = format!("Не удалось перетащить: {error}"); }
+                    cx.notify();
+                });
+            }).detach();
+        }
+        #[cfg(not(windows))]
+        let _ = (paths, window, cx);
+    }
+
     fn drop_files(&mut self, paths: &[PathBuf], folder: PathBuf, modifiers: gpui::Modifiers, cx: &mut Context<Self>) {
         // Released over the folder they came from: nothing to do.
         if paths.is_empty() || paths.iter().any(|path| path == &folder)

@@ -25,7 +25,20 @@ impl Tab {
 }
 #[derive(Clone, Debug)]
 /// `miller`: columns view, otherwise a list; each pane chooses its own.
-pub struct Group { pub id: GroupId, pub tabs: Vec<Tab>, pub active_tab: usize, pub miller: bool }
+/// `project`: the named project the pane shows, if any.
+pub struct Group { pub id: GroupId, pub tabs: Vec<Tab>, pub active_tab: usize, pub miller: bool, pub project: Option<PaneProject> }
+/// A project lives inside one pane: its tabs are the pane's tabs, and the
+/// pane returns to the tabs it showed before when the project closes.
+#[derive(Clone, Debug)]
+pub struct PaneProject { pub name: String, pub previous: Vec<Tab>, pub previous_active: usize, pub previous_miller: bool }
+impl Group {
+    /// The project's content as a one-pane workspace, saved under its name.
+    pub fn project_snapshot(&self) -> Option<(String, Workspace)> {
+        let project = self.project.as_ref()?;
+        let content = Group { id: GroupId(1), tabs: self.tabs.clone(), active_tab: self.active_tab, miller: self.miller, project: None };
+        Workspace::from_parts(vec![content], Node::Leaf(GroupId(1)), GroupId(1)).ok().map(|w| (project.name.clone(), w))
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis { Horizontal, Vertical }
 #[derive(Clone, Debug, PartialEq)]
@@ -111,7 +124,7 @@ pub struct Workspace {
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 impl Workspace {
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::from_parts(vec![Group { id: GroupId(1), tabs: vec![Tab::new(path)?], active_tab: 0, miller: true }], Node::Leaf(GroupId(1)), GroupId(1))
+        Self::from_parts(vec![Group { id: GroupId(1), tabs: vec![Tab::new(path)?], active_tab: 0, miller: true, project: None }], Node::Leaf(GroupId(1)), GroupId(1))
     }
     pub fn from_parts(groups: Vec<Group>, root: Node, active: GroupId) -> io::Result<Self> {
         let mut ids = Vec::new(); root.leaves(&mut ids);
@@ -202,7 +215,7 @@ impl Workspace {
         let new = GroupId(self.next_id); self.next_id = self.next_id.checked_add(1).ok_or_else(||invalid("Неверный идентификатор панели"))?;
         let (first,second) = if matches!(edge,Edge::Left|Edge::Top) { (Node::Leaf(new),Node::Leaf(id)) } else { (Node::Leaf(id),Node::Leaf(new)) };
         self.root.replace(id,&Node::Split { axis: if matches!(edge,Edge::Left|Edge::Right) { Axis::Horizontal } else { Axis::Vertical }, ratio: 0.5, first: Box::new(first), second: Box::new(second) });
-        self.groups.push(Group { id: new, tabs: vec![copy], active_tab: 0, miller });
+        self.groups.push(Group { id: new, tabs: vec![copy], active_tab: 0, miller, project: None });
         if let Some((src,index)) = source {
             self.remove_tab(src,index);
             if self.group(src).unwrap().tabs.is_empty() { self.close_group(src); }
@@ -215,6 +228,55 @@ impl Workspace {
         self.groups.retain(|g|g.id != id); self.recent.retain(|old| *old != id);
         let ids: Vec<_> = self.groups.iter().map(|g|g.id).collect(); self.root = self.root.retain(&ids).unwrap();
         if self.active == id { self.focus(next); } self.check();
+    }
+    /// The pane showing project `name`.
+    pub fn project_group(&self, name: &str) -> Option<GroupId> {
+        self.groups.iter().find(|g| g.project.as_ref().is_some_and(|p| p.name == name)).map(|g| g.id)
+    }
+    /// Shows the saved project `content` in pane `id`; all its panes become
+    /// tabs of that one pane. Returns the project the pane showed before, to
+    /// be saved: switching projects keeps the original return point.
+    pub fn open_project(&mut self, id: GroupId, name: &str, content: &Workspace) -> io::Result<Option<(String, Workspace)>> {
+        let g = self.group(id).ok_or_else(|| invalid("Панель закрыта"))?;
+        if self.project_group(name).is_some_and(|other| other != id) { return Err(invalid("Проект уже открыт в другой панели")); }
+        let outgoing = g.project_snapshot();
+        let mut tabs = Vec::new(); let mut active_tab = 0;
+        for leaf in content.leaves() {
+            let source = content.group(leaf).unwrap();
+            if leaf == content.active { active_tab = tabs.len() + source.active_tab; }
+            tabs.extend(source.tabs.iter().cloned());
+        }
+        if self.tab_count() - g.tabs.len() + tabs.len() > MAX_TABS { return Err(invalid("Не больше ста вкладок")); }
+        let miller = content.active_group().miller;
+        let g = self.group_mut(id).unwrap();
+        let project = match g.project.take() {
+            Some(old) => PaneProject { name: name.to_owned(), ..old },
+            None => PaneProject { name: name.to_owned(), previous: std::mem::take(&mut g.tabs), previous_active: g.active_tab, previous_miller: g.miller },
+        };
+        g.tabs = tabs; g.active_tab = active_tab; g.miller = miller; g.project = Some(project);
+        self.focus(id); self.check(); Ok(outgoing)
+    }
+    /// Turns pane `id`'s current tabs into project `name`; closing it later
+    /// brings these same tabs back.
+    pub fn start_project(&mut self, id: GroupId, name: &str) -> io::Result<Option<(String, Workspace)>> {
+        if self.project_group(name).is_some() { return Err(invalid("Проект уже открыт")); }
+        let g = self.group_mut(id).ok_or_else(|| invalid("Панель закрыта"))?;
+        let outgoing = g.project_snapshot();
+        let previous = match g.project.take() {
+            Some(old) => (old.previous, old.previous_active, old.previous_miller),
+            None => (g.tabs.clone(), g.active_tab, g.miller),
+        };
+        g.project = Some(PaneProject { name: name.to_owned(), previous: previous.0, previous_active: previous.1, previous_miller: previous.2 });
+        Ok(outgoing)
+    }
+    /// Returns pane `id` to the tabs it showed before its project opened.
+    /// The closed project's content comes back to be saved.
+    pub fn close_project(&mut self, id: GroupId) -> Option<(String, Workspace)> {
+        let g = self.group_mut(id)?;
+        let snapshot = g.project_snapshot()?;
+        let project = g.project.take().unwrap();
+        g.tabs = project.previous; g.active_tab = project.previous_active.min(g.tabs.len() - 1); g.miller = project.previous_miller;
+        self.check(); Some(snapshot)
     }
     pub fn set_ratio(&mut self, path: &[bool], ratio: f32) {
         if !ratio.is_finite() { return; } let mut node = &mut self.root;

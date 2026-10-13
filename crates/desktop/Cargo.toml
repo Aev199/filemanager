@@ -19,3 +19,6 @@ gpui_platform = { package = "gpui_ce_platform", version = "=0.1.0" }
 open = "5"
 gpui-component = { package = "gpui_ce_components", version = "=0.2.0" }
 gpui_component_assets = { package = "gpui_ce_components_assets", version = "=0.2.0" }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"

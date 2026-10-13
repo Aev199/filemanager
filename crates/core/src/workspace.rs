@@ -6,6 +6,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The window restored at startup.
+pub const SESSION: &str = "Default";
+/// Return point of the earlier window-wide project model.
+const LEGACY_RETURN: &str = "__project_return__";
+
 #[derive(Clone)]
 pub struct WorkspaceStore {
     path: PathBuf,
@@ -119,7 +124,17 @@ impl WorkspaceStore {
             }
         }
         conn.execute_batch("CREATE TABLE IF NOT EXISTS favorites (position INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE);
-            CREATE TABLE IF NOT EXISTS project_session (id INTEGER PRIMARY KEY CHECK(id=1),name TEXT);").map_err(db_error)?;
+            CREATE TABLE IF NOT EXISTS project_session (id INTEGER PRIMARY KEY CHECK(id=1),name TEXT);
+            CREATE TABLE IF NOT EXISTS pane_projects (
+                workspace_name TEXT NOT NULL, group_id INTEGER NOT NULL, project TEXT NOT NULL,
+                previous_active INTEGER NOT NULL, previous_miller INTEGER NOT NULL,
+                PRIMARY KEY(workspace_name,group_id),
+                FOREIGN KEY(workspace_name) REFERENCES workspaces(name) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS pane_previous_tabs (
+                workspace_name TEXT NOT NULL, group_id INTEGER NOT NULL, position INTEGER NOT NULL,
+                path TEXT NOT NULL, pinned INTEGER NOT NULL, pin_path TEXT,
+                PRIMARY KEY(workspace_name,group_id,position),
+                FOREIGN KEY(workspace_name) REFERENCES workspaces(name) ON DELETE CASCADE);").map_err(db_error)?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS interface_preferences (
             id INTEGER PRIMARY KEY CHECK(id=1),light INTEGER NOT NULL,
             show_hidden INTEGER NOT NULL,show_sidebar INTEGER NOT NULL,show_inspector INTEGER NOT NULL
@@ -166,7 +181,7 @@ impl WorkspaceStore {
         tx.execute("INSERT INTO workspaces(name,active_tab,miller_mode) VALUES(?1,?2,?3)
             ON CONFLICT(name) DO UPDATE SET active_tab=excluded.active_tab,miller_mode=excluded.miller_mode",
             params![name,browser.active_group().active_tab as i64,browser.active_group().miller]).map_err(db_error)?;
-        for table in ["workspace_tabs","workspace_groups","workspace_layout"] {
+        for table in ["workspace_tabs","workspace_groups","workspace_layout","pane_projects","pane_previous_tabs"] {
             tx.execute(&format!("DELETE FROM {table} WHERE workspace_name=?1"),params![name]).map_err(db_error)?;
         }
         for group in &browser.groups {
@@ -175,6 +190,14 @@ impl WorkspaceStore {
             for (position,tab) in group.tabs.iter().enumerate() {
                 tx.execute("INSERT INTO workspace_tabs(workspace_name,group_id,position,left_path,right_path,focus_right,pinned,pin_path)
                     VALUES(?1,?2,?3,?4,NULL,0,?5,?6)",params![name,id,position as i64,tab.pane.path.to_string_lossy(),tab.pinned,tab.pin_path.as_ref().map(|p|p.to_string_lossy())]).map_err(db_error)?;
+            }
+            if let Some(project) = &group.project {
+                tx.execute("INSERT INTO pane_projects VALUES(?1,?2,?3,?4,?5)",
+                    params![name,id,project.name,project.previous_active as i64,project.previous_miller]).map_err(db_error)?;
+                for (position,tab) in project.previous.iter().enumerate() {
+                    tx.execute("INSERT INTO pane_previous_tabs VALUES(?1,?2,?3,?4,?5,?6)",params![name,id,position as i64,
+                        tab.pane.path.to_string_lossy(),tab.pinned,tab.pin_path.as_ref().map(|p|p.to_string_lossy())]).map_err(db_error)?;
+                }
             }
         }
         tx.execute("INSERT INTO workspace_layout VALUES(?1,?2,?3)",params![name,browser.root.encode(),browser.active.0 as i64]).map_err(db_error)?;
@@ -195,18 +218,30 @@ impl WorkspaceStore {
         }
         tx.commit().map_err(db_error)
     }
-    pub(crate) fn checkpoint(&self, current: &Workspace, name: Option<&str>, previous: Option<&Workspace>, outgoing: Option<(&str,&Workspace)>) -> io::Result<()> {
+    /// Saves the window and every project open in its panes, plus projects
+    /// just closed or replaced (`outgoing`), in one transaction.
+    pub fn save_session(&self, current: &Workspace, outgoing: &[(String, Workspace)]) -> io::Result<()> {
         let mut conn = self.connection()?; let tx = conn.transaction().map_err(db_error)?;
-        if let Some((name,w)) = outgoing { Self::save_in(&tx,name,w)?; }
-        Self::save_in(&tx, "Default", current)?;
-        if let Some(name) = name { Self::save_in(&tx,name,current)?; }
-        if let Some(previous) = previous { Self::save_in(&tx,"__project_return__",previous)?; }
-        else { tx.execute("DELETE FROM workspaces WHERE name='__project_return__'",[]).map_err(db_error)?; }
-        tx.execute("INSERT INTO project_session VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET name=excluded.name",params![name]).map_err(db_error)?;
+        for (name,content) in outgoing { Self::save_in(&tx,name,content)?; }
+        Self::save_in(&tx, SESSION, current)?;
+        for (name,content) in current.groups.iter().filter_map(|g| g.project_snapshot()) {
+            Self::save_in(&tx,&name,&content)?;
+        }
+        // The earlier window-wide project model is finished once saved this way.
+        tx.execute("DELETE FROM workspaces WHERE name=?1",params![LEGACY_RETURN]).map_err(db_error)?;
+        tx.execute("UPDATE project_session SET name=NULL",[]).map_err(db_error)?;
         tx.commit().map_err(db_error)
     }
-    pub(crate) fn session_project(&self) -> io::Result<Option<String>> {
-        self.connection()?.query_row("SELECT name FROM project_session WHERE id=1",[],|r|r.get(0)).optional().map(|r|r.flatten()).map_err(db_error)
+    /// The window as last saved. A session from the window-wide project model
+    /// comes back as the window it would have returned to; the project
+    /// itself stays saved under its name.
+    pub fn load_session(&self) -> io::Result<Option<Workspace>> {
+        let legacy: Option<String> = self.connection()?.query_row("SELECT name FROM project_session WHERE id=1",[],|r|r.get(0))
+            .optional().map_err(db_error)?.flatten();
+        if legacy.is_some() {
+            if let Some(window) = self.load_inner(LEGACY_RETURN, true)? { return Ok(Some(window)); }
+        }
+        self.load_inner(SESSION, true)
     }
 
     pub fn save_preferences(&self, prefs: &crate::interface::Preferences) -> io::Result<()> {
@@ -271,6 +306,24 @@ impl WorkspaceStore {
         Ok(workspace)
     }
 
+    fn attach_projects(conn: &Connection, name: &str, w: &mut Workspace) -> io::Result<()> {
+        let mut stmt = conn.prepare("SELECT group_id,project,previous_active,previous_miller FROM pane_projects WHERE workspace_name=?1").map_err(db_error)?;
+        let projects = stmt.query_map(params![name],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?)))
+            .map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+        let mut tabs = conn.prepare("SELECT path,pinned,pin_path FROM pane_previous_tabs WHERE workspace_name=?1 AND group_id=?2 ORDER BY position LIMIT 101").map_err(db_error)?;
+        for (id,project,active,miller) in projects {
+            let Some(group) = w.groups.iter_mut().find(|g| g.id.0 as i64 == id) else { continue };
+            let previous: Vec<Tab> = tabs.query_map(params![name,id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?,r.get::<_,Option<String>>(2)?)))
+                .map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?
+                .into_iter().map(|(path,pinned,anchor)| Tab::restored(PathBuf::from(path),pinned,anchor.map(PathBuf::from))).collect();
+            // A pane must always have tabs to return to.
+            let previous = if previous.is_empty() { group.tabs.clone() } else { previous };
+            let previous_active = (active.max(0) as usize).min(previous.len()-1);
+            group.project = Some(crate::panes::PaneProject { name: project, previous, previous_active, previous_miller: miller });
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_inner(&self, name: &str, keep_missing: bool) -> io::Result<Option<Workspace>> {
         Self::valid_name(name)?;
         let conn = self.connection()?;
@@ -299,7 +352,7 @@ impl WorkspaceStore {
                     let tab = Tab::restored(PathBuf::from(path), *pin, anchor.as_ref().map(PathBuf::from));
                     if *position <= *active_tab { selected = tabs.len(); } tabs.push(tab);
                 }
-                if !tabs.is_empty() { groups.push(Group { id: GroupId(*id as u64), tabs, active_tab: selected, miller: view.unwrap_or(miller) }); }
+                if !tabs.is_empty() { groups.push(Group { id: GroupId(*id as u64), tabs, active_tab: selected, miller: view.unwrap_or(miller), project: None }); }
             }
             if let Some(root) = parsed {
                 // Validate the original topology before pruning missing directories.
@@ -315,7 +368,7 @@ impl WorkspaceStore {
                     if let Some(root) = root.retain(&ids) {
                         let active = GroupId((*active).max(0) as u64);
                         let active = if ids.contains(&active) { active } else { ids[0] };
-                        if let Ok(w) = Workspace::from_parts(groups,root,active) { return Ok(Some(w)); }
+                        if let Ok(mut w) = Workspace::from_parts(groups,root,active) { Self::attach_projects(&conn,name,&mut w)?; return Ok(Some(w)); }
                     }
                 }
             }
@@ -337,12 +390,12 @@ impl WorkspaceStore {
         }
         if tabs.is_empty() && right_paths.is_empty() { return Ok(None); }
         let mut groups = Vec::new();
-        if !tabs.is_empty() { groups.push(Group { id: GroupId(1), tabs, active_tab: selected, miller }); }
+        if !tabs.is_empty() { groups.push(Group { id: GroupId(1), tabs, active_tab: selected, miller, project: None }); }
         if !right_paths.is_empty() {
             let active_tab = right_active.as_ref().and_then(|path|right_paths.iter().position(|p|p==path)).unwrap_or(0);
             let budget = MAX_RESTORED_TABS - groups.iter().map(|g|g.tabs.len()).sum::<usize>();
             let tabs: Vec<_> = right_paths.iter().take(budget).filter_map(|path|Tab::new(path).ok()).collect();
-            if !tabs.is_empty() { let active_tab=active_tab.min(tabs.len()-1); groups.push(Group {id:GroupId(2),tabs,active_tab,miller}); }
+            if !tabs.is_empty() { let active_tab=active_tab.min(tabs.len()-1); groups.push(Group {id:GroupId(2),tabs,active_tab,miller,project:None}); }
         }
         let root = if groups.len()==2 { Node::Split {axis:crate::panes::Axis::Horizontal,ratio:0.5,first:Box::new(Node::Leaf(groups[0].id)),second:Box::new(Node::Leaf(groups[1].id))} } else { Node::Leaf(groups[0].id) };
         let active = groups[0].id;

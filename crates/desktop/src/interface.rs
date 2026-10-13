@@ -480,7 +480,7 @@ impl Explorer {
 
 pub(crate) struct Marquee {
     folder: std::path::PathBuf,
-    side: crate::GroupId,
+    pub(crate) side: crate::GroupId,
     tab: usize,
     listing: std::sync::Arc<filemanager_core::browser::Listing>,
     indices: std::sync::Arc<Vec<usize>>,

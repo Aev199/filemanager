@@ -1813,6 +1813,7 @@ dependencies = [
  "gpui_ce_components_assets",
  "gpui_ce_platform",
  "open",
+ "raw-window-handle",
  "winresource",
 ]
 

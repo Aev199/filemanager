@@ -47,3 +47,6 @@ pub mod interface;
 pub mod panes;
 
 pub mod projects;
+
+#[cfg(windows)]
+pub mod shell_drag;
