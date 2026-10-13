@@ -6,6 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct WorkspaceStore {
     path: PathBuf,
 }
@@ -84,6 +85,41 @@ impl WorkspaceStore {
         };
         // NULL for panes saved before each pane had its own view.
         if !has_view { conn.execute_batch("ALTER TABLE workspace_groups ADD COLUMN miller_mode INTEGER;").map_err(db_error)?; }
+        let has_anchor = {
+            let mut stmt = conn.prepare("PRAGMA table_info(workspace_tabs)").map_err(db_error)?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(db_error)?;
+            cols.collect::<Result<Vec<_>, _>>().map_err(db_error)?.iter().any(|name| name == "pin_path")
+        };
+        if !has_anchor { conn.execute_batch("ALTER TABLE workspace_tabs ADD COLUMN pin_path TEXT;
+            UPDATE workspace_tabs SET pin_path=left_path WHERE pinned=1;").map_err(db_error)?; }
+        // Earlier releases allowed this name. Move a legacy bookmark before
+        // reserving it for the session return point, in the same migration.
+        let has_sessions: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_session')",
+            [], |row| row.get(0)).map_err(db_error)?;
+        if !has_sessions {
+            let collision: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspaces WHERE name='__project_return__')",
+                [], |row| row.get(0)).map_err(db_error)?;
+            if collision {
+                let mut index=1;
+                let replacement=loop {
+                    let candidate=format!("Восстановленный проект {index}");
+                    let exists: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM workspaces WHERE name=?1)",
+                        params![candidate], |row|row.get(0)).map_err(db_error)?;
+                    if !exists {break candidate;} index+=1;
+                };
+                conn.execute("INSERT INTO workspaces SELECT ?1,active_tab,miller_mode FROM workspaces WHERE name='__project_return__'",
+                    params![replacement]).map_err(db_error)?;
+                for table in ["workspace_tabs","workspace_groups","workspace_layout"] {
+                    conn.execute(&format!("UPDATE {table} SET workspace_name=?1 WHERE workspace_name='__project_return__'"),
+                        params![replacement]).map_err(db_error)?;
+                }
+                conn.execute("DELETE FROM workspaces WHERE name='__project_return__'", []).map_err(db_error)?;
+            }
+        }
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS favorites (position INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE);
+            CREATE TABLE IF NOT EXISTS project_session (id INTEGER PRIMARY KEY CHECK(id=1),name TEXT);").map_err(db_error)?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS interface_preferences (
             id INTEGER PRIMARY KEY CHECK(id=1),light INTEGER NOT NULL,
             show_hidden INTEGER NOT NULL,show_sidebar INTEGER NOT NULL,show_inspector INTEGER NOT NULL
@@ -118,10 +154,15 @@ impl WorkspaceStore {
 
     /// Replaces exactly one named workspace in a single SQLite transaction.
     pub fn save(&self, name: &str, browser: &Workspace) -> io::Result<()> {
-        Self::valid_name(name)?;
-        Workspace::from_parts(browser.groups.clone(), browser.root.clone(), browser.active)?;
         let mut conn = self.connection()?;
         let tx = conn.transaction().map_err(db_error)?;
+        Self::save_in(&tx, name, browser)?;
+        tx.commit().map_err(db_error)
+    }
+
+    fn save_in(tx: &rusqlite::Transaction<'_>, name: &str, browser: &Workspace) -> io::Result<()> {
+        Self::valid_name(name)?;
+        Workspace::from_parts(browser.groups.clone(), browser.root.clone(), browser.active)?;
         tx.execute("INSERT INTO workspaces(name,active_tab,miller_mode) VALUES(?1,?2,?3)
             ON CONFLICT(name) DO UPDATE SET active_tab=excluded.active_tab,miller_mode=excluded.miller_mode",
             params![name,browser.active_group().active_tab as i64,browser.active_group().miller]).map_err(db_error)?;
@@ -132,12 +173,40 @@ impl WorkspaceStore {
             let id = i64::try_from(group.id.0).map_err(|_|io::Error::new(io::ErrorKind::InvalidInput,"Неверный идентификатор панели"))?;
             tx.execute("INSERT INTO workspace_groups(workspace_name,group_id,active_tab,miller_mode) VALUES(?1,?2,?3,?4)",params![name,id,group.active_tab as i64,group.miller]).map_err(db_error)?;
             for (position,tab) in group.tabs.iter().enumerate() {
-                tx.execute("INSERT INTO workspace_tabs(workspace_name,group_id,position,left_path,right_path,focus_right,pinned)
-                    VALUES(?1,?2,?3,?4,NULL,0,?5)",params![name,id,position as i64,tab.pane.path.to_string_lossy(),tab.pinned]).map_err(db_error)?;
+                tx.execute("INSERT INTO workspace_tabs(workspace_name,group_id,position,left_path,right_path,focus_right,pinned,pin_path)
+                    VALUES(?1,?2,?3,?4,NULL,0,?5,?6)",params![name,id,position as i64,tab.pane.path.to_string_lossy(),tab.pinned,tab.pin_path.as_ref().map(|p|p.to_string_lossy())]).map_err(db_error)?;
             }
         }
         tx.execute("INSERT INTO workspace_layout VALUES(?1,?2,?3)",params![name,browser.root.encode(),browser.active.0 as i64]).map_err(db_error)?;
-        tx.commit().map_err(db_error)?; Ok(())
+        Ok(())
+    }
+
+    pub fn favorites(&self) -> io::Result<Vec<PathBuf>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare("SELECT path FROM favorites ORDER BY position").map_err(db_error)?;
+        stmt.query_map([], |r| r.get::<_,String>(0).map(PathBuf::from)).map_err(db_error)?
+            .collect::<Result<Vec<_>,_>>().map_err(db_error)
+    }
+    pub fn save_favorites(&self, paths: &[PathBuf]) -> io::Result<()> {
+        let mut conn = self.connection()?; let tx = conn.transaction().map_err(db_error)?;
+        tx.execute("DELETE FROM favorites", []).map_err(db_error)?;
+        for (i,path) in paths.iter().enumerate() {
+            tx.execute("INSERT OR IGNORE INTO favorites(position,path) VALUES(?1,?2)",params![i as i64,path.to_string_lossy()]).map_err(db_error)?;
+        }
+        tx.commit().map_err(db_error)
+    }
+    pub(crate) fn checkpoint(&self, current: &Workspace, name: Option<&str>, previous: Option<&Workspace>, outgoing: Option<(&str,&Workspace)>) -> io::Result<()> {
+        let mut conn = self.connection()?; let tx = conn.transaction().map_err(db_error)?;
+        if let Some((name,w)) = outgoing { Self::save_in(&tx,name,w)?; }
+        Self::save_in(&tx, "Default", current)?;
+        if let Some(name) = name { Self::save_in(&tx,name,current)?; }
+        if let Some(previous) = previous { Self::save_in(&tx,"__project_return__",previous)?; }
+        else { tx.execute("DELETE FROM workspaces WHERE name='__project_return__'",[]).map_err(db_error)?; }
+        tx.execute("INSERT INTO project_session VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET name=excluded.name",params![name]).map_err(db_error)?;
+        tx.commit().map_err(db_error)
+    }
+    pub(crate) fn session_project(&self) -> io::Result<Option<String>> {
+        self.connection()?.query_row("SELECT name FROM project_session WHERE id=1",[],|r|r.get(0)).optional().map(|r|r.flatten()).map_err(db_error)
     }
 
     pub fn save_preferences(&self, prefs: &crate::interface::Preferences) -> io::Result<()> {
@@ -187,6 +256,22 @@ impl WorkspaceStore {
 
     /// Missing folders are skipped. A damaged/empty workspace is not used.
     pub fn load(&self, name: &str) -> io::Result<Option<Workspace>> {
+        self.load_inner(name, false)
+    }
+
+    pub fn load_project(&self, name: &str) -> io::Result<Option<Workspace>> {
+        let mut workspace = self.load_inner(name, true)?;
+        if let Some(w) = workspace.as_mut() {
+            for group in &mut w.groups { for tab in &mut group.tabs {
+                if let Some(anchor) = tab.pin_path.clone().filter(|_|tab.pinned) {
+                    *tab = Tab::restored(anchor.clone(), true, Some(anchor));
+                }
+            } }
+        }
+        Ok(workspace)
+    }
+
+    pub(crate) fn load_inner(&self, name: &str, keep_missing: bool) -> io::Result<Option<Workspace>> {
         Self::valid_name(name)?;
         let conn = self.connection()?;
         let settings = conn.query_row("SELECT active_tab,miller_mode FROM workspaces WHERE name=?1",params![name],
@@ -194,9 +279,9 @@ impl WorkspaceStore {
         let Some((old_active,miller)) = settings else { return Ok(None); };
         let layout = conn.query_row("SELECT tree,active_group FROM workspace_layout WHERE workspace_name=?1",params![name],
             |r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?))).optional().map_err(db_error)?;
-        let mut stmt = conn.prepare("SELECT group_id,position,left_path,right_path,pinned FROM workspace_tabs
+        let mut stmt = conn.prepare("SELECT group_id,position,left_path,right_path,pinned,pin_path FROM workspace_tabs
             WHERE workspace_name=?1 ORDER BY group_id,position LIMIT 201").map_err(db_error)?;
-        let rows = stmt.query_map(params![name], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?)))
+        let rows = stmt.query_map(params![name], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?,r.get::<_,Option<String>>(5)?)))
             .map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
         if rows.len() > MAX_RESTORED_TABS { return Ok(None); }
         if let Some((tree,active)) = &layout {
@@ -209,8 +294,9 @@ impl WorkspaceStore {
             for (id,active_tab,view) in &saved {
                 if *id < 0 { continue; } saved_ids.push(GroupId(*id as u64));
                 let mut tabs = Vec::new(); let mut selected = 0;
-                for (_,position,path,_,pin) in rows.iter().filter(|row|row.0 == *id) {
-                    let Ok(mut tab) = Tab::new(path) else { continue; }; tab.pinned = *pin;
+                for (_,position,path,_,pin,anchor) in rows.iter().filter(|row|row.0 == *id) {
+                    if !keep_missing && !Path::new(path).is_dir() { continue; }
+                    let tab = Tab::restored(PathBuf::from(path), *pin, anchor.as_ref().map(PathBuf::from));
                     if *position <= *active_tab { selected = tabs.len(); } tabs.push(tab);
                 }
                 if !tabs.is_empty() { groups.push(Group { id: GroupId(*id as u64), tabs, active_tab: selected, miller: view.unwrap_or(miller) }); }
@@ -236,9 +322,9 @@ impl WorkspaceStore {
         }
         // Legacy saves and damaged layouts open every accessible tab in one group.
         let mut tabs = Vec::new(); let mut selected = 0; let mut right_paths = Vec::new(); let mut right_active = None;
-        for (_,position,left,right,pin) in &rows {
-            if let Ok(mut tab) = Tab::new(left) {
-                tab.pinned = *pin; if *position <= old_active { selected = tabs.len(); } tabs.push(tab);
+        for (_,position,left,right,pin,anchor) in &rows {
+            if keep_missing || Path::new(left).is_dir() {
+                let tab = Tab::restored(PathBuf::from(left), *pin, anchor.as_ref().map(PathBuf::from)); if *position <= old_active { selected = tabs.len(); } tabs.push(tab);
             }
             if layout.is_none() {
                 if let Some(path) = right {

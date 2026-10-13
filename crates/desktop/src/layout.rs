@@ -71,7 +71,7 @@ pub fn reveal_column_offset(
     actual_width: f32,
     offset: f32,
 ) -> f32 {
-    let preview_width = widths.get(current + 1).copied().unwrap_or(0.);
+    let preview_width = widths.get(current + 1).copied().filter(|preview|actual_width + preview <= viewport).unwrap_or(0.);
     reveal_offset(
         viewport,
         start,
@@ -169,6 +169,10 @@ mod tests {
             reveal_column_offset(&[144., 200., 160.], 1, 600., 720., 200., 0.),
             -480.
         );
+    }
+    #[test]
+    fn oversized_preview_keeps_current_visible() {
+        assert_eq!(reveal_column_offset(&[144.,200.,400.],1,440.,144.,200.,0.),0.);
     }
     #[test]
     fn navigating_up_reveals_column_to_the_left() {

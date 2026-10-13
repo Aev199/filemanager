@@ -45,3 +45,5 @@ mod replacement;
 pub mod interface;
 
 pub mod panes;
+
+pub mod projects;

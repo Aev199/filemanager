@@ -354,7 +354,6 @@ impl Explorer {
     }
 
     pub(crate) fn close_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.browser.active_group().tabs.get(index).is_some_and(|tab|tab.pinned) { return; }
         self.browser.close_tab(self.browser.active, index);
         self.prune_group_state();
         self.selected = None;
@@ -459,6 +458,7 @@ impl Explorer {
     /// Escape never submits a filesystem change or silently cancels a copy.
     /// It only dismisses transient UI state and a pending Recycle approval.
     pub(crate) fn key_dismiss(&mut self, _: &DismissOverlay, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_error.take().is_some() {cx.notify();return;}
         self.dock_hover=None;
         if cx.stop_active_drag(window) { cx.notify(); return; }
         if let Some(resize) = self.column_resize.take() {

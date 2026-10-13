@@ -9,8 +9,10 @@ fn split_move_close_and_reopen_keep_tabs_and_stable_ids() {
     let second = w.split(first, Edge::Right, Some((first, 1))).unwrap();
     assert_eq!(w.leaves(), vec![first, second]);
     w.new_tab(second, dir.path()).unwrap();
-    w.group_mut(second).unwrap().tabs[0].pinned = true;
+    w.toggle_pin(second, 0);
     w.close_tab(second, 0);
+    assert_eq!(w.group(second).unwrap().tabs.len(), 1);
+    assert!(w.reopen_closed());
     assert_eq!(w.group(second).unwrap().tabs.len(), 2);
     w.move_tab(second, 1, first, 0).unwrap();
     w.close_tab(first, 0);

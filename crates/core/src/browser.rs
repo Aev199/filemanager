@@ -16,6 +16,7 @@ pub struct Pane {
 }
 
 impl Pane {
+    pub(crate) fn restored(path: PathBuf) -> Self { Self { path, back: Vec::new(), forward: Vec::new() } }
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = canonical_directory(path)?;
         Ok(Self { path, back: Vec::new(), forward: Vec::new() })

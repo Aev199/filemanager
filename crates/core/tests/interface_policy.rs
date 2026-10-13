@@ -5,7 +5,7 @@ use filemanager_core::{
 };
 
 #[test]
-fn pinned_tabs_survive_all_close_routes_and_reorder() {
+fn pinned_tabs_survive_close_others_but_allow_explicit_close() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a");
     let b = dir.path().join("b");
@@ -17,7 +17,6 @@ fn pinned_tabs_survive_all_close_routes_and_reorder() {
     browser.new_tab(browser.active, &b).unwrap();
     browser.new_tab(browser.active, &c).unwrap();
     browser.toggle_pin(browser.active, 0);
-    browser.close_tab(browser.active, 0);
     assert_eq!(browser.active_group().tabs.len(), 3);
     browser.move_tab_within(browser.active, 0, 2);
     assert_eq!(browser.active_group().active_tab, 1);
@@ -27,7 +26,6 @@ fn pinned_tabs_survive_all_close_routes_and_reorder() {
     assert_eq!(browser.active_group().active_tab, 0);
     assert_eq!(browser.active().title, "c");
     assert!(browser.active_group().tabs[1].pinned);
-    browser.toggle_pin(browser.active, 1);
     browser.close_tab(browser.active, 1);
     assert_eq!(browser.active_group().tabs.len(), 1);
 }

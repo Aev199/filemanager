@@ -20,7 +20,7 @@ use filemanager_core::panes::{Node, Axis, Edge, tab_titles};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::TitleBar;
+use crate::projects::FavoriteDrag;
 use gpui_component::{ElementExt, InteractiveElementExt};
 
 use crate::keys;
@@ -34,7 +34,7 @@ const SIDEBAR_WIDTH: f32 = 220.;
 
 fn column_scroll_area<I: Into<gpui::ElementId>>(id: I, scroll: &gpui::ScrollHandle) -> impl IntoElement + Styled + ParentElement + use<I> {
     div().id(id).relative().track_scroll(scroll).flex_1().min_w_0().min_h_0()
-        .overflow_x_scroll().lock_scroll_axis().horizontal_scrollbar(scroll)
+        .overflow_x_scroll().lock_scroll_axis()
 }
 
 #[cfg(test)]
@@ -192,7 +192,7 @@ impl Explorer {
             }));
         for (index,tab) in tabs.iter().enumerate() {
             let active=index==active_index;
-            let closable=(tabs.len()>1 || self.browser.groups.len()>1) && !tab.pinned;
+            let closable=tabs.len()>1 || self.browser.groups.len()>1;
             let tip=tab.pane.path.display().to_string();
             strip=strip.child(div().id(("tab",index)).group("tab").flex_none().h(px(32.))
                 .min_w(px(96.)).max_w(px(200.)).pl_2().pr_1().flex().items_center().gap_2()
@@ -275,30 +275,30 @@ impl Explorer {
 
     /// Window strip above the panes: it drags the window and holds the
     /// system buttons; each pane has its own tab strip.
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        TitleBar::new().h(px(32.)).pl_0().bg(rgb(WINDOW)).border_color(rgb(BORDER))
-            .child(
-                div().h_full().flex_1().min_w_0().flex().items_end()
-                    .when(!self.show_sidebar, |bar| bar.child(
-                        div().flex_none().h_full().flex().items_center().pl_2()
-                            .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Боковая панель (Ctrl+B)", false, true)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_sidebar = true;
-                                    cx.notify();
-                                })))
-                    ))
-                    .when(self.show_sidebar, |bar| bar.child(div().w_1()))
-                    // Free space: window drag area.
-                    .child(div().flex_1().h_full())
-                    .child(
-                        div().flex_none().h_full().flex().items_center().pr_2()
-                            .child(icon_button("toggle-inspector", "fm/panel-right.svg", "Панель сведений (Ctrl+I)", self.show_inspector, true)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_inspector = !this.show_inspector;
-                                    cx.notify();
-                                })))
-                    )
-            )
+    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let controls = !cfg!(target_os="macos") && (!cfg!(target_os="linux") || matches!(window.window_decorations(),gpui::Decorations::Client {..}));
+        div().h(px(32.)).flex_none().flex().items_center().bg(rgb(WINDOW))
+            .when(cfg!(target_os="macos") && !self.show_sidebar, |bar|bar.pl(px(80.)))
+            .when(!self.show_sidebar, |bar|bar.child(icon_button("toggle-sidebar","fm/panel-left.svg","Боковая панель (Ctrl+B)",false,true)
+                .on_click(cx.listener(|this,_,_,cx| {this.show_sidebar=true;cx.notify();}))))
+            .child(div().flex_1().min_w_0().h_full().px_3().flex().items_center()
+                .window_control_area(gpui::WindowControlArea::Drag)
+                .on_mouse_down(MouseButton::Left,|_,window,_| {if cfg!(any(target_os="linux",target_os="macos")) {window.start_window_move();}})
+                .child(div().truncate().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                    .child(self.project.name.clone().unwrap_or_default())))
+            .when(self.project.name.is_some(), |bar|bar.child(icon_button("close-project","fm/x.svg","Закрыть проект",false,true)
+                .on_click(cx.listener(|this,_,_,cx|this.close_project(cx)))))
+            .child(icon_button("toggle-inspector","fm/panel-right.svg","Панель сведений (Ctrl+I)",self.show_inspector,true)
+                .on_click(cx.listener(|this,_,_,cx| {this.show_inspector=!this.show_inspector;cx.notify();})))
+            .when(controls, |bar|bar.child(icon_button("window-minimize","fm/window-minimize.svg","Свернуть",false,true)
+                .on_click(|_,window,_|window.minimize_window()))
+            .child(icon_button("window-maximize","fm/window-maximize.svg","Развернуть / восстановить",false,true)
+                .when(cfg!(target_os="windows"), |button|button.window_control_area(gpui::WindowControlArea::Max))
+                .on_click(|_,window,_| {if !cfg!(target_os="windows") {window.zoom_window();}}))
+            .child(icon_button("window-close","fm/x.svg","Закрыть окно",false,true)
+                .on_click(cx.listener(|this,_,window,cx| {
+                    if this.prepare_window_close(cx) {window.remove_window();}
+                }))))
     }
 
     // ------------------------------------------------------------- toolbar
@@ -367,6 +367,10 @@ impl Explorer {
                 .on_click(cx.listener(move |this, _, _, cx| {this.focus_group(side,cx);this.go_up(cx);})))
             .child(div().w_2())
             .child(self.breadcrumbs(side,cx))
+            .child(icon_button("favorite-current","fm/star.svg",
+                if self.favorites.contains(&pane.path) {"Убрать из избранного"} else {"Добавить в избранное"},
+                self.favorites.contains(&pane.path),true)
+                .on_click(cx.listener(move |this,_,_,cx| {let path=this.pane_path(side);this.toggle_favorite(&path,cx);})))
     }
 
     // ------------------------------------------------------------- sidebar
@@ -397,10 +401,27 @@ impl Explorer {
         let active_place = containing_place(&all, &current).map(|place| place.path.clone());
         let mut side = div().id("sidebar").flex_1().min_h_0().flex().flex_col().pb_3()
             .overflow_y_scrollbar().text_size(px(13.))
-            .child(section_title("Избранное"));
+            .child(section_title("Места"));
         for (index, place) in self.places.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
             side = side.child(self.place_row(("place", index), place, active, cx));
+        }
+        side = side.child(section_title("Избранное"));
+        for (index,path) in self.favorites.iter().enumerate() {
+            let target=path.clone();let tip=path.display().to_string();let name=browser::display_name(path);let drag_name=name.clone();
+            side=side.child(div().id(("favorite",index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
+                .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)))
+                .child(small_icon("fm/folder-fill.svg",FOLDER)).child(div().flex_1().min_w_0().truncate().child(name))
+                .tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx))
+                .on_click(cx.listener(move |this,_,_,cx|this.navigate_side(this.active_side(),&target,None,cx)))
+                .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Favorite(index),cx)))
+                .on_drag(FavoriteDrag {index},move |_: &FavoriteDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position}))
+                .drag_over::<FavoriteDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
+                .on_drop(cx.listener(move |this,data: &FavoriteDrag,_,cx|this.move_favorite(data.index,index,cx))));
+        }
+        if !self.favorites.contains(&current) {
+            side=side.child(self.sidebar_action("favorite-add","fm/plus.svg","Добавить папку",
+                cx.listener(|this,_,_,cx| {let path=this.pane_path(this.active_side());this.toggle_favorite(&path,cx);})));
         }
         side = side.child(section_title("Диски"));
         for (index, place) in self.drives.iter().enumerate() {
@@ -420,7 +441,7 @@ impl Explorer {
         }
         side = side.child(div().mt_3().child(self.drop_zone(cx)));
         if !self.workspace_names.is_empty() {
-            side = side.child(section_title("Рабочие пространства"));
+            side = side.child(section_title("Проекты"));
         }
         for (index, name) in self.workspace_names.iter().enumerate() {
             let open_name = name.clone();
@@ -428,6 +449,7 @@ impl Explorer {
             side = side.child(
                 div().id(("workspace", index)).group("workspace").mx_2().h(px(28.)).px_2().flex().items_center()
                     .gap_2().rounded_md().cursor_pointer().text_color(rgb(TEXT_MUTED))
+                    .when(self.project.name.as_ref()==Some(name),|row|row.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .child(icon("fm/layers.svg", TEXT_MUTED))
                     .child(div().flex_1().min_w_0().truncate().child(name.clone()))
@@ -435,7 +457,7 @@ impl Explorer {
                         .items_center().justify_center().invisible().group_hover("workspace", |style| style.visible())
                         .hover(|style| style.bg(rgb(PRESSED)))
                         .child(small_icon("fm/x.svg", TEXT_DIM))
-                        .tooltip(|window, cx| Tooltip::new("Удалить рабочее пространство").build(window, cx))
+                        .tooltip(|window, cx| Tooltip::new("Удалить проект").build(window, cx))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.delete_workspace(&delete_name, cx);
@@ -444,16 +466,18 @@ impl Explorer {
             );
         }
         side = side
-            .child(self.sidebar_action("save-workspace", "fm/plus.svg", "Сохранить вкладки",
+            .child(self.sidebar_action("save-workspace", "fm/plus.svg", "Создать проект…",
                 cx.listener(|this, _, window, cx| this.begin_save_workspace(window, cx))))
             .child(self.sidebar_action("operation-review", "fm/history.svg", "Журнал операций",
                 cx.listener(|this, _, _, cx| this.toggle_operation_review(cx))));
         // Full window height like Atlas; its header also drags the window.
         div().w(px(SIDEBAR_WIDTH)).flex_none().h_full().flex().flex_col().bg(rgb(PANEL))
             .border_r_1().border_color(rgb(BORDER))
-            .child(div().h(px(40.)).flex_none().pl_3().pr_2().flex().items_center().gap_2()
-                .window_control_area(gpui::WindowControlArea::Drag)
-                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(rgb(TEXT_MUTED))
+            .child(div().h(px(32.)).flex_none().pl_3().pr_2().flex().items_center().gap_2()
+                .when(cfg!(target_os="macos"),|bar|bar.pl(px(80.)))
+                .child(div().flex_1().min_w_0().h_full().flex().items_center().truncate().text_size(px(13.)).text_color(rgb(TEXT_MUTED))
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left,|_,window,_| {if cfg!(any(target_os="linux",target_os="macos")) {window.start_window_move();}})
                     .child("Filemanager"))
                 .child(icon_button("toggle-sidebar", "fm/panel-left.svg", "Скрыть боковую панель (Ctrl+B)", false, true)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -627,8 +651,10 @@ impl Explorer {
                     }));
                 group = group.child(column);
             }
-            column_scroll_area(gpui::SharedString::from(format!("columns-{}",side.0)), &scroll)
-                .child(group)
+            // Keep the scrollbar outside the content that it scrolls.
+            div().relative().flex_1().min_w_0().min_h_0().overflow_hidden().flex()
+                .child(column_scroll_area(gpui::SharedString::from(format!("columns-{}",side.0)), &scroll).child(group))
+                .child(div().absolute().inset_0().child(gpui_component::scroll::Scrollbar::horizontal(&scroll)))
                 .into_any_element()
         } else {
             div().flex_1().min_h_0().flex().flex_col()
@@ -982,7 +1008,7 @@ impl Explorer {
     }
 
     fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mut panel = div().id("inspector").size_full().min_h_0().flex().flex_col().gap_3().p_4()
+        let mut panel = div().id("inspector").size_full().min_w_0().min_h_0().flex().flex_col().gap_3().p_3()
             .overflow_y_scrollbar().bg(rgb(PANEL)).text_size(px(13.));
         if self.document_preview.is_some() || self.preview_launch_busy {
             panel = panel.child(text_button("document-preview-close", "Закрыть предпросмотр", ButtonKind::Ghost)
@@ -994,7 +1020,7 @@ impl Explorer {
                     .child(icon_button("close-review", "fm/x.svg", "Закрыть", false, true)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_operation_review(cx)))))
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child("Последние 30 заданий. Обновляется автоматически. После сбоя проверьте оба пути; автоматического повтора нет."));
+                    .child("Последние 30 операций"));
             if let Some(control) = &self.copy_control {
                 let progress = control.progress();
                 panel = panel.child(div().child(format!("Обработано: {}/{}", progress.processed, progress.total)))
@@ -1083,30 +1109,20 @@ impl Explorer {
         );
         match &selected_entry {
             Some(entry) => {
-                let mut props = div().flex().flex_col().gap_1p5()
-                    .child(Self::property("Тип", kind_label(entry)));
+                let mut props = div().flex().flex_col().gap_1p5();
                 if !entry.is_directory {
-                    props = props.child(Self::property("Размер", format!("{} ({} байт)", format_size(entry.size), entry.size)));
+                    props = props.child(Self::property("Размер", format_size(entry.size)));
                 }
                 if let Some(modified) = entry.modified {
                     props = props.child(Self::property("Изменён", format_time(modified)));
                 }
-                props = props.child(Self::property("Путь", entry.path.display().to_string()));
                 panel = panel.child(props);
-                let open_path = entry.path.clone();
-                let is_dir = entry.is_directory;
-                let copy_target = entry.path.clone();
-                panel = panel.child(
-                    // Wraps instead of pushing «Копировать путь» past a narrow panel.
-                    div().flex().flex_wrap().gap_2()
-                        .child(text_button("inspector-open", "Открыть", ButtonKind::Primary).flex_grow(1.)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let side = this.active_side();
-                                this.open_entry(open_path.clone(), is_dir, side, cx);
-                            })))
-                        .child(text_button("inspector-copy-path", "Копировать путь", ButtonKind::Ghost).flex_grow(1.)
-                            .on_click(cx.listener(move |this, _, _, cx| this.copy_path(&copy_target, cx))))
-                );
+                let copy_target=entry.path.clone();let tip=entry.path.display().to_string();
+                panel=panel.child(div().flex().items_center().gap_1().min_w_0()
+                    .child(div().id("inspector-path").flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                        .child(tip.clone()).tooltip(move |window,cx|Tooltip::new(tip.clone()).build(window,cx)))
+                    .child(icon_button("inspector-copy-path","fm/copy.svg","Копировать путь",false,true)
+                        .on_click(cx.listener(move |this,_,_,cx|this.copy_path(&copy_target,cx)))));
                 if let Some(undo) = self.undo_stack.last() {
                     panel = panel.child(
                         text_button("undo-last", format!("Отменить: {}", undo.label), ButtonKind::Ghost)
@@ -1151,8 +1167,11 @@ impl Explorer {
             return div().into_any_element();
         }
         let mut section = div().flex().flex_col().gap_0p5().pt_2().border_t_1().border_color(rgb(BORDER))
-            .child(div().pb_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(format!("Версии · {}", self.inspector_versions.len())));
+            .child(div().id("versions-toggle").h(px(28.)).flex().items_center().gap_1().cursor_pointer().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                .child(small_icon(if self.versions_expanded {"fm/chevron-down.svg"} else {"fm/chevron-right.svg"},TEXT_MUTED))
+                .child(format!("Версии · {}", self.inspector_versions.len()))
+                .on_click(cx.listener(|this,_,_,cx| {this.versions_expanded=!this.versions_expanded;cx.notify();})));
+        if !self.versions_expanded {return section.into_any_element();}
         for (index, member) in self.inspector_versions.iter().enumerate() {
             let current = self.selected.as_ref() == Some(&member.path);
             let path = member.path.clone();
@@ -1180,8 +1199,7 @@ impl Explorer {
         if let Some(thumbnail) = self.inspector_thumbnail.clone().filter(|_| self.inspector_path.as_ref() == Some(&entry.path)) {
             return div().flex().flex_col().gap_1()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Предпросмотр"))
-                .child(div().w_full().h(px(240.)).p_1().rounded_md().bg(rgb(SURFACE))
-                    .border_1().border_color(rgb(BORDER)).flex().items_center().justify_center()
+                .child(div().w_full().h(px(240.)).p_1().flex().items_center().justify_center()
                     .child(img(thumbnail).size_full().object_fit(ObjectFit::Contain)))
                 .into_any_element();
         }
@@ -1196,9 +1214,10 @@ impl Explorer {
                     "Файл недоступен" => "Файл недоступен",
                     _ => "Предпросмотр",
                 }))
-                .child(div().id("preview-text").max_h(px(240.)).overflow_y_scrollbar().p_2().rounded_md()
-                    .bg(rgb(SURFACE)).border_1().border_color(rgb(BORDER))
-                    .text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(description.clone()))
+                .child(div().id("preview-text").h(px(260.)).min_w_0().overflow_scrollbar()
+                    .text_size(px(12.)).font_family("monospace").text_color(rgb(TEXT_MUTED))
+                    .child(div().flex().flex_col().children(description.lines().enumerate().map(|(index,line)|
+                        div().id(("preview-line",index)).whitespace_nowrap().flex_none().child(if line.is_empty() {" ".to_owned()} else {line.to_owned()})))))
                 .into_any_element(),
             _ => div().into_any_element(),
         }
@@ -1207,21 +1226,18 @@ impl Explorer {
     fn history_section(&self, cx: &mut Context<Self>) -> AnyElement {
         let watching = self.watched_root.is_some();
         let mut section = div().flex().flex_col().gap_2().pt_2().border_t_1().border_color(rgb(BORDER))
-            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("История изменений"))
-            .child(div().flex()
-                .child(text_button("watch-toggle", if watching { "Остановить" } else { "Записывать историю" },
-                    ButtonKind::Ghost).text_size(px(12.))
-                    .on_click(cx.listener(|this, _, _, cx| this.watch(cx)))));
-        if self.watched_root.is_some() {
-            let tint = if self.live_watch_error.is_some() { DANGER } else { SUCCESS };
-            section = section.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(tint))
-                .child(small_icon("fm/eye-watch.svg", tint))
-                .child(div().flex_1().min_w_0().truncate().child("Записывается")));
-        }
+            .child(div().flex().items_center().gap_1()
+                .child(div().id("history-toggle").flex_1().min_w_0().h(px(28.)).flex().items_center().gap_1().cursor_pointer()
+                    .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+                    .child(small_icon(if self.history_expanded {"fm/chevron-down.svg"} else {"fm/chevron-right.svg"},TEXT_MUTED))
+                    .child("История изменений")
+                    .on_click(cx.listener(|this,_,_,cx| {this.history_expanded=!this.history_expanded;cx.notify();})))
+                .child(icon_button("watch-toggle","fm/eye-watch.svg",if watching {"Остановить запись истории"} else {"Записывать историю"},watching,true)
+                    .on_click(cx.listener(|this,_,_,cx|this.watch(cx)))));
         if let Some(reason) = &self.live_watch_error {
             section = section.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(reason.clone()));
         }
-        if self.selected.is_none() || self.journal.is_none() {
+        if !self.history_expanded || self.selected.is_none() || self.journal.is_none() {
             return section.into_any_element();
         }
         if self.inspector_history.is_empty() && !self.inspector_loading {
@@ -1238,21 +1254,21 @@ impl Explorer {
                 .map(|name| version_label(&filemanager_core::versions::parse(&name.to_string_lossy())))
                 .unwrap_or_default());
             section = section.child(
-                div().id(("history-event", event_id as usize)).p_2().rounded_md().cursor_pointer()
+                div().id(("history-event", event_id as usize)).py_2().px_1().cursor_pointer()
                     .flex().flex_col().gap_0p5().text_size(px(12.))
-                    .bg(rgb(if chosen { ACCENT_SOFT } else { SURFACE }))
-                    .border_1().border_color(rgb(if chosen { SELECTED_BORDER } else { BORDER }))
-                    .hover(|style| style.border_color(rgb(BORDER_STRONG)))
+                    .when(chosen,|row|row.bg(rgb(ACCENT_SOFT)))
+                    .border_b_1().border_color(rgb(BORDER))
+                    .hover(|style| style.bg(rgb(HOVER)))
                     .child(div().text_color(rgb(TEXT)).child(format!("{} · {}", event.kind_label(), event.display_time())))
                     .when(event_version.is_some(), |this| this.child(
                         div().text_color(rgb(ACCENT)).child(event_version.clone().unwrap_or_default())))
-                    .child(div().text_color(rgb(TEXT_MUTED)).child(format!("Автор: {}",
-                        event.author.as_deref().unwrap_or("не указан"))))
-                    .child(div().text_color(rgb(TEXT_DIM)).child(format!("Учётная запись: {}", event.recorded_by)))
-                    .when(!event.comment.is_empty(), |this| this.child(
+                    .when(event.author.as_ref().is_some_and(|author|!author.is_empty()),|row|row.child(
+                        div().text_color(rgb(TEXT_MUTED)).child(event.author.clone().unwrap_or_default())))
+                    .when(chosen,|row|row.child(div().text_color(rgb(TEXT_DIM)).child(format!("Учётная запись: {}", event.recorded_by))))
+                    .when(chosen && !event.comment.is_empty(), |this| this.child(
                         div().text_color(rgb(TEXT)).child(event.comment.clone())))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.selected_history_event = Some(event_id);
+                        this.selected_history_event = if this.selected_history_event==Some(event_id) {None} else {Some(event_id)};
                         this.comment_input.update(cx, |input, cx| input.set_value(saved_comment.clone(), window, cx));
                         this.author_input.update(cx, |input, cx| input.set_value(saved_author.clone(), window, cx));
                         cx.notify();
@@ -1377,6 +1393,17 @@ impl Explorer {
             }));
         let staged = self.zone.items().len();
         match &menu.target {
+            MenuTarget::Favorite(index) => {
+                if let Some(path)=self.favorites.get(*index) {
+                    let path=path.clone();let index=*index;
+                    list=list.child(Self::menu_item("favorite-remove","fm/x.svg","Убрать из избранного","",false,true)
+                        .on_click(cx.listener(move |this,_,_,cx|this.toggle_favorite(&path,cx))))
+                        .child(Self::menu_item("favorite-up","fm/arrow-up.svg","Выше","",false,index>0)
+                            .on_click(cx.listener(move |this,_,_,cx|this.move_favorite(index,index.saturating_sub(1),cx))))
+                        .child(Self::menu_item("favorite-down","fm/chevron-down.svg","Ниже","",false,index+1<self.favorites.len())
+                            .on_click(cx.listener(move |this,_,_,cx|this.move_favorite(index,index+1,cx))));
+                }
+            }
             MenuTarget::Entry(path) => {
                 let is_dir = self.directory_cache.get(path.parent().unwrap_or(path))
                     .and_then(|listing| listing.entries.iter().find(|e| &e.path == path).map(|e| e.is_directory))
@@ -1390,6 +1417,10 @@ impl Explorer {
                         this.open_entry(open_path.clone(), is_dir, side, cx);
                     })));
                 if is_dir {
+                    let favorite_path=path.clone();
+                    list=list.child(Self::menu_item("m-favorite","fm/star.svg",
+                        if self.favorites.contains(path) {"Убрать из избранного"} else {"Добавить в избранное"},"",false,true)
+                        .on_click(cx.listener(move |this,_,_,cx|this.toggle_favorite(&favorite_path,cx))));
                     let tab_path = path.clone();
                     let other_path = path.clone();
                     list = list
@@ -1538,7 +1569,7 @@ impl Explorer {
                 let Some(tabs) = self.browser.group(group).map(|g| &g.tabs) else { return div().into_any_element(); };
                 if index >= tabs.len() { return div().into_any_element(); }
                 let many = tabs.len() > 1;
-                let closable = (many || self.browser.groups.len() > 1) && !tabs[index].pinned;
+                let closable = many || self.browser.groups.len() > 1;
                 list = list
                     .child(Self::menu_item("m-tab-new", "fm/plus.svg", "Новая вкладка", "Ctrl+T", false, true)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -1593,7 +1624,7 @@ impl Explorer {
             for error in &self.bulk_rename_errors { rows = rows.child(error.clone()); }
             return Some(div().id("bulk-rename-result").absolute().inset_0().flex().items_center().justify_center()
                 .bg(rgba(0x0000008C))
-                .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded_xl().bg(rgb(RAISED))
+                .child(div().w(px(620.)).max_h(px(560.)).p_4().flex().flex_col().gap_3().rounded_md().bg(rgb(RAISED))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child("Ошибки переименования группы")
                     .child(rows)
@@ -1657,7 +1688,7 @@ impl Explorer {
             list = list.child(div().text_color(rgb(TEXT_DIM)).child(format!("и ещё {more}")));
         }
         let dialog = div().id("conflict-dialog").w(px(460.)).p_4().flex().flex_col().gap_3()
-            .rounded_xl().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(format!("Совпадают имена: {}", conflicts.len())))
@@ -1686,16 +1717,23 @@ impl Explorer {
     }
 
     fn dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (title, body, confirm, kind): (&str, AnyElement, &str, ButtonKind) = if self.creating_folder {
+        let (title, body, confirm, kind): (&str, AnyElement, &str, ButtonKind) = if let Some(error)=&self.close_error {
+            ("Сеанс не сохранён", div().flex().flex_col().gap_2()
+                .child("Остаться и повторить сохранение или закрыть окно без сохранения последних изменений?")
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(error.clone()))
+                .into_any_element(), "Закрыть без сохранения", ButtonKind::Danger)
+        } else if self.creating_folder {
             ("Новая папка", div().flex().flex_col().gap_2()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
                     .child(format!("В папке: {}", self.pane_path(self.active_side()).display())))
                 .child(Input::new(&self.folder_input)).into_any_element(), "Создать", ButtonKind::Primary)
         } else if self.saving_workspace {
-            ("Сохранить рабочее пространство", div().flex().flex_col().gap_2()
+            ("Создать проект", div().flex().flex_col().gap_2()
                 .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(format!("Вкладок: {}. Сохраняются только пути к папкам и вид окна.", self.browser.tab_count())))
-                .child(Input::new(&self.workspace_input)).into_any_element(), "Сохранить", ButtonKind::Primary)
+                    .child(format!("Вкладок: {}", self.browser.tab_count())))
+                .child(Input::new(&self.workspace_input))
+                .when_some(self.project_error.clone(), |body,error|body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error)))
+                .into_any_element(), "Сохранить", ButtonKind::Primary)
         } else if let Some(plans) = &self.confirm_recycle {
             let what = match plans.as_slice() {
                 [(path, _)] => format!("«{}»", browser::display_name(path)),
@@ -1711,7 +1749,7 @@ impl Explorer {
             return None;
         };
         let dialog = div().id("dialog").w(px(420.)).p_4().flex().flex_col().gap_3()
-            .rounded_xl().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(body)
@@ -1722,7 +1760,9 @@ impl Explorer {
                     })))
                 .child(text_button("dialog-confirm", confirm, kind)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if this.saving_workspace {
+                        if this.close_error.take().is_some() {
+                            this.close_document_preview(cx);window.remove_window();return;
+                        } else if this.saving_workspace {
                             this.save_named_workspace(cx);
                         } else if this.creating_folder {
                             this.create_folder(cx);
@@ -1777,7 +1817,7 @@ impl Render for Explorer {
 
         let window_width=window.viewport_size().width/px(1.);
         let sidebar_width=if self.show_sidebar {SIDEBAR_WIDTH} else {0.};
-        let inspector_width=if self.show_inspector {260.} else {0.};
+        let inspector_width=if self.show_inspector {300.} else {0.};
         let pane_width=(window_width-sidebar_width-inspector_width).max(240.);
         self.pane_width=pane_width/self.browser.groups.len() as f32;
         let height=(window.viewport_size().height/px(1.)-64.).max(240.);
@@ -1906,7 +1946,7 @@ impl Render for Explorer {
             .child(div().flex_1().min_h_0().w_full().flex()
                 .when(self.show_sidebar, |row| row.child(self.sidebar(cx)))
                 .child(div().flex_1().min_w_0().h_full().flex().flex_col()
-                    .child(self.title_bar(cx))
+                    .child(self.title_bar(window,cx))
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
                     .child(self.status_bar(cx))));
         if let Some(menu) = self.context_menu.clone() {

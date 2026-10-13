@@ -27,7 +27,7 @@ pub(crate) struct Settings {
 
 impl Explorer {
     pub(crate) fn interface_modal(&self) -> bool {
-        self.palette.is_some() || self.settings.is_some()
+        self.palette.is_some() || self.settings.is_some() || self.close_error.is_some()
     }
     fn can_open_interface(&self) -> bool {
         !self.renaming

@@ -6,11 +6,16 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GroupId(pub u64);
 #[derive(Clone, Debug)]
-pub struct Tab { pub pinned: bool, pub title: String, pub pane: Pane }
+pub struct Tab { pub pin_path: Option<PathBuf>, pub pinned: bool, pub title: String, pub pane: Pane }
 impl Tab {
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
         let pane = Pane::new(path)?;
-        Ok(Self { title: display_name(&pane.path), pane, pinned: false })
+        Ok(Self { title: display_name(&pane.path), pane, pinned: false, pin_path: None })
+    }
+    /// Restore metadata without probing an offline network drive.
+    pub fn restored(path: PathBuf, pinned: bool, pin_path: Option<PathBuf>) -> Self {
+        Self { title: display_name(&path), pane: Pane::restored(path.clone()), pinned,
+            pin_path: if pinned { Some(pin_path.unwrap_or(path)) } else { None } }
     }
     pub fn active(&self) -> &Pane { &self.pane }
     pub fn active_mut(&mut self) -> &mut Pane { &mut self.pane }
@@ -137,7 +142,7 @@ impl Workspace {
         g.active_tab += 1; g.tabs.insert(g.active_tab, tab); self.focus(id); self.check(); Ok(())
     }
     pub fn toggle_pin(&mut self, id: GroupId, index: usize) {
-        if let Some(tab) = self.group_mut(id).and_then(|g|g.tabs.get_mut(index)) { tab.pinned = !tab.pinned; }
+        if let Some(tab) = self.group_mut(id).and_then(|g|g.tabs.get_mut(index)) { tab.pinned = !tab.pinned; tab.pin_path = tab.pinned.then(||tab.pane.path.clone()); }
     }
     fn remember(&mut self, id: GroupId, tab: &Tab) {
         self.closed.push((id, tab.pane.path.clone()));
@@ -149,7 +154,7 @@ impl Workspace {
     }
     pub fn close_tab(&mut self, id: GroupId, index: usize) {
         let Some(g) = self.group(id) else { return; };
-        if index >= g.tabs.len() || g.tabs[index].pinned || (g.tabs.len() == 1 && self.groups.len() == 1) { return; }
+        if index >= g.tabs.len() || (g.tabs.len() == 1 && self.groups.len() == 1) { return; }
         let tab = self.remove_tab(id,index); self.remember(id,&tab);
         if self.group(id).unwrap().tabs.is_empty() { self.close_group(id); } self.check();
     }

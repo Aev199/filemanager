@@ -10,6 +10,7 @@ mod inspector;
 mod interface;
 mod layout;
 mod palette;
+mod projects;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -119,7 +120,7 @@ fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 /// Internal name of the session restored at startup.
-const SESSION_WORKSPACE: &str = "Default";
+
 
 /// What a right-click was aimed at.
 #[derive(Clone)]
@@ -130,6 +131,7 @@ enum MenuTarget {
     Folder(PathBuf),
     Tab(GroupId, usize),
     TabList(GroupId),
+    Favorite(usize),
 }
 
 struct RightDrag {
@@ -239,6 +241,14 @@ struct Explorer {
     directory_cache_order: VecDeque<PathBuf>,
     directory_request: u64,
     workspaces: Option<WorkspaceStore>,
+    project: filemanager_core::projects::ProjectSession,
+    favorites: Vec<PathBuf>,
+    saved_layout: String,
+    history_expanded: bool,
+    versions_expanded: bool,
+    project_error: Option<String>,
+    close_error: Option<String>,
+    session_restore_error: Option<String>,
     journal: Option<Arc<Journal>>,
     operation_journal: Option<Arc<OperationJournal>>,
     operation_review: bool,
@@ -389,10 +399,12 @@ impl Explorer {
         window.focus(&focus_handle, cx);
         let (workspaces,prefs,prefs_error)=WorkspaceStore::open_with_preferences(WorkspaceStore::default_path());
         let prefs_error=prefs_error.map(|error|format!("Настройки не прочитаны: {error}"));
-        let browser = workspaces.as_ref()
-            .and_then(|store| store.load(SESSION_WORKSPACE).ok().flatten())
-            .unwrap_or_else(|| Workspace::new(home).or_else(|_| Workspace::new("."))
-                .expect("No starting directory"));
+        let restored = workspaces.as_ref().map(filemanager_core::projects::ProjectSession::restore).transpose();
+        let (browser, project) = restored.as_ref().ok().and_then(|r|r.clone().flatten()).unwrap_or_else(||
+            (Workspace::new(home).or_else(|_| Workspace::new(".")).expect("No starting directory"), Default::default()));
+        let session_restore_error = restored.err().map(|e|e.to_string());
+        let prefs_error = session_restore_error.as_ref().map(|e|format!("Проект не восстановлен: {e}")).or(prefs_error);
+        let favorites = workspaces.as_ref().and_then(|s|s.favorites().ok()).unwrap_or_default();
         theme::set_light(prefs.light);
         Theme::change(if prefs.light { ThemeMode::Light } else { ThemeMode::Dark },Some(window),cx);
         view::apply_component_theme(cx);
@@ -464,7 +476,7 @@ impl Explorer {
             directory_errors: HashMap::new(),
             directory_cache_order: VecDeque::new(),
             directory_request: 0,
-            workspaces,
+            workspaces, project, favorites, saved_layout: String::new(), history_expanded: false, versions_expanded: false, project_error: None, close_error: None, session_restore_error,
             journal: None,
             operation_journal,
             operation_review: false,
@@ -1516,87 +1528,6 @@ impl Explorer {
         cx.notify();
     }
 
-    /// Saves the current tabs under the name typed in the dialog.
-    fn save_named_workspace(&mut self, cx: &mut Context<Self>) {
-        let name = self.workspace_input.read(cx).value().trim().to_string();
-        if name.is_empty() || name == SESSION_WORKSPACE {
-            self.status = "Введите другое имя рабочего пространства".into();
-            cx.notify();
-            return;
-        }
-        self.status = match self.workspaces.as_ref() {
-            Some(store) => match store.save(&name, &self.browser) {
-                Ok(()) => {
-                    self.saving_workspace = false;
-                    format!("Рабочее пространство «{name}» сохранено")
-                }
-                Err(error) => format!("Не удалось сохранить: {error}"),
-            },
-            None => "База рабочих пространств недоступна".to_owned(),
-        };
-        self.refresh_workspace_names();
-        cx.notify();
-    }
-
-    /// Silent save of the session, used when the window closes.
-    fn persist_workspace(&self) {
-        if let Some(store) = self.workspaces.as_ref() {
-            let _ = store.save(SESSION_WORKSPACE, &self.browser);
-        }
-    }
-
-    fn restore_workspace(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.status = match self.workspaces.as_ref() {
-            Some(store) => match store.load(name) {
-                Ok(Some(browser)) => {
-                    self.browser = browser;
-                    self.pane_measured_widths.clear();self.column_scroll_handles.clear();self.column_reveal_keys.clear();
-                    self.column_sizes.clear();self.pane_bounds.clear();self.tab_scroll.clear();self.tab_reveal.clear();
-                    self.scroll_handles.clear();self.folder_views.clear();self.column_resize=None;self.dock_hover=None;
-                    self.marquee=None;self.anchor=None;self.address_editing=None;self.select_first_when_loaded=false;
-                    self.selected = None;
-                    self.marked.clear();
-                    self.confirm_recycle = None;
-                    self.close_search();
-                    format!("Открыто рабочее пространство «{name}»")
-                },
-                Ok(None) => format!("«{name}»: папок больше нет"),
-                Err(error) => format!("Не удалось открыть: {error}"),
-            },
-            None => "База рабочих пространств недоступна".to_owned(),
-        };
-        cx.notify();
-    }
-
-    fn delete_workspace(&mut self, name: &str, cx: &mut Context<Self>) {
-        if let Some(store) = self.workspaces.as_ref() {
-            self.status = match store.delete(name) {
-                Ok(_) => format!("Рабочее пространство «{name}» удалено"),
-                Err(error) => format!("Не удалось удалить: {error}"),
-            };
-        }
-        self.refresh_workspace_names();
-        cx.notify();
-    }
-
-    fn refresh_workspace_names(&mut self) {
-        self.workspace_names = self.workspaces.as_ref()
-            .and_then(|store| store.list().ok())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|name| name != SESSION_WORKSPACE)
-            .collect();
-    }
-
-    fn begin_save_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.saving_workspace = true;
-        let suggestion = self.browser.active().title.clone();
-        self.workspace_input.update(cx, |input, cx| input.set_value(suggestion, window, cx));
-        let focus = self.workspace_input.focus_handle(cx);
-        window.focus(&focus, cx);
-        cx.notify();
-    }
-
     fn watch(&mut self, cx: &mut Context<Self>) {
         if self.watched_root.is_some() {
             self.watched_root = None;
@@ -1911,15 +1842,14 @@ fn main() {
             explorer.update(cx, |this, cx| {
                 this.load_drive_space(cx);
                 this.refresh_workspace_names();
+                this.start_project_autosave(cx);
             });
             let saver = explorer.downgrade();
             // Tabs, splits and view mode come back on the next start.
             window.on_window_should_close(cx, move |_, cx| {
-                let _ = saver.update(cx, |this, cx| {
-                    this.close_document_preview(cx);
-                    this.persist_workspace();
-                });
-                true
+                saver.update(cx, |this, cx| {
+                    this.prepare_window_close(cx)
+                }).unwrap_or(true)
             });
             // gpui_ce_components require Root as the outer window view.
             cx.new(|cx| Root::new(explorer, window, cx))
