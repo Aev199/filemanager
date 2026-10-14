@@ -489,6 +489,7 @@ impl Explorer {
         if self.close_error.take().is_some() {cx.notify();return;}
         if std::mem::take(&mut self.about_open) {cx.notify();return;}
         if self.quick_look.take().is_some() {cx.notify();return;}
+        if self.comparison.take().is_some() {cx.notify();return;}
         if self.tour.is_some() {self.close_tour(cx);return;}
         self.dock_hover=None;
         if cx.stop_active_drag(window) { cx.notify(); return; }

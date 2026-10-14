@@ -343,6 +343,70 @@ impl Explorer {
             .into_any_element()
     }
 
+    fn comparison_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        use filemanager_core::folder_compare::Difference::*;
+        let comparison = self.comparison.as_ref().unwrap();
+        let (to_right, to_left) = (comparison.count(true), comparison.count(false));
+        let side = |side: &Option<filemanager_core::folder_compare::Side>, is_dir: bool| match side {
+            Some(s) if is_dir => "папка".to_string(),
+            Some(s) => format!("{} · {}", format_size(s.size), s.modified.map(format_time).unwrap_or_default()),
+            None => "—".into(),
+        };
+        let body: AnyElement = match &comparison.rows {
+            None => div().p_4().text_color(rgb(TEXT_DIM)).child("Сравниваем…").into_any_element(),
+            Some(Err(error)) => div().p_4().text_color(rgb(DANGER)).child(format!("Сравнить не удалось: {error}")).into_any_element(),
+            Some(Ok(rows)) if rows.is_empty() => div().p_4().text_color(rgb(SUCCESS)).child("Папки совпадают: имена, размеры и даты одинаковы.").into_any_element(),
+            Some(Ok(rows)) => {
+                let shown = rows.iter().take(2000).map(|row| {
+                    let (mark, color, tip) = match row.difference {
+                        OnlyLeft => ("→", ACCENT, "Только слева"),
+                        OnlyRight => ("←", ACCENT, "Только справа"),
+                        LeftNewer => ("→", SUCCESS, "Слева новее"),
+                        RightNewer => ("←", SUCCESS, "Справа новее"),
+                        SizeDiffers => ("≠", WARNING, "Дата одинаковая, размер разный — решите сами"),
+                    };
+                    div().h(px(24.)).flex().items_center().gap_2().px_2().text_size(px(12.))
+                        .child(div().w(px(18.)).flex_none().text_color(rgb(color)).child(mark))
+                        .child(div().w(px(110.)).flex_none().text_color(rgb(TEXT_DIM)).truncate().child(tip))
+                        .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT)).child(row.relative.display().to_string()))
+                        .child(div().w(px(170.)).flex_none().truncate().text_color(rgb(TEXT_MUTED)).child(side(&row.left, row.is_dir)))
+                        .child(div().w(px(170.)).flex_none().truncate().text_color(rgb(TEXT_MUTED)).child(side(&row.right, row.is_dir)))
+                });
+                div().id("comparison-rows").flex_1().min_h_0().overflow_y_scroll().flex().flex_col()
+                    .children(shown)
+                    .when(rows.len() > 2000, |list| list.child(div().p_2().text_color(rgb(TEXT_DIM)).child(format!("Показаны первые 2000 из {}", rows.len()))))
+                    .into_any_element()
+            }
+        };
+        let card = div().id("comparison").w(gpui::relative(0.85)).h(gpui::relative(0.85)).flex().flex_col()
+            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
+            .child(div().p_3().flex().flex_col().gap_1().border_b_1().border_color(rgb(BORDER))
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child("Сравнение папок"))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).truncate().child(format!("Слева: {}", comparison.left.display())))
+                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).truncate().child(format!("Справа: {}", comparison.right.display()))))
+            .child(div().h(px(24.)).flex().items_center().gap_2().px_2().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                .border_b_1().border_color(rgb(BORDER))
+                .child(div().w(px(136.)).flex_none()).child(div().flex_1().child("Путь"))
+                .child(div().w(px(170.)).flex_none().child("Слева")).child(div().w(px(170.)).flex_none().child("Справа")))
+            .child(body)
+            .child(div().p_3().flex().items_center().gap_2().border_t_1().border_color(rgb(BORDER))
+                .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                    .child("Сравниваются имена, размеры и даты. Новый файл заменяет старый, старый уходит в Корзину."))
+                .child(text_button("comparison-again", "Сравнить снова", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this,_,_,cx| this.rerun_comparison(cx))))
+                .child(text_button("comparison-left", format!("← Скопировать влево ({to_left})"), if to_left > 0 { ButtonKind::Primary } else { ButtonKind::Ghost })
+                    .when(to_left > 0, |b| b.on_click(cx.listener(|this,_,_,cx| this.sync_comparison(false, cx)))))
+                .child(text_button("comparison-right", format!("Скопировать вправо ({to_right}) →"), if to_right > 0 { ButtonKind::Primary } else { ButtonKind::Ghost })
+                    .when(to_right > 0, |b| b.on_click(cx.listener(|this,_,_,cx| this.sync_comparison(true, cx)))))
+                .child(text_button("comparison-close", "Закрыть", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this,_,_,cx| {this.comparison=None;cx.notify();}))));
+        div().id("comparison-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x0000008C))
+            .child(card)
+            .into_any_element()
+    }
+
     fn quick_look_view(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::quick_look::QuickContent;
         let look = self.quick_look.as_ref().unwrap();
@@ -1797,6 +1861,8 @@ impl Explorer {
                             this.context_menu = None;
                             this.copy_path(&copy_target, cx);
                         })))
+                    .when(self.browser.groups.len() > 1, |list| list.child(Self::menu_item("m-folder-compare", "fm/split.svg", "Сравнить с соседней панелью", "", false, true)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_comparison(cx)))))
                     .child(Self::menu_item("m-folder-measure", "fm/drive.svg", "Посчитать размер папки", "", false, true)
                         .on_click(cx.listener({ let target = vec![folder.clone()]; move |this, _, _, cx| this.measure_folders(target.clone(), cx) })))
                     .when(filemanager_core::path_utils::is_network_path(folder) && !folder.to_string_lossy().starts_with(r"\\"), |list| {
@@ -2286,6 +2352,7 @@ impl Render for Explorer {
         }
         self.follow_quick_look(cx);
         if self.quick_look.is_some() { root=root.child(self.quick_look_view(cx)); }
+        if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
         if self.about_open { root=root.child(self.about_panel(cx)); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }

@@ -13,6 +13,7 @@ mod palette;
 mod projects;
 mod folder_sizes;
 mod quick_look;
+mod compare;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -77,7 +78,7 @@ impl Render for FileDragPreview {
 }
 
 /// A copy or move waiting to run (or for the conflict dialog).
-struct Transfer {
+pub(crate) struct Transfer {
     zone: DropZone,
     target: PathBuf,
     copy: bool,
@@ -246,6 +247,9 @@ struct Explorer {
     recent: Vec<PathBuf>,
     sizes: folder_sizes::FolderSizes,
     quick_look: Option<quick_look::QuickLook>,
+    comparison: Option<compare::Comparison>,
+    /// Folders of a running sync still to copy.
+    sync_queue: std::collections::VecDeque<Transfer>,
     drives: Vec<Place>,
     /// Free and total bytes per local drive, filled in the background.
     drive_space: HashMap<PathBuf, (u64, u64)>,
@@ -489,6 +493,8 @@ impl Explorer {
             all_places: places::user_places(),
             sizes: Default::default(),
             quick_look: None,
+            comparison: None,
+            sync_queue: Default::default(),
             recent: workspaces.as_ref().and_then(|store| store.value(projects::RECENT).ok().flatten())
                 .map(|text| text.lines().map(PathBuf::from).collect()).unwrap_or_default(),
             drives: places::drives(),
@@ -910,7 +916,8 @@ impl Explorer {
             }
             transfer.keep_both = true;
         }
-        let conflicts = if transfer.keep_both { Vec::new() } else { transfer.zone.conflicts_in(&transfer.target) };
+        // A replacing transfer was already decided on (conflict dialog, sync).
+        let conflicts = if transfer.keep_both || transfer.replace { Vec::new() } else { transfer.zone.conflicts_in(&transfer.target) };
         if conflicts.is_empty() {
             self.execute_transfer(transfer, cx);
         } else {
@@ -1046,6 +1053,11 @@ impl Explorer {
                 if !created.is_empty() {
                     let label = format!("копирование ({})", created.len());
                     this.push_undo(created, label);
+                }
+                if !this.sync_queue.is_empty() {
+                    let left = this.sync_queue.len();
+                    this.status = format!("{} · синхронизация: осталось папок {left}", this.status);
+                    this.continue_sync(cx);
                 }
                 cx.notify();
             });
@@ -1378,6 +1390,7 @@ impl Explorer {
     }
 
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {
+        self.sync_queue.clear();
         if let Some(control) = &self.copy_control {
             control.set_paused(false);
             control.cancel();

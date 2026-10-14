@@ -19,6 +19,8 @@ pub mod path_utils;
 
 pub mod folder_size;
 
+pub mod folder_compare;
+
 pub mod dwg;
 
 pub mod operation_journal;

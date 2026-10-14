@@ -39,6 +39,7 @@ pub enum CommandId {
     PinTab,
     Settings,
     Tour,
+    Compare,
 }
 #[derive(Clone, Copy)]
 pub struct CommandSpec {
@@ -89,6 +90,7 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (Refresh, "Обновить папку", "F5", NAVIGATION),
         (NewFolder, "Новая папка", "Ctrl+Shift+N", FILES),
         (Rename, "Переименовать выбранное", "F2", FILES),
+        (Compare, "Сравнить с соседней панелью", "", FILES),
         (ToggleHidden, "Показать скрытые файлы", "Ctrl+.", VIEW),
         (Sidebar, "Боковая панель", "Ctrl+B", VIEW),
         (Inspector, "Панель сведений", "Ctrl+I", VIEW),
