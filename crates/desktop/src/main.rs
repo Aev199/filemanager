@@ -191,6 +191,8 @@ struct ContextMenu {
 struct FolderView {
     listing: Arc<browser::Listing>,
     spec: SortSpec,
+    /// Folder sizes known when sorted; a new size re-sorts a size order.
+    sizes: u64,
     show_hidden: bool,
     filter: String,
     indices: Arc<Vec<usize>>,
@@ -245,6 +247,8 @@ struct Explorer {
     all_places: Vec<Place>,
     /// Folders used recently, most recent first.
     recent: Vec<PathBuf>,
+    /// Sidebar sections folded by the user.
+    collapsed: HashSet<String>,
     sizes: folder_sizes::FolderSizes,
     quick_look: Option<quick_look::QuickLook>,
     comparison: Option<compare::Comparison>,
@@ -253,7 +257,8 @@ struct Explorer {
     drives: Vec<Place>,
     /// Free and total bytes per local drive, filled in the background.
     drive_space: HashMap<PathBuf, (u64, u64)>,
-    sort: SortSpec,
+    /// Sort order of each pane, chosen by its list header.
+    sorts: HashMap<GroupId, SortSpec>,
     show_hidden: bool,
     show_sidebar: bool,
     show_inspector: bool,
@@ -495,6 +500,8 @@ impl Explorer {
                 workspaces.as_ref().and_then(|store| store.value(projects::PLACES).ok().flatten()).as_deref()),
             all_places: places::user_places(),
             sizes: Default::default(),
+            collapsed: workspaces.as_ref().and_then(|store| store.value(projects::COLLAPSED).ok().flatten())
+                .map(|text| text.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default(),
             quick_look: None,
             comparison: None,
             sync_queue: Default::default(),
@@ -502,7 +509,7 @@ impl Explorer {
                 .map(|text| text.lines().map(PathBuf::from).collect()).unwrap_or_default(),
             drives: places::drives(),
             drive_space: HashMap::new(),
-            sort: SortSpec::default(),
+            sorts: HashMap::new(),
             show_hidden: prefs.show_hidden,
             show_sidebar: prefs.show_sidebar,
             show_inspector: prefs.show_inspector,
@@ -863,7 +870,11 @@ impl Explorer {
 
     fn drop_into(&mut self, paths: &[PathBuf], folder: PathBuf, copy: bool, cx: &mut Context<Self>) {
         let Some(zone) = self.zone_of(paths, cx) else { return };
-        self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, replace: false, restore_failed: false }, cx);
+        // Dragged out of «Файлы для переноса»: they leave it, and come back
+        // if the transfer does not finish.
+        let staged = paths.iter().all(|path| self.zone.items().contains(path));
+        if staged { self.zone.remove(paths); }
+        self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, replace: false, restore_failed: staged }, cx);
     }
 
     /// Validated transfer list for external paths (clipboard, drops).

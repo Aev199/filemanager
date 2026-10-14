@@ -20,6 +20,8 @@ pub(crate) struct FolderSizes {
     /// Folders whose subfolders were already queued by themselves.
     scheduled: HashSet<PathBuf>,
     running: bool,
+    /// Bumped on every measured size, so a size order sorts again.
+    pub(crate) revision: u64,
 }
 
 impl Explorer {
@@ -85,6 +87,7 @@ impl Explorer {
             let size = cx.background_spawn(async move { measure(&target, &AtomicBool::new(false)) }).await;
             if this.update(cx, |this, cx| {
                 this.sizes.known.insert(path.clone(), Some(size));
+                this.sizes.revision += 1;
                 if this.sizes.requested.remove(&path) {
                     this.status = format!("Размер «{}»: {}{}, файлов: {}", filemanager_core::browser::display_name(&path),
                         if size.complete { "" } else { "не меньше " }, filemanager_core::format::format_size(size.bytes), size.files);

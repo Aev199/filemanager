@@ -33,24 +33,43 @@ impl SortSpec {
 }
 
 pub fn compare_entries(a: &Entry, b: &Entry, spec: SortSpec) -> Ordering {
-    // Folders stay on top regardless of direction.
+    compare_with_sizes(a, b, spec, &|entry: &Entry| Some(entry.size))
+}
+
+/// As `compare_entries`; `size` gives a folder's measured size (files keep
+/// their own). Folders stay on top; equal keys keep names A→Я in either
+/// direction, so unmeasured folders do not flip to reverse order.
+pub fn compare_with_sizes(a: &Entry, b: &Entry, spec: SortSpec, size: &dyn Fn(&Entry) -> Option<u64>) -> Ordering {
     b.is_directory.cmp(&a.is_directory).then_with(|| {
+        if spec.key == SortKey::Name {
+            let ordering = natural_cmp(&a.name, &b.name);
+            return if spec.descending { ordering.reverse() } else { ordering };
+        }
         let by_key = match spec.key {
             SortKey::Name => Ordering::Equal,
-            SortKey::Size => a.size.cmp(&b.size),
-            SortKey::Modified => a.modified.cmp(&b.modified),
-            SortKey::Kind => a.extension().cmp(&b.extension()),
+            // Unmeasured folders go after measured ones in either direction.
+            SortKey::Size => match (size(a), size(b)) {
+                (Some(x), Some(y)) => if spec.descending { y.cmp(&x) } else { x.cmp(&y) },
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+            SortKey::Modified => { let o = a.modified.cmp(&b.modified); if spec.descending { o.reverse() } else { o } }
+            SortKey::Kind => { let o = a.extension().cmp(&b.extension()); if spec.descending { o.reverse() } else { o } }
         };
-        let ordering = by_key.then_with(|| natural_cmp(&a.name, &b.name));
-        if spec.descending { ordering.reverse() } else { ordering }
+        by_key.then_with(|| natural_cmp(&a.name, &b.name))
     })
 }
 
 /// Indices of `entries` in display order. Listings stay shared and
 /// unsorted copies are never made.
 pub fn sorted_indices(entries: &[Entry], spec: SortSpec) -> Vec<usize> {
+    sorted_indices_with(entries, spec, &|entry: &Entry| Some(entry.size))
+}
+
+pub fn sorted_indices_with(entries: &[Entry], spec: SortSpec, size: &dyn Fn(&Entry) -> Option<u64>) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..entries.len()).collect();
-    indices.sort_by(|&a, &b| compare_entries(&entries[a], &entries[b], spec));
+    indices.sort_by(|&a, &b| compare_with_sizes(&entries[a], &entries[b], spec, size));
     indices
 }
 
@@ -134,6 +153,22 @@ mod tests {
         assert_eq!(names(SortSpec { key: SortKey::Modified, descending: false }), ["dir", "big.bin", "small.txt"]);
         assert_eq!(names(SortSpec { key: SortKey::Name, descending: true }), ["dir", "small.txt", "big.bin"]);
         assert_eq!(names(SortSpec { key: SortKey::Kind, descending: false }), ["dir", "big.bin", "small.txt"]);
+    }
+
+    #[test]
+    fn measured_folder_sizes_sort_and_ties_keep_names_ascending() {
+        let entries = vec![
+            entry("Оценка", true, 0, 1),
+            entry("Лира", true, 0, 1),
+            entry("Сваи", true, 0, 1),
+            entry("b.pdf", false, 5, 1),
+            entry("a.pdf", false, 5, 1),
+        ];
+        let sizes = |e: &Entry| match e.name.as_str() { "Оценка" => Some(7), "Сваи" => Some(122), "Лира" => None, _ => Some(e.size) };
+        let names = |descending| sorted_indices_with(&entries, SortSpec { key: SortKey::Size, descending }, &sizes)
+            .into_iter().map(|i| entries[i].name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names(true), ["Сваи", "Оценка", "Лира", "a.pdf", "b.pdf"]);
+        assert_eq!(names(false), ["Оценка", "Сваи", "Лира", "a.pdf", "b.pdf"]);
     }
 
     #[test]

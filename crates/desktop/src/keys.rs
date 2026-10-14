@@ -109,25 +109,37 @@ impl Explorer {
         let listing = Arc::clone(self.directory_cache.get(folder)?);
         // The quick filter applies to the focused pane's folder only.
         let filter = if group == self.browser.active && folder == self.pane_path(group) { self.filter.clone() } else { String::new() };
+        let spec = self.sort_for(group);
+        let sizes = if spec.key == filemanager_core::sort::SortKey::Size { self.sizes.revision } else { 0 };
         if let Some(view) = self.folder_views.get(&(group,folder.to_path_buf())) {
             if Arc::ptr_eq(&view.listing, &listing)
-                && view.spec == self.sort
+                && view.spec == spec
+                && view.sizes == sizes
                 && view.show_hidden == self.show_hidden
                 && view.filter == filter
             {
                 return Some((listing, Arc::clone(&view.indices)));
             }
         }
-        let indices = selection::visible_indices(&listing.entries,self.sort,self.show_hidden,&filter);
+        let known = &self.sizes.known;
+        let size = |entry: &browser::Entry| if entry.is_directory {
+            known.get(&entry.path).copied().flatten().map(|s| s.bytes)
+        } else { Some(entry.size) };
+        let indices = selection::visible_indices_with(&listing.entries,spec,self.show_hidden,&filter,&size);
         let indices = Arc::new(indices);
         self.folder_views.insert((group,folder.to_path_buf()), FolderView {
             listing: Arc::clone(&listing),
-            spec: self.sort,
+            spec,
+            sizes,
             show_hidden: self.show_hidden,
             filter,
             indices: Arc::clone(&indices),
         });
         Some((listing, indices))
+    }
+
+    pub(crate) fn sort_for(&self, group: GroupId) -> filemanager_core::sort::SortSpec {
+        self.sorts.get(&group).copied().unwrap_or_default()
     }
 
     pub(crate) fn scroll_handle(&mut self, side: GroupId, folder: &Path) -> gpui::UniformListScrollHandle {

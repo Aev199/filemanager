@@ -28,8 +28,14 @@ pub fn toggle(marked: &mut Vec<PathBuf>, path: &Path) {
 
 /// Display order for a folder snapshot under the effective filter.
 pub fn visible_indices(entries: &[crate::browser::Entry], sort: crate::sort::SortSpec, show_hidden: bool, filter: &str) -> Vec<usize> {
+    visible_indices_with(entries, sort, show_hidden, filter, &|entry: &crate::browser::Entry| Some(entry.size))
+}
+
+/// `size` gives measured folder sizes for sorting by size.
+pub fn visible_indices_with(entries: &[crate::browser::Entry], sort: crate::sort::SortSpec, show_hidden: bool, filter: &str,
+    size: &dyn Fn(&crate::browser::Entry) -> Option<u64>) -> Vec<usize> {
     let filter=filter.to_lowercase();
-    let mut indices=crate::sort::sorted_indices(entries,sort);
+    let mut indices=crate::sort::sorted_indices_with(entries,sort,size);
     indices.retain(|&i| (show_hidden || !entries[i].hidden) && (filter.is_empty() || entries[i].name.to_lowercase().contains(&filter)));
     indices
 }

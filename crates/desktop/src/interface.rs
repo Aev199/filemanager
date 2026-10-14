@@ -591,7 +591,7 @@ impl Explorer {
             indices,
             bounds,
             scroll,
-            sort: self.sort,
+            sort: self.sort_for(side),
             hidden: self.show_hidden,
             miller: self.miller(side),
             filter: self.filter.clone(),
@@ -627,7 +627,7 @@ impl Explorer {
             && same_view
             && !self.interface_modal()
             && !self.search_active
-            && self.sort == m.sort
+            && self.sort_for(m.side) == m.sort
             && self.show_hidden == m.hidden
             && self.miller(m.side) == m.miller
             && self.filter == m.filter

@@ -86,11 +86,6 @@ fn small_icon(path: &'static str, color: u32) -> gpui::Svg {
     svg().path(path).flex_none().size(px(14.)).text_color(rgb(color))
 }
 
-fn section_title(text: &'static str) -> Div {
-    div().px_3().pt_3().pb_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-        .font_weight(gpui::FontWeight::SEMIBOLD).child(text)
-}
-
 /// Square ghost button with an icon and a tooltip.
 fn icon_button(
     id: impl Into<ElementId>,
@@ -602,16 +597,30 @@ impl Explorer {
             .on_drop(cx.listener(|this, data: &FileDragInfo, _, cx| this.stage_paths(&data.paths, cx)))
     }
 
+    /// A sidebar section title; a click folds the section away or back.
+    fn section(&self, key: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let folded = self.collapsed.contains(key);
+        div().id(SharedString::from(format!("section-{key}"))).mx_1().px_2().pt_3().pb_1().flex().items_center().gap_1()
+            .rounded_sm().cursor_pointer().group("section")
+            .text_size(px(12.)).text_color(rgb(TEXT_MUTED)).font_weight(gpui::FontWeight::SEMIBOLD)
+            .hover(|style| style.text_color(rgb(TEXT)))
+            .child(div().flex_1().child(key))
+            .child(svg().path(if folded { "fm/chevron-right.svg" } else { "fm/chevron-down.svg" }).size(px(12.))
+                .text_color(rgb(TEXT_DIM)).when(!folded, |chevron| chevron.invisible().group_hover("section", |style| style.visible())))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(key, cx)))
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.pane_path(self.active_side());
         let all: Vec<Place> = self.places.iter().chain(self.drives.iter()).cloned().collect();
         let active_place = containing_place(&all, &current).map(|place| place.path.clone());
         let mut side = div().id("sidebar").flex_1().min_h_0().flex().flex_col().pb_3()
             .overflow_y_scrollbar().text_size(px(13.))
-            .child(div().id("places-title").child(section_title("Места"))
+            .child(self.section("Места", cx)
                 .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(None),cx))));
+        let open = |key: &str| !self.collapsed.contains(key);
         // Places are edited like favourites: right click hides, dragging reorders.
-        for (index, place) in self.places.iter().enumerate() {
+        for (index, place) in self.places.iter().enumerate().filter(|_| open("Места")) {
             let active = active_place.as_ref() == Some(&place.path);
             let drag_name = place.label.clone();
             side = side.child(self.place_row(("place", index), place, active, cx)
@@ -620,12 +629,12 @@ impl Explorer {
                 .drag_over::<PlaceDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &PlaceDrag,_,cx|this.move_place(data.index,index,cx))));
         }
-        if self.places.is_empty() {
+        if self.places.is_empty() && open("Места") {
             side = side.child(self.sidebar_action("places-restore","fm/plus.svg","Вернуть стандартные места",
                 cx.listener(|this,_,_,cx|this.show_all_places(cx))));
         }
-        side = side.child(section_title("Избранное"));
-        for (index,path) in self.favorites.iter().enumerate() {
+        side = side.child(self.section("Избранное", cx));
+        for (index,path) in self.favorites.iter().enumerate().filter(|_| open("Избранное")) {
             let target=path.clone();let tip=path.display().to_string();let name=browser::display_name(path);let drag_name=name.clone();
             side=side.child(div().id(("favorite",index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
                 .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style|style.bg(rgb(HOVER)))
@@ -637,14 +646,14 @@ impl Explorer {
                 .drag_over::<FavoriteDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
                 .on_drop(cx.listener(move |this,data: &FavoriteDrag,_,cx|this.move_favorite(data.index,index,cx))));
         }
-        if !self.favorites.contains(&current) {
+        if !self.favorites.contains(&current) && open("Избранное") {
             side=side.child(self.sidebar_action("favorite-add","fm/plus.svg","Добавить папку",
                 cx.listener(|this,_,_,cx| {let path=this.pane_path(this.active_side());this.toggle_favorite(&path,cx);})));
         }
         let recent = self.recent_rows();
         if !recent.is_empty() {
-            side = side.child(section_title("Недавние"));
-            for (index, path) in recent.into_iter().enumerate() {
+            side = side.child(self.section("Недавние", cx));
+            for (index, path) in recent.into_iter().enumerate().filter(|_| open("Недавние")) {
                 let target = path.clone(); let tip = path.display().to_string(); let menu_path = path.clone();
                 side = side.child(div().id(("recent", index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
                     .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
@@ -656,8 +665,8 @@ impl Explorer {
                         this.open_menu(event.position, MenuTarget::Recent(menu_path.clone()), cx))));
             }
         }
-        side = side.child(section_title("Диски"));
-        for (index, place) in self.drives.iter().enumerate() {
+        side = side.child(self.section("Диски", cx));
+        for (index, place) in self.drives.iter().enumerate().filter(|_| open("Диски")) {
             let active = active_place.as_ref() == Some(&place.path);
             side = side.child(self.place_row(("drive", index), place, active, cx));
             if let Some(&(free, total)) = self.drive_space.get(&place.path) {
@@ -674,9 +683,9 @@ impl Explorer {
         }
         side = side.child(div().mt_3().child(self.drop_zone(cx)));
         if !self.workspace_names.is_empty() {
-            side = side.child(section_title("Проекты"));
+            side = side.child(self.section("Проекты", cx));
         }
-        for (index, name) in self.workspace_names.iter().enumerate() {
+        for (index, name) in self.workspace_names.iter().enumerate().filter(|_| open("Проекты")) {
             let open_name = name.clone();
             let delete_name = name.clone();
             side = side.child(
@@ -754,14 +763,26 @@ impl Explorer {
             );
             return zone.tooltip(|window, cx| Tooltip::new("Перетащите сюда файлы, затем откройте папку назначения. Файлы не изменятся до команды копирования или переноса.").build(window, cx));
         }
-        zone = zone.child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-            .child(format!("Для переноса: {}", items.len())));
-        for path in items.iter().take(5) {
+        // Staged items are dragged out like files: the header carries all,
+        // a row carries one, into any folder, pane or program.
+        let preview = |info: &FileDragInfo, position, _: &mut Window, cx: &mut App| {
+            let name = match info.paths.as_slice() { [single] => browser::display_name(single), many => format!("{} элементов", many.len()) };
+            cx.new(|_| FileDragPreview { name, position })
+        };
+        zone = zone.child(div().id("zone-all").flex().items_center().gap_1().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
+            .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
+            .child(div().flex_1().child(format!("Для переноса: {}", items.len())))
+            .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child("тяните"))
+            .tooltip(|window, cx| Tooltip::new("Перетащите в папку или панель: тот же диск — перенос, другой — копия; Ctrl — копия, Shift — перенос").build(window, cx))
+            .on_drag(FileDragInfo { paths: items.to_vec() }, preview));
+        for (index, path) in items.iter().take(5).enumerate() {
             zone = zone.child(
-                div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT))
+                div().id(("zone-item", index)).flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT))
+                    .cursor_grab().rounded_sm().hover(|style| style.bg(rgb(HOVER)))
                     .child(small_icon(if path.is_dir() { "fm/folder-fill.svg" } else { "fm/file.svg" },
                         if path.is_dir() { FOLDER } else { TEXT_MUTED }))
                     .child(div().flex_1().min_w_0().truncate().child(browser::display_name(path)))
+                    .on_drag(FileDragInfo { paths: vec![path.clone()] }, preview)
             );
         }
         if items.len() > 5 {
@@ -972,7 +993,7 @@ impl Explorer {
     }
 
     fn list_header(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
-        let spec = self.sort;
+        let spec = self.sort_for(side);
         let (show_modified, show_kind) = self.list_columns(side);
         let header = |id: &'static str, label: &'static str, key: SortKey, cx: &mut Context<Self>| {
             let active = spec.key == key;
@@ -982,7 +1003,9 @@ impl Explorer {
                 .child(label)
                 .when(active, |this| this.child(if spec.descending { "↓" } else { "↑" }))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.sort = this.sort.toggled(key);
+                    // Each pane sorts on its own.
+                    let next = this.sort_for(side).toggled(key);
+                    this.sorts.insert(side, next);
                     cx.notify();
                 }))
         };

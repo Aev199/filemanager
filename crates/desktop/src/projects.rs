@@ -8,6 +8,8 @@ pub(crate) struct FavoriteDrag { pub index: usize }
 pub(crate) struct PlaceDrag { pub index: usize }
 /// Visible «Места» in the user's order, one path per line.
 pub(crate) const PLACES: &str = "places";
+/// Folded sidebar sections, one title per line.
+pub(crate) const COLLAPSED: &str = "collapsed_sections";
 /// Recently used folders, most recent first, one per line.
 pub(crate) const RECENT: &str = "recent";
 const RECENT_KEPT: usize = 30;
@@ -196,5 +198,13 @@ impl Explorer {
             let _=store.set_value(RECENT,&self.recent.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n"));
         }
         self.context_menu=None;cx.notify();
+    }
+    pub(crate) fn toggle_section(&mut self,key: &str,cx: &mut Context<Self>) {
+        if !self.collapsed.remove(key) { self.collapsed.insert(key.to_owned()); }
+        if let Some(store)=&self.workspaces {
+            let mut keys: Vec<&String>=self.collapsed.iter().collect(); keys.sort();
+            let _=store.set_value(COLLAPSED,&keys.into_iter().cloned().collect::<Vec<_>>().join("\n"));
+        }
+        cx.notify();
     }
 }
