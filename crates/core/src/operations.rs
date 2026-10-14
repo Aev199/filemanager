@@ -39,6 +39,8 @@ pub struct TransferProgress {
 #[derive(Default, Debug)]
 pub struct CopyControl {
     cancelled: AtomicBool,
+    /// Paused transfers wait between and inside files until resumed.
+    paused: AtomicBool,
     copied_bytes: AtomicU64,
     total_bytes: AtomicU64,
     phase: AtomicU8,
@@ -70,6 +72,14 @@ impl CopyControl {
         self.phase.store(match phase { TransferPhase::Copying => 0, TransferPhase::Verifying => 1, TransferPhase::Recycling => 2 }, Ordering::Relaxed);
     }
     pub fn cancel(&self) { self.cancelled.store(true, Ordering::Relaxed); }
+    pub fn set_paused(&self, paused: bool) { self.paused.store(paused, Ordering::Relaxed); }
+    pub fn is_paused(&self) -> bool { self.paused.load(Ordering::Relaxed) }
+    /// Holds the copying thread while paused; cancelling ends the wait.
+    pub(crate) fn wait_while_paused(&self) {
+        while self.is_paused() && !self.is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
     pub fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Relaxed) }
     pub fn bytes_copied(&self) -> u64 { self.copied_bytes.load(Ordering::Relaxed) }
     pub fn total_bytes(&self) -> u64 { self.total_bytes.load(Ordering::Relaxed) }
@@ -81,6 +91,7 @@ impl CopyControl {
         self.total_bytes.store(bytes, Ordering::Relaxed);
     }
     pub(crate) fn check(&self) -> io::Result<()> {
+        self.wait_while_paused();
         if self.is_cancelled() {
             Err(io::Error::new(io::ErrorKind::Interrupted, "Copy cancelled"))
         } else { Ok(()) }
@@ -1373,5 +1384,22 @@ mod tests {
         fs::write(&file, b"changed content").unwrap();
         assert!(plan.execute().is_err());
         assert!(file.exists());
+    }
+
+    #[test]
+    fn pause_holds_the_copy_until_resumed_or_cancelled() {
+        let control = std::sync::Arc::new(CopyControl::default());
+        control.set_paused(true);
+        let worker = std::sync::Arc::clone(&control);
+        let started = std::time::Instant::now();
+        let handle = std::thread::spawn(move || worker.check());
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(!handle.is_finished());
+        control.set_paused(false);
+        assert!(handle.join().unwrap().is_ok());
+        assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+        control.set_paused(true);
+        control.cancel();
+        assert!(control.check().is_err());
     }
 }

@@ -222,6 +222,9 @@ struct Explorer {
     copy_in_progress: bool,
     operation_busy: bool,
     copy_control: Option<Arc<CopyControl>>,
+    /// Items a transfer could not finish (e.g. the network dropped): their
+    /// target and whether it was a copy, for «Повторить сбойные».
+    retry: Option<(Vec<PathBuf>, PathBuf, bool)>,
     context_menu: Option<ContextMenu>,
     /// Pressed right button on files: a plain click opens their menu, a
     /// drag ends in the «Копировать сюда / Переместить сюда» menu.
@@ -476,6 +479,7 @@ impl Explorer {
             copy_in_progress: false,
             operation_busy: false,
             copy_control: None,
+            retry: None,
             context_menu: None,
             right_drag: None, dragging_out: false, about_open: false,
             menu_serial: 0,
@@ -975,14 +979,14 @@ impl Explorer {
                     if !this.copy_in_progress || !this.copy_control.as_ref()
                         .is_some_and(|active| Arc::ptr_eq(active, &progress)) { return false; }
                     let detail = progress.progress();
-                    let phase: String = match progress.phase() {
+                    let phase: String = if progress.is_paused() { "На паузе".into() } else { match progress.phase() {
                         TransferPhase::Verifying => "Проверка копии…".into(),
                         TransferPhase::Recycling => "Завершение переноса…".into(),
                         TransferPhase::Copying => {
                             let mib = progress.bytes_copied() as f64 / 1_048_576.0;
                             format!("{action}… {mib:.1} МБ")
                         }
-                    };
+                    } };
                     let path = detail.source.as_ref().map(|path| browser::display_name(path)).unwrap_or_default();
                     this.status = format!("{phase} · обработано {}/{} · {path}", detail.processed, detail.total);
                     cx.notify();
@@ -1033,6 +1037,7 @@ impl Explorer {
                 }
                 this.copy_in_progress = false;
                 this.copy_control = None;
+                this.retry = (errors > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), true));
                 this.load_directory(target, true, cx);
                 this.status = match first_error {
                     Some(details) => format!("Скопировано: {ok}, ошибок: {errors}. Первая ошибка: {details}"),
@@ -1095,6 +1100,7 @@ impl Explorer {
                 this.operation_busy = false;
                 this.copy_in_progress = false;
                 this.copy_control = None;
+                this.retry = (failed > 0 && !zone.items().is_empty()).then(|| (zone.items().to_vec(), target.clone(), false));
                 this.load_directory(target, true, cx);
                 for source in &sources {
                     this.refresh_parent_of(source, cx);
@@ -1347,8 +1353,33 @@ impl Explorer {
         }).detach();
     }
 
+    pub(crate) fn toggle_copy_pause(&mut self, cx: &mut Context<Self>) {
+        if let Some(control) = &self.copy_control {
+            let paused = !control.is_paused();
+            control.set_paused(paused);
+            self.status = if paused { "Передача на паузе".into() } else { "Передача продолжается…".into() };
+        }
+        cx.notify();
+    }
+
+    /// Runs the items that failed last time again, through the same safe
+    /// copy or move; items that already arrived are not touched.
+    pub(crate) fn retry_failed(&mut self, cx: &mut Context<Self>) {
+        let Some((items, target, copy)) = self.retry.take() else { return };
+        let mut zone = DropZone::default();
+        let missing = items.iter().filter(|path| zone.add(path).is_err()).count();
+        if zone.items().is_empty() {
+            self.status = "Сбойные файлы больше недоступны".into();
+            cx.notify();
+            return;
+        }
+        if missing > 0 { self.status = format!("Недоступно и пропущено: {missing}"); }
+        self.request_transfer(Transfer { zone, target, copy, keep_both: false, replace: false, restore_failed: false }, cx);
+    }
+
     fn cancel_copy(&mut self, cx: &mut Context<Self>) {
         if let Some(control) = &self.copy_control {
+            control.set_paused(false);
             control.cancel();
             self.status = "Отмена запрошена. Уже завершённые действия сохраняются.".into();
         } else {

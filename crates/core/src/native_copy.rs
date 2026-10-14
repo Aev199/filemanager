@@ -87,6 +87,8 @@ unsafe extern "system" fn progress_callback(
             .add_copied_bytes(transferred - progress.transferred);
         progress.transferred = transferred;
     }
+    // A pause holds the copy here, between chunks.
+    progress.control.wait_while_paused();
     if progress.control.is_cancelled() {
         PROGRESS_CANCEL
     } else {

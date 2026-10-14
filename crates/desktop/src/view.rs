@@ -1212,6 +1212,8 @@ impl Explorer {
             if let Some(control) = &self.copy_control {
                 let progress = control.progress();
                 panel = panel.child(div().child(format!("Обработано: {}/{}", progress.processed, progress.total)))
+                    .child(text_button("queue-pause", if control.is_paused() { "Продолжить" } else { "Пауза" }, ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_copy_pause(cx))))
                     .child(text_button("queue-cancel", "Отменить передачу", ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx))));
             }
@@ -1517,11 +1519,25 @@ impl Explorer {
             .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
                 .child(crate::messages::localize(&self.status)));
         if self.copy_in_progress {
+            let paused = self.copy_control.as_ref().is_some_and(|control| control.is_paused());
             bar = bar.child(
+                div().id("pause-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(TEXT))
+                    .hover(|style| style.bg(rgb(HOVER)))
+                    .child(if paused { "Продолжить" } else { "Пауза" })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_copy_pause(cx)))
+            ).child(
                 div().id("cancel-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(DANGER))
                     .hover(|style| style.bg(rgb(HOVER)))
                     .child("Отменить передачу")
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_copy(cx)))
+            );
+        } else if let Some((items, _, _)) = &self.retry {
+            bar = bar.child(
+                div().id("retry-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(ACCENT))
+                    .hover(|style| style.bg(rgb(HOVER)))
+                    .child(format!("Повторить сбойные ({})", items.len()))
+                    .tooltip(|window, cx| Tooltip::new("Снова скопировать или перенести файлы, которые не прошли, например при обрыве сети").build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.retry_failed(cx)))
             );
         }
         if !self.zone.items().is_empty() {
