@@ -2,9 +2,24 @@ name: Windows portable EXE (manual)
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Канал выпуска: beta — для тестирования, stable — для всех"
+        type: choice
+        options: [beta, stable]
+        default: beta
+      publish:
+        description: "Опубликовать выпуск (обновление придёт в Papka)"
+        type: boolean
+        default: true
+      notes:
+        description: "Что нового, через ; (пусто — заголовки коммитов)"
+        type: string
+        default: ""
 
+# Writing is needed only to publish the release with the EXE.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: manual-filemanager-${{ github.ref }}
@@ -20,6 +35,16 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags and history: the change list runs since the previous release.
+          fetch-depth: 0
+
+      # The build number becomes the version the app compares when updating.
+      - name: Stamp version
+        run: |
+          $commit = "${{ github.sha }}".Substring(0, 7)
+          "PAPKA_VERSION=0.1.${{ github.run_number }}" >> $env:GITHUB_ENV
+          "PAPKA_COMMIT=$commit" >> $env:GITHUB_ENV
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -161,3 +186,45 @@ jobs:
           path: Papka-win64.zip
           retention-days: 7
           if-no-files-found: error
+
+      # Papka checks GitHub Releases: Papka.exe plus latest.json with the
+      # version, SHA-256 and change list. A re-run of the same build number
+      # does not publish twice.
+      - name: Publish release for in-app updates
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $tag = "v$env:PAPKA_VERSION"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Warning "Release $tag already exists; nothing published."
+            exit 0
+          }
+          if ($env:NOTES.Trim()) {
+            $notes = @($env:NOTES -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          } else {
+            $previous = git describe --tags --abbrev=0 --match "v*" 2>$null
+            $range = if ($LASTEXITCODE -eq 0 -and $previous) { @("$previous..HEAD") } else { @("-n", "15") }
+            $notes = @(git -c i18n.logOutputEncoding=UTF-8 log --no-merges --format=%s @range)
+          }
+          $sha = (Get-FileHash "dist/Papka.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = [ordered]@{
+            version = $env:PAPKA_VERSION
+            commit = $env:PAPKA_COMMIT
+            channel = $env:CHANNEL
+            sha256 = $sha
+            notes = $notes
+          } | ConvertTo-Json -Depth 3
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText((Join-Path $PWD "dist/latest.json"), $manifest, $utf8)
+          $body = ($notes | ForEach-Object { "- $_" }) -join "`n"
+          [System.IO.File]::WriteAllText((Join-Path $PWD "dist/notes.md"), "$body`n`nSHA-256 Papka.exe: ``$sha``", $utf8)
+          $flags = @()
+          if ($env:CHANNEL -ne "stable") { $flags += "--prerelease" }
+          gh release create $tag "dist/Papka.exe" "dist/latest.json" "Papka-win64.zip" `
+            --target "${{ github.sha }}" --title "Papka $env:PAPKA_VERSION" --notes-file "dist/notes.md" @flags
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

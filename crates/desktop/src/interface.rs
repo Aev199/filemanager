@@ -24,6 +24,8 @@ pub(crate) struct Settings {
     /// Accent schemes being chosen for the dark and the light theme.
     pub accent_dark: usize,
     pub accent_light: usize,
+    pub update_auto: bool,
+    pub update_channel: filemanager_core::update::Channel,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -185,6 +187,8 @@ impl Explorer {
             },
             accent_dark: theme::accents().0,
             accent_light: theme::accents().1,
+            update_auto: self.updates.auto,
+            update_channel: self.updates.channel,
             saving: false,
             error: None,
         });
@@ -237,6 +241,7 @@ impl Explorer {
         settings.error = None;
         let prefs = settings.draft;
         let (accent_dark, accent_light) = (settings.accent_dark, settings.accent_light);
+        let (update_auto, update_channel) = (settings.update_auto, settings.update_channel);
         cx.spawn(async move |weak, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -255,6 +260,7 @@ impl Explorer {
                         settings.error = Some(format!("Не удалось сохранить настройки: {error}"));
                     }
                 } else {
+                    this.set_update_preferences(update_auto, update_channel);
                     this.show_hidden = prefs.show_hidden;
                     this.show_sidebar = prefs.show_sidebar;
                     this.show_inspector = prefs.show_inspector;
@@ -424,6 +430,32 @@ impl Explorer {
                 body = body.child(div().p_2().rounded_md().bg(rgb(SURFACE)).flex().items_center().gap_2()
                     .child(div().flex_1().child(label))
                     .child(div().flex().gap_1p5().children(swatches)));
+            }
+            // Updates: a check box and the channel, switched by clicking.
+            {
+                use filemanager_core::update::Channel;
+                let auto = settings.update_auto;
+                let channel = settings.update_channel;
+                body = body.child(div().p_2().rounded_md().bg(rgb(SURFACE)).flex().items_center().gap_2()
+                    .child(div().id("update-auto").flex_1().flex().items_center().gap_2().cursor_pointer()
+                        .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
+                            .when(auto, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
+                            .when(!auto, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
+                        .child("Проверять обновления раз в день")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_auto = !s.update_auto; cx.notify(); }
+                        })))
+                    .child(div().flex().gap_1().children([Channel::Beta, Channel::Stable].into_iter().map(|option| {
+                        let chosen = option == channel;
+                        div().id(option.key()).h(px(24.)).px_2().flex().items_center().rounded_md().cursor_pointer()
+                            .text_size(px(12.)).border_1()
+                            .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
+                            .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED)).hover(|s| s.bg(rgb(HOVER))))
+                            .child(option.label())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_channel = option; cx.notify(); }
+                            }))
+                    }))));
             }
             if let Some(error) = settings.error.as_ref() {
                 body = body.child(div().text_color(rgb(DANGER)).child(error.clone()));

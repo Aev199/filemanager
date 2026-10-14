@@ -464,7 +464,8 @@ impl Explorer {
                 .child(div().flex().items_center().gap_2()
                     .child(img("app/icon.png").size(px(28.)))
                     .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT))
-                        .child(format!("Papka {}", env!("CARGO_PKG_VERSION")))))
+                        .child(format!("Papka {}", crate::updates::VERSION)))
+                    .when(!crate::updates::COMMIT.is_empty(), |row| row.child(div().text_color(rgb(TEXT_DIM)).child(crate::updates::COMMIT))))
                 .child(div().child("Файловый менеджер для проектных папок: колонки и списки, \
                     панели с вкладками, проекты, журнал изменений файлов без хранения их содержимого."))
                 .child(div().flex().flex_wrap().gap_1()
@@ -474,8 +475,14 @@ impl Explorer {
                         .child("Евдокимов Александр")
                         .on_click(|_,_,cx| cx.open_url("https://t.me/aevd19"))))
                 .child(div().text_color(rgb(TEXT_DIM)).child(format!("Настройки и журналы: {data}")))
-                .child(div().pt_1().child(text_button("about-tour", "Экскурс по возможностям", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.open_tour(cx);})))))
+                .child(div().pt_1().flex().flex_wrap().gap_1()
+                    .child(text_button("about-tour", "Экскурс по возможностям", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.open_tour(cx);})))
+                    .child(text_button("about-update", if matches!(self.updates.phase, crate::updates::Phase::Checking) {"Проверяем…"} else {"Проверить обновления"}, ButtonKind::Ghost)
+                        .on_click(cx.listener(|this,_,_,cx| this.check_updates(true,cx))))
+                    .when(crate::updates::Updates::previous_exists(), |row| row.child(text_button("about-rollback", "Вернуть предыдущую версию", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.rollback_update(cx);})))))
+                .when_some(self.updates.note.clone(), |panel, note| panel.child(div().text_color(rgb(TEXT)).child(note))))
             .into_any_element()
     }
 
@@ -491,6 +498,7 @@ impl Explorer {
                 .window_control_area(gpui::WindowControlArea::Drag)
                 .on_mouse_down(MouseButton::Left,|_,window,_| {if cfg!(any(target_os="linux",target_os="macos")) {window.start_window_move();}})
             )
+            .children(self.update_badge(cx))
             .child(icon_button("open-settings","fm/settings.svg","Настройки (Ctrl+,)",self.settings.is_some(),true)
                 .on_click(cx.listener(|this,_,window,cx| {this.about_open=false;this.open_settings(window,cx);})))
             .child(icon_button("about","fm/help.svg","О программе",self.about_open,true)
@@ -2497,6 +2505,7 @@ impl Render for Explorer {
         if self.quick_look.is_some() { root=root.child(self.quick_look_view(cx)); }
         if self.comparison.is_some() { root=root.child(self.comparison_view(cx)); }
         if self.about_open { root=root.child(self.about_panel(cx)); }
+        if let Some(dialog)=self.update_dialog(cx) { root=root.child(dialog); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }
         root

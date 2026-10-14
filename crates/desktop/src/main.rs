@@ -16,6 +16,7 @@ mod quick_look;
 mod compare;
 mod spring;
 mod search_panel;
+mod updates;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -240,6 +241,7 @@ struct Explorer {
     dragging_out: bool,
     /// The «О программе» panel under its titlebar button.
     about_open: bool,
+    updates: updates::Updates,
     /// Step of the feature tour, while it is shown.
     tour: Option<usize>,
     menu_serial: u64,
@@ -497,7 +499,7 @@ impl Explorer {
             copy_control: None,
             retry: None,
             context_menu: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false,
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -1864,6 +1866,7 @@ fn main() {
                 this.load_drive_space(cx);
                 this.refresh_workspace_names();
                 this.start_project_autosave(cx);
+                this.start_update_checks(cx);
             });
             let saver = explorer.downgrade();
             // Tabs, splits and view mode come back on the next start.
