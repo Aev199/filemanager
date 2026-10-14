@@ -8,6 +8,10 @@ pub(crate) struct FavoriteDrag { pub index: usize }
 pub(crate) struct PlaceDrag { pub index: usize }
 /// Visible «Места» in the user's order, one path per line.
 pub(crate) const PLACES: &str = "places";
+/// Recently used folders, most recent first, one per line.
+pub(crate) const RECENT: &str = "recent";
+const RECENT_KEPT: usize = 30;
+pub(crate) const RECENT_SHOWN: usize = 8;
 
 /// The standard places in the saved order; places missing from the saved
 /// list are hidden. Without a saved list every place shows.
@@ -47,6 +51,7 @@ impl Explorer {
         cx.spawn(async move |weak,cx| {loop {
             cx.background_spawn(async {std::thread::sleep(Duration::from_secs(2));}).await;
             if weak.update(cx,|this,cx| {
+                this.remember_recent(cx);
                 if this.session_restore_error.is_some() {return;}
                 let state=format!("{:?}",this.browser);
                 if state!=this.saved_layout { match this.persist_workspace() {
@@ -160,4 +165,36 @@ impl Explorer {
         self.save_places(visible,cx);
     }
     pub(crate) fn hidden_places(&self) -> usize { self.all_places.len().saturating_sub(self.places.len()) }
+    /// Folders every pane shows now become the most recent ones. Called on
+    /// the autosave tick, so folders only passed through are not kept.
+    fn remember_recent(&mut self,cx: &mut Context<Self>) {
+        let mut current: Vec<PathBuf> = self.browser.leaves().into_iter().map(|id|self.pane_path(id)).collect();
+        // The active pane's folder is the most recent.
+        let active=self.pane_path(self.active_side());
+        current.retain(|p|p!=&active); current.insert(0,active);
+        let mut next=current.clone();
+        next.extend(self.recent.iter().filter(|p|!current.contains(p)).cloned());
+        next.truncate(RECENT_KEPT);
+        if next==self.recent {return;}
+        self.recent=next;
+        if let Some(store)=&self.workspaces {
+            let _=store.set_value(RECENT,&self.recent.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n"));
+        }
+        cx.notify();
+    }
+    /// Recent folders worth a sidebar row: not already a place or favourite
+    /// and not shown in a pane right now.
+    pub(crate) fn recent_rows(&self) -> Vec<PathBuf> {
+        let shown: Vec<PathBuf> = self.browser.leaves().into_iter().map(|id|self.pane_path(id)).collect();
+        self.recent.iter().filter(|p| !shown.contains(p) && !self.favorites.contains(p)
+            && !self.places.iter().chain(self.drives.iter()).any(|place|&place.path==*p))
+            .take(RECENT_SHOWN).cloned().collect()
+    }
+    pub(crate) fn forget_recent(&mut self,path: Option<&Path>,cx: &mut Context<Self>) {
+        match path { Some(path)=>self.recent.retain(|p|p!=path), None=>self.recent.clear() }
+        if let Some(store)=&self.workspaces {
+            let _=store.set_value(RECENT,&self.recent.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n"));
+        }
+        self.context_menu=None;cx.notify();
+    }
 }

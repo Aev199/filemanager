@@ -397,8 +397,23 @@ impl Explorer {
     }
 
     pub(crate) fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string_lossy().into_owned()));
-        self.status = format!("Путь скопирован: {}", path.display());
+        self.copy_paths(&[path.to_path_buf()], crate::CopyAs::Path, cx);
+    }
+
+    /// Paths, server paths or names, one per line, as Explorer copies them.
+    pub(crate) fn copy_paths(&mut self, paths: &[PathBuf], kind: crate::CopyAs, cx: &mut Context<Self>) {
+        use crate::CopyAs::*;
+        let lines: Vec<String> = paths.iter().map(|path| match kind {
+            Path => path.display().to_string(),
+            // A local or unreachable path stays as it is.
+            Network => filemanager_core::path_utils::network_path(path).unwrap_or_else(|| path.clone()).display().to_string(),
+            Name => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string()),
+        }).collect();
+        let text = lines.join("\r\n");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+        let what = match kind { Path => "Путь", Network => "Сетевой путь", Name => "Имя" };
+        self.status = if lines.len() == 1 { format!("{what} скопирован: {text}") } else { format!("Скопировано строк: {}", lines.len()) };
+        self.context_menu = None;
         cx.notify();
     }
 
@@ -447,6 +462,7 @@ impl Explorer {
     }
     pub(crate) fn key_split(&mut self, _: &Split, _: &mut Window, cx: &mut Context<Self>) { self.toggle_split(cx); }
     pub(crate) fn key_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        for id in self.browser.leaves() { let folder = self.pane_path(id); self.forget_sizes(&folder); }
         self.refresh_visible_directories(cx);
     }
     pub(crate) fn key_stage(&mut self, _: &Stage, _: &mut Window, cx: &mut Context<Self>) { self.stage(cx); }
@@ -616,16 +632,9 @@ impl Explorer {
     pub(crate) fn key_view_columns(&mut self, _: &ViewColumns, _: &mut Window, cx: &mut Context<Self>) { self.set_miller(true, cx); }
 
     pub(crate) fn key_copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
-        let paths = self.selection();
-        if paths.len() > 1 {
-            let text = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\r\n");
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-            self.status = format!("Скопированы пути: {}", paths.len());
-            cx.notify();
-            return;
-        }
-        let path = self.selected.clone().unwrap_or_else(|| self.pane_path(self.active_side()));
-        self.copy_path(&path, cx);
+        let mut paths = self.selection();
+        if paths.is_empty() { paths.push(self.pane_path(self.active_side())); }
+        self.copy_paths(&paths, crate::CopyAs::Path, cx);
     }
 
     pub(crate) fn key_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {

@@ -47,6 +47,34 @@ pub fn is_network_path(path: &Path) -> bool {
     }
 }
 
+/// The server path behind a mapped network drive: `Z:\work\a.docx` →
+/// `\\fs.pp.lc\S\work\a.docx` (for a DFS drive, its namespace path, which
+/// opens on colleagues' computers). `None` for local and already-UNC paths.
+pub fn network_path(path: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::NetworkManagement::WNet::{WNetGetUniversalNameW, UNIVERSAL_NAME_INFOW, UNIVERSAL_NAME_INFO_LEVEL};
+        let path = normalize_extended_path(path);
+        if path.to_string_lossy().starts_with(r"\\") || !is_network_path(&path) { return None; }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buffer = vec![0u64; 1024];
+        let mut size = (buffer.len() * 8) as u32;
+        let status = unsafe { WNetGetUniversalNameW(wide.as_ptr(), UNIVERSAL_NAME_INFO_LEVEL, buffer.as_mut_ptr().cast(), &mut size) };
+        if status != 0 { return None; }
+        let info = unsafe { &*(buffer.as_ptr() as *const UNIVERSAL_NAME_INFOW) };
+        if info.lpUniversalName.is_null() { return None; }
+        let len = (0..).take_while(|&i| unsafe { *info.lpUniversalName.add(i) } != 0).count();
+        let name = std::ffi::OsString::from_wide(unsafe { std::slice::from_raw_parts(info.lpUniversalName, len) });
+        Some(PathBuf::from(name))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// The program's folder in the user profile, `%LOCALAPPDATA%\Papka`.
 pub fn app_data_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)

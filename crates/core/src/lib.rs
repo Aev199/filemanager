@@ -17,6 +17,8 @@ pub mod index_watch;
 
 pub mod path_utils;
 
+pub mod folder_size;
+
 pub mod operation_journal;
 
 pub mod sort;

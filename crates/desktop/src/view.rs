@@ -536,6 +536,21 @@ impl Explorer {
             side=side.child(self.sidebar_action("favorite-add","fm/plus.svg","Добавить папку",
                 cx.listener(|this,_,_,cx| {let path=this.pane_path(this.active_side());this.toggle_favorite(&path,cx);})));
         }
+        let recent = self.recent_rows();
+        if !recent.is_empty() {
+            side = side.child(section_title("Недавние"));
+            for (index, path) in recent.into_iter().enumerate() {
+                let target = path.clone(); let tip = path.display().to_string(); let menu_path = path.clone();
+                side = side.child(div().id(("recent", index)).mx_2().h(px(28.)).px_2().flex().items_center().gap_2()
+                    .rounded_sm().cursor_pointer().text_color(rgb(TEXT_MUTED)).hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                    .child(small_icon("fm/history.svg", TEXT_DIM))
+                    .child(div().flex_1().min_w_0().truncate().child(browser::display_name(&path)))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| this.navigate_side(this.active_side(), &target, None, cx)))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx|
+                        this.open_menu(event.position, MenuTarget::Recent(menu_path.clone()), cx))));
+            }
+        }
         side = side.child(section_title("Диски"));
         for (index, place) in self.drives.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
@@ -891,6 +906,7 @@ impl Explorer {
 
     fn column(&mut self, folder: PathBuf, side: GroupId, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
         let list_mode = !self.miller(side);
+        if list_mode { self.auto_folder_sizes(&folder, cx); }
         let mut column = div().size_full().min_h_0().flex().flex_col()
             .when(!list_mode, |this| this.border_r_1().border_color(rgb(BORDER)));
         if !list_mode {
@@ -1033,7 +1049,7 @@ impl Explorer {
                     .child(kind_label(entry))))
                 .child(div().w(px(widths[2])).flex_none().px_2().flex().justify_end().text_size(px(12.))
                     .text_color(rgb(metadata_text))
-                    .child(if is_dir { String::new() } else { format_size(entry.size) }));
+                    .child(if is_dir { self.folder_size_label(&entry.path) } else { format_size(entry.size) }));
         } else if is_dir {
             row = row.child(small_icon("fm/chevron-right.svg", if selected { SELECTION_TEXT } else { TEXT_DIM }));
         }
@@ -1244,6 +1260,13 @@ impl Explorer {
                 let mut props = div().flex().flex_col().gap_1p5();
                 if !entry.is_directory {
                     props = props.child(Self::property("Размер", format_size(entry.size)));
+                } else if let Some(Some(size)) = self.sizes.known.get(&entry.path) {
+                    props = props.child(Self::property("Размер", format!("{}{}", if size.complete { "" } else { "не меньше " }, format_size(size.bytes))))
+                        .child(Self::property("Содержит", format!("файлов: {}, папок: {}", size.files, size.folders)));
+                } else {
+                    let target = vec![entry.path.clone()];
+                    props = props.child(div().child(text_button("inspector-measure", "Посчитать размер", ButtonKind::Ghost)
+                        .on_click(cx.listener(move |this,_,_,cx| this.measure_folders(target.clone(), cx)))));
                 }
                 if let Some(modified) = entry.modified {
                     props = props.child(Self::property("Изменён", format_time(modified)));
@@ -1525,6 +1548,20 @@ impl Explorer {
             }));
         let staged = self.zone.items().len();
         match &menu.target {
+            MenuTarget::Recent(path) => {
+                let (open, tab, forget, star) = (path.clone(), path.clone(), path.clone(), path.clone());
+                list = list.child(Self::menu_item("recent-open","fm/folder-fill.svg","Открыть","",false,true)
+                        .on_click(cx.listener(move |this,_,_,cx| {this.context_menu=None;this.navigate_side(this.active_side(),&open,None,cx);})))
+                    .child(Self::menu_item("recent-tab","fm/plus.svg","Открыть в новой вкладке","",false,true)
+                        .on_click(cx.listener(move |this,_,_,cx| {this.context_menu=None;this.open_in_new_tab(&tab,cx);})))
+                    .child(Self::menu_item("recent-star","fm/star.svg","Добавить в избранное","",false,true)
+                        .on_click(cx.listener(move |this,_,_,cx|this.toggle_favorite(&star,cx))))
+                    .child(Self::separator())
+                    .child(Self::menu_item("recent-forget","fm/x.svg","Убрать из недавних","",false,true)
+                        .on_click(cx.listener(move |this,_,_,cx|this.forget_recent(Some(&forget),cx))))
+                    .child(Self::menu_item("recent-clear","fm/trash.svg","Очистить недавние","",false,true)
+                        .on_click(cx.listener(|this,_,_,cx|this.forget_recent(None,cx))));
+            }
             MenuTarget::Place(index) => {
                 let hidden = self.hidden_places();
                 if let Some(index) = *index {
@@ -1582,9 +1619,10 @@ impl Explorer {
                                 this.open_in_other_pane(&other_path, cx);
                             })));
                 }
-                let copy_target = path.clone();
                 let stage_target = self.selection();
                 let explorer_target = stage_target.clone();
+                let copy_paths = if stage_target.contains(path) { stage_target.clone() } else { vec![path.clone()] };
+                let network = filemanager_core::path_utils::is_network_path(path) && !path.to_string_lossy().starts_with(r"\\");
                 let count = stage_target.len();
                 list = list.child(Self::separator())
                     .child(Self::menu_item("m-copy", "fm/copy.svg", "Копировать", "Ctrl+C", false, true)
@@ -1599,11 +1637,23 @@ impl Explorer {
                         })))
                     .child(Self::menu_item("m-rename", "fm/pencil.svg", "Переименовать", "F2", false, true)
                         .on_click(cx.listener(|this, _, window, cx| this.begin_rename(window, cx))))
-                    .child(Self::menu_item("m-copy-path", "fm/clipboard.svg", "Копировать путь", "Ctrl+Shift+C", false, true)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.context_menu = None;
-                            this.copy_path(&copy_target, cx);
-                        })))
+                    .child(Self::menu_item("m-copy-path", "fm/clipboard.svg",
+                        if count > 1 { format!("Копировать пути ({count})") } else { "Копировать путь".into() }, "Ctrl+Shift+C", false, true)
+                        .on_click(cx.listener({ let paths = copy_paths.clone(); move |this, _, _, cx| this.copy_paths(&paths, crate::CopyAs::Path, cx) })))
+                    .when(network, |list| list.child(Self::menu_item("m-copy-unc", "fm/server.svg", "Копировать сетевой путь (\\\\сервер\\…)", "", false, true)
+                        .on_click(cx.listener({ let paths = copy_paths.clone(); move |this, _, _, cx| this.copy_paths(&paths, crate::CopyAs::Network, cx) }))))
+                    .child(Self::menu_item("m-copy-name", "fm/file-text.svg",
+                        if count > 1 { format!("Копировать имена ({count})") } else { "Копировать имя".into() }, "", false, true)
+                        .on_click(cx.listener({ let paths = copy_paths.clone(); move |this, _, _, cx| this.copy_paths(&paths, crate::CopyAs::Name, cx) })))
+                    .when(is_dir || copy_paths.len() > 1, |list| {
+                        // From the listing, not the disk: menus redraw every frame.
+                        let folders: Vec<PathBuf> = copy_paths.iter().filter(|p| self.directory_cache.get(p.parent().unwrap_or(p))
+                            .is_some_and(|listing| listing.entries.iter().any(|e| &e.path == *p && e.is_directory))).cloned().collect();
+                        let n = folders.len();
+                        list.child(Self::menu_item("m-measure", "fm/drive.svg",
+                            if n > 1 { format!("Посчитать размер ({n})") } else { "Посчитать размер".into() }, "", false, n > 0)
+                            .when(n > 0, |item| item.on_click(cx.listener(move |this, _, _, cx| this.measure_folders(folders.clone(), cx)))))
+                    })
                     .child(Self::menu_item("m-stage", "fm/inbox.svg",
                         if count > 1 { format!("Отложить для переноса ({count})") } else { "Отложить для переноса".into() }, "Ctrl+Shift+D", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1614,7 +1664,7 @@ impl Explorer {
                         if count > 1 { format!("Меню Проводника ({count})") } else { "Меню Проводника".into() }, "Shift+ПКМ", false, true)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let paths = if explorer_target.len() > 0 { explorer_target.clone() } else { Vec::new() };
-                            this.explorer_menu(paths, false, window, cx);
+                            this.explorer_menu(paths, true, window, cx);
                         })))
                     .child(Self::separator())
                     .child(Self::menu_item("m-recycle", "fm/trash.svg",
@@ -1645,7 +1695,7 @@ impl Explorer {
                 }
                 list = list
                     .child(Self::menu_item("m-explorer-folder", "fm/command.svg", "Меню Проводника для папки", "Shift+ПКМ", false, true)
-                        .on_click(cx.listener(move |this, _, window, cx| this.explorer_menu(vec![explorer_folder.clone()], false, window, cx))))
+                        .on_click(cx.listener(move |this, _, window, cx| this.explorer_menu(vec![explorer_folder.clone()], true, window, cx))))
                     .child(Self::separator())
                     .child(Self::menu_item("m-new-folder", "fm/folder-plus.svg", "Новая папка", "Ctrl+Shift+N", false, true)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -1690,7 +1740,14 @@ impl Explorer {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.context_menu = None;
                             this.copy_path(&copy_target, cx);
-                        })));
+                        })))
+                    .child(Self::menu_item("m-folder-measure", "fm/drive.svg", "Посчитать размер папки", "", false, true)
+                        .on_click(cx.listener({ let target = vec![folder.clone()]; move |this, _, _, cx| this.measure_folders(target.clone(), cx) })))
+                    .when(filemanager_core::path_utils::is_network_path(folder) && !folder.to_string_lossy().starts_with(r"\\"), |list| {
+                        let target = vec![folder.clone()];
+                        list.child(Self::menu_item("m-folder-unc", "fm/server.svg", "Копировать сетевой путь папки", "", false, true)
+                            .on_click(cx.listener(move |this, _, _, cx| this.copy_paths(&target, crate::CopyAs::Network, cx))))
+                    });
             }
             MenuTarget::Drop(paths, folder) => {
                 let what = match paths.as_slice() {

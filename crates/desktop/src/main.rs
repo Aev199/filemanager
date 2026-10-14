@@ -11,6 +11,7 @@ mod interface;
 mod layout;
 mod palette;
 mod projects;
+mod folder_sizes;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -143,6 +144,10 @@ fn parse_widths(text: &str) -> Option<[f32; 3]> {
 /// Internal name of the session restored at startup.
 
 
+/// How «Копировать путь» writes each item.
+#[derive(Clone, Copy)]
+pub(crate) enum CopyAs { Path, Network, Name }
+
 /// What a right-click was aimed at.
 #[derive(Clone)]
 enum MenuTarget {
@@ -155,6 +160,7 @@ enum MenuTarget {
     Favorite(usize),
     /// A row of «Места», or (None) the section title.
     Place(Option<usize>),
+    Recent(PathBuf),
 }
 
 struct RightDrag {
@@ -232,6 +238,9 @@ struct Explorer {
     places: Vec<Place>,
     /// Every standard place, for restoring hidden ones.
     all_places: Vec<Place>,
+    /// Folders used recently, most recent first.
+    recent: Vec<PathBuf>,
+    sizes: folder_sizes::FolderSizes,
     drives: Vec<Place>,
     /// Free and total bytes per local drive, filled in the background.
     drive_space: HashMap<PathBuf, (u64, u64)>,
@@ -472,6 +481,9 @@ impl Explorer {
             places: projects::arrange_places(&places::user_places(),
                 workspaces.as_ref().and_then(|store| store.value(projects::PLACES).ok().flatten()).as_deref()),
             all_places: places::user_places(),
+            sizes: Default::default(),
+            recent: workspaces.as_ref().and_then(|store| store.value(projects::RECENT).ok().flatten())
+                .map(|text| text.lines().map(PathBuf::from).collect()).unwrap_or_default(),
             drives: places::drives(),
             drive_space: HashMap::new(),
             sort: SortSpec::default(),
