@@ -44,12 +44,8 @@ use std::time::Duration;
 
 
 struct ColumnResize {
-    group: GroupId,
-    key: String,
-    index: usize,
-    current: usize,
     start_x: Pixels,
-    widths: Vec<f32>,
+    start_width: f32,
 }
 
 /// Internal drag-and-drop payload. Dropping only stages a path; no file
@@ -125,6 +121,7 @@ fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
 /// Marks that the feature tour was shown once at first start.
 const TOUR_SEEN: &str = "tour_seen";
 const LIST_WIDTHS: &str = "list_widths";
+const COLUMN_WIDTH: &str = "column_width";
 const DEFAULT_LIST_WIDTHS: [f32; 3] = [140., 110., 90.];
 pub(crate) const LIST_WIDTH_RANGE: (f32, f32) = (60., 400.);
 
@@ -272,7 +269,8 @@ struct Explorer {
     pane_measured_widths: HashMap<GroupId, f32>,
     column_scroll_handles: HashMap<GroupId, gpui::ScrollHandle>,
     column_reveal_keys: HashMap<GroupId, String>,
-    column_sizes: HashMap<GroupId, (String, Vec<f32>)>,
+    /// Shared width of Miller columns, changed by dragging any column edge.
+    column_width: f32,
     column_resize: Option<ColumnResize>,
     /// Widths of the list columns Изменён, Тип, Размер; the name takes the rest.
     list_widths: [f32; 3],
@@ -531,7 +529,9 @@ impl Explorer {
             pane_measured_widths: HashMap::new(),
             column_scroll_handles: Default::default(),
             column_reveal_keys: HashMap::new(),
-            column_sizes: HashMap::new(),
+            column_width: workspaces.as_ref().and_then(|store| store.value(COLUMN_WIDTH).ok().flatten())
+                .and_then(|text| text.parse::<f32>().ok()).filter(|width| width.is_finite())
+                .map_or(crate::layout::COLUMN_DEFAULT, |width| width.clamp(crate::layout::COLUMN_MIN, crate::layout::COLUMN_MAX)),
             column_resize: None,
             list_widths: workspaces.as_ref().and_then(|store| store.value(LIST_WIDTHS).ok().flatten())
                 .and_then(|text| parse_widths(&text)).unwrap_or(DEFAULT_LIST_WIDTHS),

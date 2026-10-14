@@ -295,6 +295,13 @@ impl Explorer {
         }
     }
 
+    pub(crate) fn finish_column_resize(&mut self) {
+        if self.column_resize.take().is_none() { return; }
+        if let Some(store)=&self.workspaces {
+            let _=store.set_value(crate::COLUMN_WIDTH, &format!("{:.0}", self.column_width));
+        }
+    }
+
     pub(crate) fn open_tour(&mut self, cx: &mut Context<Self>) {
         self.palette=None; self.settings=None; self.context_menu=None; self.about_open=false;
         self.tour=Some(0); cx.notify();
@@ -831,7 +838,7 @@ impl Explorer {
                     })
             });
         // A narrow viewport may omit the optional preview, never the trail.
-        let fit = crate::layout::column_capacity(self.pane_width_for(side), preview.is_some());
+        let fit = crate::layout::column_capacity(self.pane_width_for(side));
         let preview = preview.filter(|_| fit > 1);
         crate::layout::column_paths(&path, preview.as_deref())
     }
@@ -852,13 +859,7 @@ impl Explorer {
             );
             let scroll = self.column_scroll_handles.entry(side).or_default().clone();
             let reveal_key = format!("{group_id}-{:?}-{:?}-{}", path, folders.last(), pane_width as u32);
-            if self.column_sizes.get(&side).is_none_or(|(key, _)| key != &reveal_key) {
-                self.column_sizes.insert(side,(reveal_key.clone(), crate::layout::column_widths(pane_width, folders.len(), current_index)));
-                if self.column_resize.as_ref().is_some_and(|resize| resize.group == side) {
-                    self.column_resize = None;
-                }
-            }
-            let widths = self.column_sizes.get(&side).unwrap().1.clone();
+            let widths = crate::layout::column_widths(pane_width, folders.len(), self.column_width);
             let content_width = px(widths.iter().sum::<f32>().max(pane_width));
             let mut group = div().id(group_id).w(content_width).h_full().flex().flex_row().flex_none();
             for (index, folder) in folders.iter().enumerate() {
@@ -868,8 +869,6 @@ impl Explorer {
                 let weak = cx.weak_entity();
                 let reveal_scroll = scroll.clone();
                 let reveal_key = reveal_key.clone();
-                let resize_key = reveal_key.clone();
-                let resize_widths = widths.clone();
                 let reveal_widths = widths.clone();
                 let column = div().relative().w(px(widths[index])).h_full().flex_none().child(column)
                     .child(div().id(("column-resize", index)).absolute().right_0().top_0().bottom_0().w(px(6.))
@@ -877,10 +876,7 @@ impl Explorer {
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                             if this.interface_modal() { return; }
-                            this.column_resize = Some(crate::ColumnResize {
-                                group: side, key: resize_key.clone(), index, current: current_index,
-                                start_x: event.position.x, widths: resize_widths.clone(),
-                            });
+                            this.column_resize = Some(crate::ColumnResize { start_x: event.position.x, start_width: this.column_width });
                             this.marquee = None;
                         })))
                     .when(index == current_index, |column| column.on_prepaint(move |bounds, _, cx| {
@@ -2271,14 +2267,12 @@ impl Render for Explorer {
                         return;
                     }
                     let resize = this.column_resize.as_ref().unwrap();
-                    let next = crate::layout::resize_column(&resize.widths, resize.index,
-                        resize.widths[resize.index] + (event.position.x - resize.start_x) / px(1.), resize.current);
-                    this.column_sizes.insert(resize.group,(resize.key.clone(),next));
+                    this.column_width = crate::layout::resize_columns(resize.start_width, (event.position.x - resize.start_x) / px(1.));
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,window,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
                 if !drag.active && event.modifiers.shift {

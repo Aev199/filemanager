@@ -1,7 +1,9 @@
 //! Pure geometry used by the native renderer.
-pub const ANCESTOR_WIDTH: f32 = 144.;
-pub const CURRENT_MIN: f32 = 200.;
-pub const PREVIEW_MIN: f32 = 160.;
+/// Miller columns share one width (Atlas/Finder style): navigation adds or
+/// removes a column but never re-flows the others.
+pub const COLUMN_DEFAULT: f32 = 220.;
+pub const COLUMN_MIN: f32 = 150.;
+pub const COLUMN_MAX: f32 = 600.;
 pub const ROW_HEIGHT: f32 = 24.;
 pub fn row_index(local_y: f32, scroll: f32) -> usize {
     ((local_y + scroll).max(0.) / ROW_HEIGHT).floor() as usize
@@ -14,33 +16,16 @@ pub fn effective_pane_width(estimate: f32, measured: Option<f32>) -> f32 {
 pub fn column_identity(width: f32, count: usize, current: usize) -> String {
     format!("{count}-{}-{current}", width as u32 / 40)
 }
-pub fn column_capacity(width: f32, preview: bool) -> usize {
-    if preview {
-        if width < CURRENT_MIN + PREVIEW_MIN {
-            return 1;
-        }
-        return 2 + ((width - CURRENT_MIN - PREVIEW_MIN) / ANCESTOR_WIDTH) as usize;
-    }
-    1 + ((width - CURRENT_MIN).max(0.) / ANCESTOR_WIDTH) as usize
+/// How many columns fit at their minimum width; a preview needs two.
+pub fn column_capacity(width: f32) -> usize {
+    ((width.max(0.) / COLUMN_MIN) as usize).max(1)
 }
-pub fn column_widths(width: f32, count: usize, current: usize) -> Vec<f32> {
-    if count == 0 {
-        return Vec::new();
-    }
-    let current = current.min(count - 1);
-    let mut widths = vec![ANCESTOR_WIDTH; count];
-    if current + 1 < count {
-        widths[count - 1] = PREVIEW_MIN;
-    }
-    widths[current] = (width
-        - widths
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != current)
-            .map(|(_, width)| width)
-            .sum::<f32>())
-    .max(CURRENT_MIN);
-    widths
+/// Every column gets `base` until they no longer fit; then all shrink
+/// evenly, down to `COLUMN_MIN`, after which the strip scrolls.
+pub fn column_widths(width: f32, count: usize, base: f32) -> Vec<f32> {
+    let base = base.clamp(COLUMN_MIN, COLUMN_MAX);
+    let each = if count as f32 * base <= width { base } else { (width / count as f32).floor().clamp(COLUMN_MIN, base) };
+    vec![each; count]
 }
 /// Keep the complete trail; viewport width must not delete navigation context.
 pub fn column_paths(
@@ -79,20 +64,9 @@ pub fn reveal_column_offset(
         offset,
     )
 }
-/// Miller widths are independent: expanding a column grows scrollable content.
-pub fn resize_column(widths: &[f32], index: usize, requested: f32, current: usize) -> Vec<f32> {
-    let mut result = widths.to_vec();
-    if index < result.len() && requested.is_finite() {
-        let minimum = if index == current {
-            CURRENT_MIN
-        } else if index > current {
-            PREVIEW_MIN
-        } else {
-            ANCESTOR_WIDTH
-        };
-        result[index] = requested.clamp(minimum, 4000.);
-    }
-    result
+/// Dragging any column edge changes the shared width.
+pub fn resize_columns(start: f32, delta: f32) -> f32 {
+    if delta.is_finite() { (start + delta).clamp(COLUMN_MIN, COLUMN_MAX) } else { start }
 }
 #[cfg(test)]
 mod tests {
@@ -101,14 +75,8 @@ mod tests {
     fn actual_left_and_right_widths_drive_capacity_independently() {
         assert_eq!(effective_pane_width(750., Some(410.)), 410.);
         assert_eq!(effective_pane_width(750., None), 750.);
-        assert_eq!(
-            column_capacity(effective_pane_width(750., Some(410.)), true),
-            2
-        );
-        assert_eq!(
-            column_capacity(effective_pane_width(750., Some(670.)), true),
-            4
-        );
+        assert_eq!(column_capacity(effective_pane_width(750., Some(410.))), 2);
+        assert_eq!(column_capacity(effective_pane_width(750., Some(670.))), 4);
     }
     #[test]
     fn preview_role_changes_reset_cached_column_sizes() {
@@ -117,37 +85,32 @@ mod tests {
     }
     #[test]
     fn narrow_pane_does_not_force_two_columns() {
-        assert_eq!(column_capacity(280., false), 1);
-        assert_eq!(column_capacity(280., true), 1);
+        assert_eq!(column_capacity(280.), 1);
+        assert_eq!(column_capacity(0.), 1);
     }
     #[test]
-    fn current_folder_gets_space_not_its_ancestors() {
-        assert_eq!(column_widths(750., 3, 2), vec![144., 144., 462.]);
-        assert_eq!(column_widths(750., 3, 2).iter().sum::<f32>(), 750.);
+    fn columns_keep_one_width_while_they_fit() {
+        assert_eq!(column_widths(1000., 3, 220.), vec![220.; 3]);
+        assert_eq!(column_widths(1000., 4, 220.), vec![220.; 4]);
+        assert!(column_widths(430., 0, 220.).is_empty());
     }
     #[test]
-    fn preview_budget_preserves_current_folder() {
-        assert_eq!(column_capacity(350., true), 1);
-        assert_eq!(column_capacity(500., true), 2);
-        assert_eq!(column_capacity(650., true), 4);
-        assert_eq!(column_capacity(670., true), 4);
-        assert_eq!(column_widths(670., 3, 1), vec![144., 366., 160.]);
-    }
-    #[test]
-    fn single_column_uses_entire_pane() {
-        assert_eq!(column_widths(430., 1, 0), vec![430.]);
-        assert!(column_widths(430., 0, 0).is_empty());
-    }
-    #[test]
-    fn wide_pane_is_not_limited_to_three_levels() {
-        assert_eq!(column_capacity(1200., false), 7);
-        assert_eq!(column_capacity(1200., true), 7);
+    fn full_window_shrinks_columns_evenly() {
+        assert_eq!(column_widths(1000., 5, 220.), vec![200.; 5]);
+        assert_eq!(column_widths(1000., 5, 220.).iter().sum::<f32>(), 1000.);
     }
     #[test]
     fn deep_chain_overflows_instead_of_crushing_columns() {
-        let widths = column_widths(600., 7, 5);
-        assert_eq!(widths, vec![144., 144., 144., 144., 144., 200., 160.]);
+        let widths = column_widths(600., 7, 220.);
+        assert_eq!(widths, vec![COLUMN_MIN; 7]);
         assert!(widths.iter().sum::<f32>() > 600.);
+    }
+    #[test]
+    fn resizing_changes_the_shared_width_within_limits() {
+        assert_eq!(resize_columns(220., 40.), 260.);
+        assert_eq!(resize_columns(220., -500.), COLUMN_MIN);
+        assert_eq!(resize_columns(220., 5000.), COLUMN_MAX);
+        assert_eq!(resize_columns(220., f32::NAN), 220.);
     }
     #[test]
     fn every_ancestor_remains_reachable_in_deep_chain() {
@@ -192,19 +155,6 @@ mod tests {
         assert_eq!(row_index(1., 48.), 2);
         assert_eq!(row_index(23.9, 0.), 0);
         assert_eq!(row_index(24., 0.), 1);
-    }
-    #[test]
-    fn resizing_deep_column_grows_content_without_shrinking_siblings() {
-        let widths = column_widths(600., 7, 5);
-        let enlarged = resize_column(&widths, 5, 480., 5);
-        assert_eq!(enlarged[5], 480.);
-        assert_eq!(&enlarged[..5], &widths[..5]);
-        assert_eq!(enlarged[6], widths[6]);
-        assert_eq!(
-            enlarged.iter().sum::<f32>(),
-            widths.iter().sum::<f32>() + 280.
-        );
-        assert_eq!(resize_column(&widths, 5, 50., 5)[5], CURRENT_MIN);
     }
 }
 

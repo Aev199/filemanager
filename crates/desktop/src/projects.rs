@@ -65,7 +65,7 @@ impl Explorer {
     }
     fn reset_project_view(&mut self,cx: &mut Context<Self>) {
         self.pane_measured_widths.clear();self.column_scroll_handles.clear();self.column_reveal_keys.clear();
-        self.column_sizes.clear();self.pane_bounds.clear();self.tab_scroll.clear();self.tab_reveal.clear();
+        self.pane_bounds.clear();self.tab_scroll.clear();self.tab_reveal.clear();
         self.scroll_handles.clear();self.folder_views.clear();self.column_resize=None;self.dock_hover=None;
         self.marquee=None;self.anchor=None;self.address_editing=None;self.select_first_when_loaded=false;
         self.selected=None;self.marked.clear();self.confirm_recycle=None;self.selected_history_event=None;

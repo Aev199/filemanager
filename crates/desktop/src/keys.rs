@@ -506,7 +506,7 @@ impl Explorer {
         self.dock_hover=None;
         if cx.stop_active_drag(window) { cx.notify(); return; }
         if let Some(resize) = self.column_resize.take() {
-            self.column_sizes.insert(resize.group,(resize.key,resize.widths));
+            self.column_width = resize.start_width;
             cx.notify();
             return;
         }
@@ -610,7 +610,6 @@ impl Explorer {
         self.pane_measured_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
-        self.column_sizes.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));
         self.folder_views.retain(|(id,_),_|ids.contains(id));
         self.tab_scroll.retain(|id,_|ids.contains(id));
