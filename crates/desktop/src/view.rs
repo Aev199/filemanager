@@ -1254,38 +1254,125 @@ impl Explorer {
             .into_any_element()
     }
 
-    fn search_results(&self, cx: &mut Context<Self>) -> AnyElement {
-        let root = self.search_root.clone();
-        let mut rows = div().id("search-results").size_full().min_h_0().flex().flex_col()
-            .overflow_y_scrollbar().bg(rgb(SURFACE)).py_1()
-            .child(
-                div().px_3().py_2().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(small_icon("fm/search.svg", TEXT_MUTED))
-                    .child(format!("Результаты поиска «{}»", self.search_query.trim()))
-            );
-        if self.search_busy {
-            rows = rows.child(div().px_3().py_2().text_color(rgb(TEXT_DIM)).child("Ищем в индексе…"));
-        } else if self.search_results.is_empty() {
-            rows = rows.child(div().px_3().py_2().text_color(rgb(TEXT_DIM))
-                .child("Ничего не найдено. Поиск идёт по именам файлов внутри текущей папки."));
-        }
-        for (index, path) in self.search_results.iter().enumerate() {
-            let target = path.clone();
-            let relative = root.as_deref().and_then(|root| path.strip_prefix(root).ok())
-                .map(|p| p.display().to_string()).unwrap_or_else(|| path.display().to_string());
-            let is_dir = path.extension().is_none() && path.is_dir();
-            let (icon_path, tint) = if is_dir { ("fm/folder-fill.svg", FOLDER) }
-                else { file_icon(path.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref()) };
-            rows = rows.child(
-                div().id(("search-hit", index)).h(px(ROW_HEIGHT)).mx_1().px_2().flex().items_center().gap_2()
-                    .rounded_md().cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
-                    .child(icon(icon_path, tint))
-                    .child(div().flex_none().max_w(px(280.)).truncate().child(browser::display_name(path)))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgb(TEXT_DIM)).child(relative))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_search_result(target.clone(), cx)))
-            );
-        }
-        rows.into_any_element()
+    fn search_results(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use filemanager_core::find::Kind;
+        use crate::search_panel::{PERIODS, SYNTAX_HINT};
+        let root = self.search_root.clone().unwrap_or_default();
+        let chip = |id: &'static str, label: &'static str, active: bool| {
+            div().id(id).h(px(24.)).px_2().flex().items_center().gap_1().rounded_md().cursor_pointer()
+                .text_size(px(12.)).border_1()
+                .when(active, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
+                .when(!active, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
+                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT))))
+                .child(label)
+        };
+        let kind = self.search.kind;
+        let busy = self.search_busy;
+        let title = div().flex().items_center().gap_2()
+            .child(icon("fm/search.svg", ACCENT))
+            .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(format!("«{}» в папке «{}» и вложенных", self.search_query.trim(), browser::display_name(&root))))
+            .child(if busy {
+                text_button("search-stop", "Остановить", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this, _, _, cx| { this.stop_search(); cx.notify(); }))
+            } else {
+                text_button("search-again", "Искать снова", ButtonKind::Ghost)
+                    .on_click(cx.listener(|this, _, _, cx| this.run_search(cx)))
+            })
+            .child(icon_button("search-close", "fm/x.svg", "Закрыть поиск (Esc)", false, true)
+                .on_click(cx.listener(|this, _, window, cx| this.key_dismiss(&keys::DismissOverlay, window, cx))));
+        let filters = div().flex().flex_wrap().items_center().gap_1()
+            .child(chip("search-any", "Всё", kind == Kind::Any)
+                .on_click(cx.listener(|this, _, _, cx| this.set_search_kind(Kind::Any, cx))))
+            .child(chip("search-files", "Файлы", kind == Kind::Files)
+                .on_click(cx.listener(|this, _, _, cx| this.set_search_kind(Kind::Files, cx))))
+            .child(chip("search-folders", "Папки", kind == Kind::Folders)
+                .on_click(cx.listener(|this, _, _, cx| this.set_search_kind(Kind::Folders, cx))))
+            .child(div().w_2())
+            .child(chip("search-period", PERIODS[self.search.period].0, self.search.period > 0)
+                .tooltip(|window, cx| Tooltip::new("Дата изменения: щёлкните, чтобы сменить").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.cycle_search_period(cx))))
+            .child(chip("search-content", "И в тексте файлов", self.search.content)
+                .tooltip(|window, cx| Tooltip::new("Искать слова ещё и внутри текстовых файлов (txt, csv, xml, lsp, dxf…)").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_search_content(cx))))
+            .child(div().id("search-help").ml_1().child(small_icon("fm/help.svg", TEXT_DIM))
+                .tooltip(|window, cx| Tooltip::new(SYNTAX_HINT).build(window, cx)));
+        let summary = div().flex().items_center().gap_2().text_size(px(12.)).text_color(rgb(TEXT_DIM))
+            .when(busy, |row| row.child(small_icon("fm/loader.svg", ACCENT)
+                .with_animation("search-spin", Animation::new(Duration::from_secs(1)).repeat(),
+                    |icon, delta| icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta))))))
+            .child(self.search_summary());
+        let header = div().flex_none().px_3().py_2().flex().flex_col().gap_2().border_b_1().border_color(rgb(BORDER))
+            .child(title).child(filters).child(summary);
+        let columns = div().flex_none().h(px(26.)).px_3().flex().items_center().gap_2().text_size(px(12.))
+            .text_color(rgb(TEXT_MUTED)).border_b_1().border_color(rgb(BORDER))
+            .child(div().w(px(16.)).flex_none())
+            .child(div().w(gpui::relative(0.38)).flex_none().child("Имя"))
+            .child(div().flex_1().min_w_0().child("Папка"))
+            .child(div().w(px(84.)).flex_none().flex().justify_end().child("Размер"))
+            .child(div().w(px(128.)).flex_none().child("Изменён"))
+            .child(div().w(px(20.)).flex_none());
+        let count = self.search.hits.len();
+        let list = uniform_list("search-hits", count, cx.processor(move |this, range: Range<usize>, _, cx| {
+            let root = this.search_root.clone().unwrap_or_default();
+            range.map(|index| {
+                let hit = &this.search.hits[index];
+                let selected = this.search.selected == Some(index);
+                let folder = hit.path.parent().map(|parent| parent.strip_prefix(&root).unwrap_or(parent).display().to_string())
+                    .filter(|relative| !relative.is_empty()).unwrap_or_else(|| "·".into());
+                let (icon_path, tint) = if hit.is_dir { ("fm/folder-fill.svg", FOLDER) }
+                    else { file_icon(hit.path.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref()) };
+                let text = if selected { SELECTION_TEXT } else { TEXT };
+                let dim = if selected { SELECTION_TEXT } else { TEXT_DIM };
+                let reveal = hit.path.clone();
+                div().id(("search-hit", index)).group("hit").w_full().h(px(ROW_HEIGHT)).px_2().flex().items_center().gap_2()
+                    .rounded_md().cursor_pointer().text_color(rgb(text))
+                    .when(selected, |row| row.bg(rgb(SELECTED)))
+                    .when(!selected, |row| row.hover(|style| style.bg(rgb(HOVER))))
+                    .child(icon(icon_path, if selected { SELECTION_TEXT } else { tint }))
+                    .child(div().w(gpui::relative(0.38)).flex_none().min_w_0().flex().items_center().gap_1()
+                        .child(div().min_w_0().truncate().child(browser::display_name(&hit.path)))
+                        .when(hit.by_content, |name| name.child(div().flex_none().px_1().rounded_sm().text_size(px(10.))
+                            .bg(rgb(if selected { SELECTED_BORDER } else { ACCENT_SOFT })).child("в тексте"))))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgb(dim)).child(folder))
+                    .child(div().w(px(84.)).flex_none().flex().justify_end().text_size(px(12.)).text_color(rgb(dim))
+                        .child(if hit.is_dir { String::new() } else { format_size(hit.size) }))
+                    .child(div().w(px(128.)).flex_none().text_size(px(12.)).text_color(rgb(dim))
+                        .child(hit.modified.map(format_time).unwrap_or_default()))
+                    .child(div().id(("search-reveal", index)).flex_none().size(px(20.)).rounded_sm().flex().items_center()
+                        .justify_center().invisible().group_hover("hit", |style| style.visible())
+                        .hover(|style| style.bg(rgb(HOVER)))
+                        .child(small_icon("fm/external.svg", dim))
+                        .tooltip(|window, cx| Tooltip::new("Показать в папке").build(window, cx))
+                        .on_click(cx.listener({ let reveal = reveal.clone(); move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.reveal_search_hit(reveal.clone(), false, cx);
+                        }})))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.click_count() >= 2 {
+                            this.open_search_hit(index, cx);
+                        } else {
+                            this.search.selected = Some(index);
+                            this.status = format!("Выбрано: {}", reveal.display());
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+                        this.search.selected = Some(index);
+                        cx.notify();
+                    }))
+            }).collect::<Vec<_>>()
+        })).track_scroll(&self.search.scroll).flex_1().min_h_0().px_1();
+        div().id("search-results").size_full().min_h_0().flex().flex_col().bg(rgb(SURFACE))
+            .child(header)
+            .when(count > 0, |panel| panel.child(columns).child(list))
+            .when(count == 0 && !busy, |panel| panel.child(
+                div().flex_1().flex().flex_col().items_center().justify_center().gap_2().px_6()
+                    .text_color(rgb(TEXT_DIM)).text_size(px(12.))
+                    .child(icon("fm/search.svg", BORDER_STRONG))
+                    .child("Ничего не найдено")
+                    .child(div().max_w(px(520.)).text_center().child(SYNTAX_HINT))))
+            .into_any_element()
     }
 
     // ----------------------------------------------------------- inspector
@@ -2195,7 +2282,7 @@ impl Render for Explorer {
             self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         self.ensure_live_watch(cx);
-        // Do not compete with SQLite search for I/O while displaying results.
+        // Do not compete with the search walk for I/O while showing results.
         if !self.search_active {
             self.load_visible_directories(cx);
         }

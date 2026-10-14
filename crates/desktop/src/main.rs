@@ -15,6 +15,7 @@ mod folder_sizes;
 mod quick_look;
 mod compare;
 mod spring;
+mod search_panel;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -25,8 +26,6 @@ use filemanager_core::operations::{Action, CopyControl, DropZone, OperationQueue
 use filemanager_core::places::{self, Place};
 use filemanager_core::search;
 use filemanager_core::sort::SortSpec;
-use filemanager_core::persistent_index::PersistentIndex;
-use filemanager_core::index_watch::IndexWatch;
 use filemanager_core::operation_journal::{InterruptedAction, OperationJournal};
 use filemanager_core::workspace::WorkspaceStore;
 use gpui::{
@@ -350,13 +349,8 @@ struct Explorer {
     comment_input: Entity<InputState>,
     author_input: Entity<InputState>,
     search_query: String,
-    search_results: Vec<PathBuf>,
+    search: search_panel::SearchState,
     search_root: Option<PathBuf>,
-    index_watch: Option<IndexWatch>,
-    index_watch_root: Option<PathBuf>,
-    index_watch_generation: u64,
-    index_seen_revision: u64,
-    index_watch_stale: bool,
     search_active: bool,
     search_busy: bool,
     search_generation: u64,
@@ -371,7 +365,7 @@ impl Explorer {
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр по имени"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр · Enter — поиск"));
         let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Комментарий к сохранению…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фактический автор (необязательно)…"));
@@ -435,12 +429,15 @@ impl Explorer {
                     this.filter = this.search_query.trim().to_lowercase();
                     if this.filter.is_empty() && this.search_active {
                         this.close_search();
+                    } else if this.search_active {
+                        this.schedule_search(cx);
                     }
                     cx.notify();
                 }
                 InputEvent::PressEnter { .. } if !this.search_query.trim().is_empty() => {
                     this.search_active = true;
-                    this.update_search(cx);
+                    this.search_root = None;
+                    this.run_search(cx);
                 }
                 _ => {}
             }
@@ -570,10 +567,7 @@ impl Explorer {
             watched_root: None, history_paused: false, unwatched_folders: Default::default(), confirm_recycle: None,
             status: prefs_error.unwrap_or(operation_status),
             search_input, address_input, comment_input, author_input, search_query: String::new(),
-            search_results: Vec::new(), search_root: None,
-            index_watch: None, index_watch_root: None,
-            index_watch_generation: 0, index_seen_revision: 0,
-            index_watch_stale: false,
+            search: Default::default(), search_root: None,
             search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
             _subscriptions: vec![
@@ -652,33 +646,13 @@ impl Explorer {
     }
 
     fn close_search(&mut self) {
-        self.index_watch_generation = self.index_watch_generation.wrapping_add(1);
-        self.index_watch = None;
-        self.index_watch_root = None;
-        self.index_seen_revision = 0;
-        self.index_watch_stale = false;
+        self.stop_search();
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_active = false;
         self.search_busy = false;
         self.search_root = None;
-        self.search_results.clear();
-    }
-
-    fn go_to(&mut self, path: PathBuf, side: GroupId, cx: &mut Context<Self>) {
-        self.browser.focus(side);
-        let tab = self.browser.active_mut();
-        self.status = match tab.navigate(path) {
-            Ok(()) => {
-                self.selected = None;
-                self.selected_history_event = None;
-                self.confirm_recycle = None;
-                self.context_menu = None;
-                "Папка открыта".to_owned()
-            }
-            Err(e) => format!("Не удалось открыть папку: {e}"),
-        };
-        self.close_search();
-        cx.notify();
+        self.search.hits.clear();
+        self.search.selected = None;
     }
 
     fn add_tab(&mut self, cx: &mut Context<Self>) {
@@ -1542,176 +1516,6 @@ impl Explorer {
                 cx.notify();
             });
         }).detach();
-    }
-
-    fn ensure_index_watcher(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        if self.index_watch_root.as_ref() == Some(&root) && self.index_watch.is_some() {
-            return;
-        }
-        // A recursive subscription on a share keeps change requests open on
-        // the server for the whole tree; search there uses its scan only.
-        if filemanager_core::path_utils::is_network_path(&root) {
-            return;
-        }
-        self.index_watch = None;
-        self.index_watch_root = None;
-        self.index_watch_generation = self.index_watch_generation.wrapping_add(1);
-        self.index_seen_revision = 0;
-        self.index_watch_stale = false;
-        match IndexWatch::start(&root, &PersistentIndex::default_path(), 100_000) {
-            Ok(watch) => {
-                self.index_watch = Some(watch);
-                self.index_watch_root = Some(root);
-                let generation = self.index_watch_generation;
-                cx.spawn(async move |weak, cx| {
-                    loop {
-                        cx.background_spawn(async {
-                            std::thread::sleep(Duration::from_millis(700));
-                        }).await;
-                        let running = weak.update(cx, |this, cx| {
-                            if this.index_watch_generation != generation {
-                                return false;
-                            }
-                            let Some(watch) = this.index_watch.as_ref() else {
-                                return false;
-                            };
-                            let revision = watch.revision();
-                            let stale = watch.is_stale();
-                            let reason = if stale { watch.last_error() } else { None };
-                            if stale != this.index_watch_stale {
-                                this.index_watch_stale = stale;
-                                if stale {
-                                    this.status = match reason {
-                                        Some(reason) => format!(
-                                            "Индекс поиска устарел: {}. Обновите индекс",
-                                            reason.chars().take(180).collect::<String>(),
-                                        ),
-                                        None => "Индекс поиска мог устареть, обновите его".into(),
-                                    };
-                                }
-                                cx.notify();
-                            }
-                            if revision > this.index_seen_revision && !this.search_busy {
-                                this.index_seen_revision = revision;
-                                if this.search_active {
-                                    this.run_search(false, cx);
-                                }
-                            }
-                            true
-                        }).unwrap_or(false);
-                        if !running { break; }
-                    }
-                }).detach();
-            }
-            Err(error) => {
-                self.status = format!(
-                    "Индекс сохранён, но автообновление недоступно: {error}"
-                );
-                cx.notify();
-            }
-        }
-    }
-
-    /// Search uses a durable SQLite index, not a full filesystem scan on
-    /// every keystroke. Building a missing index and each query run off the UI.
-    fn update_search(&mut self, cx: &mut Context<Self>) {
-        self.run_search(false, cx);
-    }
-
-    fn run_search(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
-        if !self.search_active {
-            self.search_generation = self.search_generation.wrapping_add(1);
-            self.search_busy = false;
-            self.search_results.clear();
-            cx.notify();
-            return;
-        }
-
-        let root = self.browser.active().active().path.clone();
-        if self.search_busy && self.search_root.as_ref() == Some(&root) {
-            if force_refresh {
-                self.status = "Индексация уже идёт".into();
-                cx.notify();
-            }
-            // The running task will query the newest text when it completes.
-            return;
-        }
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
-        self.search_root = Some(root.clone());
-        self.search_results.clear();
-        self.search_busy = true;
-        self.status = if force_refresh {
-            "Обновление индекса…".into()
-        } else {
-            "Поиск…".into()
-        };
-        cx.notify();
-
-        let query = self.search_query.clone();
-        let root_for_callback = root.clone();
-        let query_for_callback = query.clone();
-        let task = cx.background_spawn(async move {
-            let index = PersistentIndex::open(PersistentIndex::default_path())?;
-            let info = match (force_refresh, index.info(&root)?) {
-                (false, Some(existing)) => existing,
-                _ => index.refresh(&root, 100_000)?,
-            };
-            let matches = index.query(&root, &query, 120)?;
-            Ok::<_, std::io::Error>((info, matches))
-        });
-
-        cx.spawn(async move |weak, cx| {
-            let result = task.await;
-            let _ = weak.update(cx, |this, cx| {
-                if this.search_generation != generation || !this.search_active
-                    || this.search_root.as_ref() != Some(&root_for_callback) {
-                    return;
-                }
-                this.search_busy = false;
-                if this.search_query != query_for_callback {
-                    // Text changed while we were scanning. Query the now-ready
-                    // SQLite index for the latest input instead of showing old hits.
-                    this.update_search(cx);
-                    return;
-                }
-                match result {
-                    Ok((info, matches)) => {
-                        this.search_results = matches;
-                        this.status = format!(
-                            "Найдено: {} · в индексе: {}{}",
-                            this.search_results.len(), info.entries,
-                            if info.incomplete { " (неполный: нет доступа к части папок)" } else { "" },
-                        );
-                        this.ensure_index_watcher(root_for_callback.clone(), cx);
-                    }
-                    Err(error) => {
-                        this.search_results.clear();
-                        this.status = format!("Ошибка поиска: {error}");
-                    }
-                }
-                cx.notify();
-            });
-        }).detach();
-    }
-
-    fn open_search_result(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if path.is_dir() {
-            self.go_to(path, self.browser.active, cx);
-        } else {
-            if let Some(parent) = path.parent() {
-                if let Err(error) = self.browser.active_mut().navigate(parent) {
-                    self.status = format!("Не удалось открыть папку результата: {error}");
-                    cx.notify();
-                    return;
-                }
-            }
-            self.selected = Some(path.clone());
-            self.selected_history_event = None;
-            self.status = format!("Выбрано: {}", path.display());
-        }
-        self.close_search();
-        cx.notify();
     }
 
     fn save_comment(&mut self, cx: &mut Context<Self>) {

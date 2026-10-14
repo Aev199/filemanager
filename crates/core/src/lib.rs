@@ -6,6 +6,7 @@ pub mod versions;
 pub mod operations;
 pub mod bulk_rename;
 pub mod search;
+pub mod find;
 
 pub mod workspace;
 

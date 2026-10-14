@@ -546,10 +546,15 @@ impl Explorer {
     pub(crate) fn key_select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(false), cx); }
     pub(crate) fn key_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(true), cx); }
 
-    pub(crate) fn key_open(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
-        // Enter in a name or path field belongs to that field: the input
-        // passes the key on, and it must not also open the old file.
-        if self.renaming || self.creating_folder || self.address_editing.is_some() || self.saving_workspace {
+    pub(crate) fn key_open(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        // Enter in a name, path or search field belongs to that field: the
+        // input passes the key on, and it must not also open the old file.
+        if self.renaming || self.creating_folder || self.address_editing.is_some() || self.saving_workspace
+            || self.search_input.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        if self.search_active {
+            if let Some(index) = self.search.selected { self.open_search_hit(index, cx); }
             return;
         }
         // Enter confirms an open Recycle dialog instead of opening a file.
