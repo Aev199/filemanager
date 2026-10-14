@@ -1584,6 +1584,7 @@ impl Explorer {
                 }
                 let copy_target = path.clone();
                 let stage_target = self.selection();
+                let explorer_target = stage_target.clone();
                 let count = stage_target.len();
                 list = list.child(Self::separator())
                     .child(Self::menu_item("m-copy", "fm/copy.svg", "Копировать", "Ctrl+C", false, true)
@@ -1609,6 +1610,12 @@ impl Explorer {
                             this.context_menu = None;
                             this.stage_paths(&stage_target, cx);
                         })))
+                    .child(Self::menu_item("m-explorer", "fm/command.svg",
+                        if count > 1 { format!("Меню Проводника ({count})") } else { "Меню Проводника".into() }, "Shift+ПКМ", false, true)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let paths = if explorer_target.len() > 0 { explorer_target.clone() } else { Vec::new() };
+                            this.explorer_menu(paths, false, window, cx);
+                        })))
                     .child(Self::separator())
                     .child(Self::menu_item("m-recycle", "fm/trash.svg",
                         match (filemanager_core::path_utils::has_recycle_bin(path), count > 1) {
@@ -1626,6 +1633,7 @@ impl Explorer {
                 let copy_target = folder.clone();
                 let tab_target = folder.clone();
                 let (f1, f2, f3, f4) = (folder.clone(), folder.clone(), folder.clone(), folder.clone());
+                let explorer_folder = folder.clone();
                 if let Some(undo) = self.undo_stack.last() {
                     list = list
                         .child(Self::menu_item("m-undo", "fm/undo.svg", format!("Отменить: {}", undo.label), "Ctrl+Z", false, true)
@@ -1636,6 +1644,9 @@ impl Explorer {
                         .child(Self::separator());
                 }
                 list = list
+                    .child(Self::menu_item("m-explorer-folder", "fm/command.svg", "Меню Проводника для папки", "Shift+ПКМ", false, true)
+                        .on_click(cx.listener(move |this, _, window, cx| this.explorer_menu(vec![explorer_folder.clone()], false, window, cx))))
+                    .child(Self::separator())
                     .child(Self::menu_item("m-new-folder", "fm/folder-plus.svg", "Новая папка", "Ctrl+Shift+N", false, true)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.enter_folder(&f1, cx);
@@ -2049,9 +2060,12 @@ impl Render for Explorer {
             }))
             .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {
+            .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,window,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
-                if !drag.active {
+                if !drag.active && event.modifiers.shift {
+                    // Shift+right click: straight to the Explorer menu, with its extended verbs.
+                    this.explorer_menu(drag.paths,true,window,cx);
+                } else if !drag.active {
                     this.open_menu(event.position,drag.click_menu,cx);
                 } else if let Some(target)=drag.target.filter(|target| !drag.paths.contains(target)
                     && !drag.paths.iter().all(|path| path.parent()==Some(target.as_path()))) {

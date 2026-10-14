@@ -50,3 +50,5 @@ pub mod projects;
 
 #[cfg(windows)]
 pub mod shell_drag;
+#[cfg(windows)]
+pub mod shell_menu;

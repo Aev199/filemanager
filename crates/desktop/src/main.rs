@@ -125,6 +125,15 @@ const LIST_WIDTHS: &str = "list_widths";
 const DEFAULT_LIST_WIDTHS: [f32; 3] = [140., 110., 90.];
 pub(crate) const LIST_WIDTH_RANGE: (f32, f32) = (60., 400.);
 
+#[cfg(windows)]
+fn window_hwnd(window: &Window) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    HasWindowHandle::window_handle(window).ok().and_then(|handle| match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    })
+}
+
 fn parse_widths(text: &str) -> Option<[f32; 3]> {
     let values: Vec<f32> = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
     let (min, max) = LIST_WIDTH_RANGE;
@@ -749,12 +758,8 @@ impl Explorer {
     fn drag_out(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(windows)]
         {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if self.dragging_out || paths.is_empty() { return; }
-            let Some(hwnd) = window.window_handle().ok().and_then(|handle| match handle.as_raw() {
-                RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
-                _ => None,
-            }) else { return };
+            let Some(hwnd) = window_hwnd(window) else { return };
             cx.stop_active_drag(window);
             self.right_drag = None;
             self.dragging_out = true;
@@ -772,6 +777,37 @@ impl Explorer {
         }
         #[cfg(not(windows))]
         let _ = (paths, window, cx);
+    }
+
+    /// The Explorer context menu for `paths`, with "Open with", "Send to"
+    /// and the handlers installed on this computer. `extended` adds the
+    /// Shift+right-click verbs. Commands run by Windows, past the journal.
+    pub(crate) fn explorer_menu(&mut self, paths: Vec<PathBuf>, extended: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        self.right_drag = None;
+        cx.notify();
+        #[cfg(windows)]
+        {
+            let Some(hwnd) = window_hwnd(window) else { return };
+            if paths.is_empty() { return; }
+            // The menu runs its own message loop: start it from the executor.
+            cx.spawn(async move |this, cx| {
+                let result = filemanager_core::shell_menu::show(hwnd, &paths, extended);
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        Ok(true) => for path in &paths { this.refresh_parent_of(path, cx); },
+                        Ok(false) => {}
+                        Err(error) => this.status = format!("Меню Проводника недоступно: {error}"),
+                    }
+                    cx.notify();
+                });
+            }).detach();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (paths, extended, window);
+            self.status = "Меню Проводника есть только в Windows".into();
+        }
     }
 
     fn drop_files(&mut self, paths: &[PathBuf], folder: PathBuf, modifiers: gpui::Modifiers, cx: &mut Context<Self>) {
