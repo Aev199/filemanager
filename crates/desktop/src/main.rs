@@ -14,6 +14,7 @@ mod projects;
 mod folder_sizes;
 mod quick_look;
 mod compare;
+mod spring;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -229,6 +230,12 @@ struct Explorer {
     /// Pressed right button on files: a plain click opens their menu, a
     /// drag ends in the «Копировать сюда / Переместить сюда» menu.
     right_drag: Option<RightDrag>,
+    /// The active gpui drag carries files (not a tab).
+    file_drag: bool,
+    /// What that drag carries: a folder never springs open into itself.
+    drag_paths: Vec<PathBuf>,
+    spring: Option<spring::Spring>,
+    spring_generation: u64,
     /// A system drag to another program is running.
     #[cfg_attr(not(windows), allow(dead_code))]
     dragging_out: bool,
@@ -491,7 +498,7 @@ impl Explorer {
             copy_control: None,
             retry: None,
             context_menu: None,
-            right_drag: None, dragging_out: false, about_open: false,
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false,
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),

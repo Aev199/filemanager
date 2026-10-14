@@ -205,6 +205,7 @@ impl Explorer {
                     .child(small_icon("fm/x.svg",TEXT_MUTED))
                     .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.focus_group(group,cx);this.close_tab_at(index,cx);}))))
                 .on_click(cx.listener(move |this,_,_,cx| {cx.stop_propagation();this.switch_group_tab(group,index,cx);} ))
+                .when(index!=active_index,|tab|tab.on_mouse_move(cx.listener(move |this,_,_,cx| this.spring_hover(crate::spring::SpringTarget::Tab(group,index),cx))))
                 .on_drag(TabDrag {group,index,title:titles[index].clone()},|drag: &TabDrag,position,_,cx|
                     cx.new(|_|FileDragPreview {name:drag.title.clone(),position}))
                 .drag_over::<TabDrag>(|style,_,_,_|style.border_l_2().border_color(rgb(ACCENT)))
@@ -551,9 +552,12 @@ impl Explorer {
                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .child(browser::display_name(folder))
                     // A click on the current folder edits the path, as in Explorer.
-                    .when(!last, |crumb| crumb.on_click(cx.listener(move |this, _, _, cx| {
+                    .when(!last, |crumb| crumb.on_click(cx.listener({ let target = target.clone(); move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.navigate_side(side, &target, None, cx);
+                    }}))
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        this.spring_hover(crate::spring::SpringTarget::Folder(side, target.clone()), cx);
                     })))
             );
         }
@@ -587,6 +591,7 @@ impl Explorer {
     fn place_row(&self, id: (&'static str, usize), place: &Place, active: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let path = place.path.clone();
         let middle=path.clone();
+        let spring=path.clone();
         div().id(id).mx_2().h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
             .cursor_pointer()
             .when(active, |this| this.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
@@ -597,6 +602,10 @@ impl Explorer {
             .on_click(cx.listener(move |this, _, _, cx| {
                 let side = this.active_side();
                 this.navigate_side(side, &path, None, cx);
+            }))
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                let side = this.active_side();
+                this.spring_hover(crate::spring::SpringTarget::Folder(side, spring.clone()), cx);
             }))
             .on_mouse_down(MouseButton::Middle,cx.listener(move |this,_,window,cx| {
                 this.open_in_new_tab(&middle,cx);window.focus(&this.focus_handle,cx);
@@ -1195,11 +1204,12 @@ impl Explorer {
                     cx.stop_propagation();
                     this.drop_files(&data.paths, internal_target.clone(), window.modifiers(), cx);
                 }))
-                .on_mouse_move(cx.listener({ let target = path.clone(); move |this, _, _, _| {
+                .on_mouse_move(cx.listener({ let target = path.clone(); move |this, _, _, cx| {
                     if let Some(drag) = this.right_drag.as_mut().filter(|drag| drag.active && !drag.claimed) {
                         drag.target = Some(target.clone());
                         drag.claimed = true;
                     }
+                    this.spring_hover(crate::spring::SpringTarget::Folder(side, target.clone()), cx);
                 }}))
                 .on_drop(cx.listener(move |this, data: &ExternalPaths, _, cx| {
                     cx.stop_propagation();
@@ -2227,10 +2237,18 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,_: &keys::SettingsToggle,_,cx|this.settings_toggle(cx)))
             .on_action(cx.listener(|this,_: &keys::SettingsApply,_,cx|this.apply_settings(cx)))
             .on_drag_move::<TabDrag>(cx.listener(|this,event: &gpui::DragMoveEvent<TabDrag>,_,cx| {
+                this.file_drag = false;
                 if !this.pane_bounds.values().any(|bounds|bounds.contains(&event.event.position)) && this.dock_hover.take().is_some() {cx.notify();}
             }))
             // Leaving the window hands the files to Windows for other programs.
+            .on_drag_move::<ExternalPaths>(cx.listener(|this,_: &gpui::DragMoveEvent<ExternalPaths>,_,_| {
+                this.file_drag = true;
+                this.drag_paths.clear();
+            }))
             .on_drag_move::<FileDragInfo>(cx.listener(|this,event: &gpui::DragMoveEvent<FileDragInfo>,window,cx| {
+                this.file_drag = true;
+                let paths = &event.drag(cx).paths;
+                if &this.drag_paths != paths { this.drag_paths = paths.clone(); }
                 if outside_window(event.event.position, window) {
                     let paths = event.drag(cx).paths.clone();
                     this.drag_out(paths, window, cx);
@@ -2238,6 +2256,7 @@ impl Render for Explorer {
             }))
             .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,window,cx| {
                 // Root runs after rows and columns: they have claimed the target.
+                this.spring_settle();
                 if let Some(drag) = this.right_drag.as_mut() {
                     if event.pressed_button == Some(MouseButton::Right) {
                         if drag.active && outside_window(event.position, window) {
