@@ -80,6 +80,32 @@ pub fn show(owner: isize, paths: &[PathBuf], extended: bool) -> io::Result<bool>
     let folder: IShellFolder = unsafe { SHBindToParent(absolute.0[0], None) }.map_err(error)?;
     let children: Vec<*const ITEMIDLIST> = absolute.0.iter().map(|pidl| unsafe { ILFindLastID(*pidl) } as *const _).collect();
     let menu: IContextMenu = unsafe { folder.GetUIObjectOf(owner, &children, None) }.map_err(error)?;
+    run(owner, menu, extended)
+}
+
+/// The menu Explorer shows on the empty space of `folder`: "New", "Paste",
+/// "Open in Terminal", "Properties" and the like.
+pub fn show_background(owner: isize, folder: &std::path::Path, extended: bool) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    let error = |e: windows::core::Error| io::Error::other(e.message());
+    let owner = HWND(owner as *mut _);
+    let name: Vec<u16> = crate::path_utils::normalize_extended_path(folder).as_os_str()
+        .encode_wide().chain(Some(0)).collect();
+    let mut pidl = std::ptr::null_mut();
+    unsafe { SHParseDisplayName(PCWSTR(name.as_ptr()), None, &mut pidl, 0, None) }.map_err(error)?;
+    let result = (|| {
+        let mut child = std::ptr::null_mut();
+        let parent: IShellFolder = unsafe { SHBindToParent(pidl, Some(&mut child)) }.map_err(error)?;
+        let folder: IShellFolder = unsafe { parent.BindToObject(child, None) }.map_err(error)?;
+        let menu: IContextMenu = unsafe { folder.CreateViewObject(owner) }.map_err(error)?;
+        run(owner, menu, extended)
+    })();
+    unsafe { ILFree(Some(pidl)) };
+    result
+}
+
+fn run(owner: HWND, menu: IContextMenu, extended: bool) -> io::Result<bool> {
+    let error = |e: windows::core::Error| io::Error::other(e.message());
 
     let popup = unsafe { CreatePopupMenu() }.map_err(error)?;
     let flags = CMF_NORMAL | CMF_EXPLORE | if extended { CMF_EXTENDEDVERBS } else { 0 };

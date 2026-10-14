@@ -1025,8 +1025,13 @@ impl Explorer {
         let drop_folder = folder.clone();
         let hover_folder = folder.clone();
         let right_target = self.right_drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&folder);
-        column = column.on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            this.open_menu(event.position, MenuTarget::Folder(background_folder.clone()), cx);
+        column = column.on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            // Shift+right click on empty space: Explorer's own folder menu.
+            if event.modifiers.shift {
+                this.explorer_folder_menu(background_folder.clone(), window, cx);
+            } else {
+                this.open_menu(event.position, MenuTarget::Folder(background_folder.clone()), cx);
+            }
         }))
             // Files dropped on the empty space or a file row land in this folder.
             .drag_over::<FileDragInfo>(|style, _, _, _| style.bg(rgb(ACCENT_SOFT)))
@@ -1650,20 +1655,29 @@ impl Explorer {
         enabled: bool,
     ) -> Stateful<Div> {
         let color = if !enabled { TEXT_DIM } else if danger { DANGER } else { TEXT };
-        div().id(id).h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
+        let label: SharedString = label.into();
+        let tip = label.clone();
+        // Long labels end in "…" with the full text in a tooltip; the
+        // shortcut keeps its place inside the menu.
+        div().id(id).h(px(28.)).flex_none().px_2().flex().items_center().gap_2().rounded_md()
             .text_size(px(13.)).text_color(rgb(color))
             .when(enabled, |this| this.cursor_pointer().hover(|style| style.bg(rgb(if danger { 0x3A2128 } else { HOVER }))))
+            .when(tip.chars().count() > 34, |this| this.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)))
             .child(small_icon(icon_path, if !enabled { TEXT_DIM } else if danger { DANGER } else { TEXT_MUTED }))
-            .child(div().flex_1().child(label.into()))
-            .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(shortcut))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(div().flex_none().text_size(px(11.)).text_color(rgb(TEXT_DIM)).child(shortcut))
     }
 
     fn separator() -> Div {
         div().my_1().h(px(1.)).bg(rgb(BORDER))
     }
 
-    fn context_menu_view(&self, menu: &ContextMenu, cx: &mut Context<Self>) -> AnyElement {
-        let mut list = div().id(("context-menu", menu.serial as usize)).occlude().w(px(280.)).p_1().flex().flex_col()
+    fn context_menu_view(&self, menu: &ContextMenu, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // Never taller than the window: a long menu scrolls instead of
+        // running past the bottom edge.
+        let max_height = window.viewport_size().height - px(16.);
+        let mut list = div().id(("context-menu", menu.serial as usize)).occlude().w(px(300.)).max_h(max_height)
+            .overflow_y_scroll().p_1().flex().flex_col()
             .rounded_lg().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.context_menu = None;
@@ -1818,7 +1832,7 @@ impl Explorer {
                 }
                 list = list
                     .child(Self::menu_item("m-explorer-folder", "fm/command.svg", "Меню Проводника для папки", "Shift+ПКМ", false, true)
-                        .on_click(cx.listener(move |this, _, window, cx| this.explorer_menu(vec![explorer_folder.clone()], true, window, cx))))
+                        .on_click(cx.listener(move |this, _, window, cx| this.explorer_folder_menu(explorer_folder.clone(), window, cx))))
                     .child(Self::separator())
                     .child(Self::menu_item("m-new-folder", "fm/folder-plus.svg", "Новая папка", "Ctrl+Shift+N", false, true)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -2334,7 +2348,7 @@ impl Render for Explorer {
                         .child(div().flex_1().min_h_0().overflow_hidden().child(panels))
                     .child(self.status_bar(cx))));
         if let Some(menu) = self.context_menu.clone() {
-            root = root.child(self.context_menu_view(&menu, cx));
+            root = root.child(self.context_menu_view(&menu, window, cx));
         }
         if let Some(dialog) = self.dialog(cx) {
             root = root.child(dialog);

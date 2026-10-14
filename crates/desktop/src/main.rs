@@ -811,6 +811,15 @@ impl Explorer {
     /// and the handlers installed on this computer. `extended` adds the
     /// Shift+right-click verbs. Commands run by Windows, past the journal.
     pub(crate) fn explorer_menu(&mut self, paths: Vec<PathBuf>, extended: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.explorer_menu_for(paths, None, extended, window, cx);
+    }
+
+    /// The Explorer menu of a folder's empty space ("New", "Paste", …).
+    pub(crate) fn explorer_folder_menu(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.explorer_menu_for(vec![folder.clone()], Some(folder), true, window, cx);
+    }
+
+    fn explorer_menu_for(&mut self, paths: Vec<PathBuf>, background: Option<PathBuf>, extended: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         self.right_drag = None;
         cx.notify();
@@ -820,7 +829,10 @@ impl Explorer {
             if paths.is_empty() { return; }
             // The menu runs its own message loop: start it from the executor.
             cx.spawn(async move |this, cx| {
-                let result = filemanager_core::shell_menu::show(hwnd, &paths, extended);
+                let result = match &background {
+                    Some(folder) => filemanager_core::shell_menu::show_background(hwnd, folder, extended),
+                    None => filemanager_core::shell_menu::show(hwnd, &paths, extended),
+                };
                 let _ = this.update(cx, |this, cx| {
                     match result {
                         Ok(true) => for path in &paths { this.refresh_parent_of(path, cx); },
@@ -833,7 +845,7 @@ impl Explorer {
         }
         #[cfg(not(windows))]
         {
-            let _ = (paths, extended, window);
+            let _ = (paths, background, extended, window);
             self.status = "Меню Проводника есть только в Windows".into();
         }
     }
