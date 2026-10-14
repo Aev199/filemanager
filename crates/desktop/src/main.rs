@@ -466,6 +466,8 @@ impl Explorer {
         let session_restore_error = restored.err().map(|e|e.to_string());
         let prefs_error = session_restore_error.as_ref().map(|e|format!("Проект не восстановлен: {e}")).or(prefs_error);
         let favorites = workspaces.as_ref().and_then(|s|s.favorites().ok()).unwrap_or_default();
+        let search_depth = workspaces.as_ref().and_then(|store| store.value(search_panel::DEPTH_KEY).ok().flatten())
+            .and_then(|text| text.parse().ok()).filter(|depth| *depth < search_panel::DEPTHS.len()).unwrap_or(0);
         theme::set_light(prefs.light);
         let accent = |key| workspaces.as_ref().and_then(|store| store.value(key).ok().flatten())
             .map(|value| theme::accent_scheme(&value)).unwrap_or(0);
@@ -567,7 +569,11 @@ impl Explorer {
             watched_root: None, history_paused: false, unwatched_folders: Default::default(), confirm_recycle: None,
             status: prefs_error.unwrap_or(operation_status),
             search_input, address_input, comment_input, author_input, search_query: String::new(),
-            search: Default::default(), search_root: None,
+            search: search_panel::SearchState {
+                depth: search_depth,
+                ..Default::default()
+            },
+            search_root: None,
             search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
             _subscriptions: vec![

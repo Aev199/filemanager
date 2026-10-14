@@ -23,8 +23,18 @@ pub(crate) const PERIODS: [(&str, Option<&str>); 5] = [
     ("За год", Some("год")),
 ];
 
+/// How deep to look, cycled by one button: levels below the folder.
+pub(crate) const DEPTHS: [(&str, Option<usize>); 5] = [
+    ("Все вложенные", None),
+    ("Только эта папка", Some(0)),
+    ("+1 уровень", Some(1)),
+    ("+2 уровня", Some(2)),
+    ("+3 уровня", Some(3)),
+];
+pub(crate) const DEPTH_KEY: &str = "search_depth";
+
 pub(crate) const SYNTAX_HINT: &str = "Слова ищутся в имени, во всех вложенных папках. \
-Маски: *.dwg  ·  расш:pdf,dwg  ·  тип:папка  ·  размер:>10мб  ·  дата:неделя или дата:>01.09.2026  ·  текст:\"фраза\" — внутри текстовых файлов";
+Маски: *.dwg  ·  расш:pdf,dwg  ·  тип:папка  ·  размер:>10мб  ·  дата:неделя или дата:>01.09.2026  ·  глубина:1  ·  текст:\"фраза\" — внутри текстовых файлов";
 
 #[derive(Default)]
 pub(crate) struct SearchState {
@@ -35,6 +45,8 @@ pub(crate) struct SearchState {
     pub(crate) content: bool,
     pub(crate) kind: Kind,
     pub(crate) period: usize,
+    /// Index into `DEPTHS`; remembered between runs.
+    pub(crate) depth: usize,
     pub(crate) selected: Option<usize>,
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) started: Option<Instant>,
@@ -87,7 +99,12 @@ impl Explorer {
         self.status.clear();
         let feed = Arc::new(Mutex::new(Feed::default()));
         let worker = feed.clone();
-        let content = self.search.content;
+        let options = find::Options {
+            depth: DEPTHS[self.search.depth.min(DEPTHS.len() - 1)].1,
+            content: self.search.content,
+            limit: LIMIT,
+            threads: find::Options::threads_for(&root),
+        };
         // A plain thread: a long walk must not hold an executor worker.
         std::thread::spawn(move || {
             let mut emit = |batch: Vec<Hit>, progress: Progress| {
@@ -96,7 +113,7 @@ impl Explorer {
                 feed.progress = progress;
                 !cancel.load(Ordering::Relaxed)
             };
-            let progress = find::search(&root, &query, content, LIMIT, &cancel, &mut emit);
+            let progress = find::search(&root, &query, options, &cancel, &mut emit);
             if let Ok(mut feed) = worker.lock() {
                 feed.progress = progress;
                 feed.done = true;
@@ -145,6 +162,14 @@ impl Explorer {
 
     pub(crate) fn cycle_search_period(&mut self, cx: &mut Context<Self>) {
         self.search.period = (self.search.period + 1) % PERIODS.len();
+        self.run_search(cx);
+    }
+
+    pub(crate) fn cycle_search_depth(&mut self, cx: &mut Context<Self>) {
+        self.search.depth = (self.search.depth + 1) % DEPTHS.len();
+        if let Some(store) = &self.workspaces {
+            let _ = store.set_value(DEPTH_KEY, &self.search.depth.to_string());
+        }
         self.run_search(cx);
     }
 

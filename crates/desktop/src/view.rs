@@ -1256,7 +1256,7 @@ impl Explorer {
 
     fn search_results(&mut self, cx: &mut Context<Self>) -> AnyElement {
         use filemanager_core::find::Kind;
-        use crate::search_panel::{PERIODS, SYNTAX_HINT};
+        use crate::search_panel::{DEPTHS, PERIODS, SYNTAX_HINT};
         let root = self.search_root.clone().unwrap_or_default();
         let chip = |id: &'static str, label: &'static str, active: bool| {
             div().id(id).h(px(24.)).px_2().flex().items_center().gap_1().rounded_md().cursor_pointer()
@@ -1271,7 +1271,7 @@ impl Explorer {
         let title = div().flex().items_center().gap_2()
             .child(icon("fm/search.svg", ACCENT))
             .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(format!("«{}» в папке «{}» и вложенных", self.search_query.trim(), browser::display_name(&root))))
+                .child(format!("«{}» в папке «{}»", self.search_query.trim(), browser::display_name(&root))))
             .child(if busy {
                 text_button("search-stop", "Остановить", ButtonKind::Ghost)
                     .on_click(cx.listener(|this, _, _, cx| { this.stop_search(); cx.notify(); }))
@@ -1292,6 +1292,9 @@ impl Explorer {
             .child(chip("search-period", PERIODS[self.search.period].0, self.search.period > 0)
                 .tooltip(|window, cx| Tooltip::new("Дата изменения: щёлкните, чтобы сменить").build(window, cx))
                 .on_click(cx.listener(|this, _, _, cx| this.cycle_search_period(cx))))
+            .child(chip("search-depth", DEPTHS[self.search.depth].0, self.search.depth > 0)
+                .tooltip(|window, cx| Tooltip::new("Сколько уровней вложенных папок просматривать: щёлкните, чтобы сменить").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.cycle_search_depth(cx))))
             .child(chip("search-content", "И в тексте файлов", self.search.content)
                 .tooltip(|window, cx| Tooltip::new("Искать слова ещё и внутри текстовых файлов (txt, csv, xml, lsp, dxf…)").build(window, cx))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_search_content(cx))))

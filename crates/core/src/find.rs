@@ -6,11 +6,11 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
-use walkdir::{DirEntry, WalkDir};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
@@ -34,6 +34,8 @@ pub struct Query {
     pub modified_before: Option<SystemTime>,
     /// Text looked for inside plain-text files.
     pub content: Option<String>,
+    /// `глубина:N`: levels below the folder, overriding the panel setting.
+    pub depth: Option<usize>,
 }
 
 /// Lower case with ё folded to е, as people type it.
@@ -146,6 +148,7 @@ impl Query {
                     }
                 }
                 "text" | "текст" | "содержит" | "content" => query.content = Some(value),
+                "depth" | "глубина" | "уровни" => query.depth = value.parse().ok(),
                 _ if lower.contains(['*', '?']) => query.patterns.push(lower),
                 _ => query.words.push(lower),
             }
@@ -260,6 +263,9 @@ pub fn file_contains(path: &Path, needle: &str, cancel: &AtomicBool) -> bool {
     if file.by_ref().take(CONTENT_LIMIT).read_to_end(&mut bytes).is_err() || cancel.load(Ordering::Relaxed) {
         return false;
     }
+    // A zero byte outside UTF-16 means binary data under a text extension.
+    let utf16 = bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]);
+    if !utf16 && bytes[..bytes.len().min(8192)].contains(&0) { return false; }
     fold(&decode_text(&bytes)).contains(needle)
 }
 
@@ -285,80 +291,227 @@ pub struct Progress {
 
 const SKIPPED: &[&str] = &["$recycle.bin", "system volume information", ".git", ".svn", ".hg"];
 
-fn walkable(entry: &DirEntry) -> bool {
-    if entry.depth() == 0 { return true; }
-    if entry.file_type().is_symlink() { return false; }
-    if entry.file_type().is_dir() && SKIPPED.contains(&entry.file_name().to_string_lossy().to_lowercase().as_str()) {
-        return false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Options {
+    /// Levels below the root to look into: 0 = only the root's own entries,
+    /// `None` = the whole tree.
+    pub depth: Option<usize>,
+    /// Words may also be found inside text files.
+    pub content: bool,
+    /// Stop after this many hits.
+    pub limit: usize,
+    /// Folders read at the same time.
+    pub threads: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { depth: None, content: false, limit: 5000, threads: 8 }
     }
+}
+
+impl Options {
+    /// More readers for a share, where each folder costs a network round trip.
+    pub fn threads_for(root: &Path) -> usize {
+        if crate::path_utils::is_network_path(root) { 16 } else { 8 }
+    }
+}
+
+/// Folder to descend into: not a link, junction or system folder.
+fn descend(entry: &fs::DirEntry, file_type: fs::FileType) -> bool {
+    if !file_type.is_dir() || file_type.is_symlink() { return false; }
+    if SKIPPED.contains(&entry.file_name().to_string_lossy().to_lowercase().as_str()) { return false; }
     // Junctions loop back into the tree; Explorer's search skips them too.
+    // The attributes come with the directory listing, no extra request.
     #[cfg(windows)]
-    if entry.file_type().is_dir() {
+    {
         use std::os::windows::fs::MetadataExt;
-        if entry.metadata().map(|metadata| metadata.file_attributes() & 0x400 != 0).unwrap_or(false) { return false; }
+        if entry.metadata().map(|metadata| metadata.file_attributes() & 0x400 != 0).unwrap_or(true) { return false; }
     }
     true
 }
 
-/// Walk `root` (not itself a hit). `emit` gets new hits about ten times a
-/// second and returns false to stop; `cancel` also stops the walk.
+struct Queue {
+    folders: Vec<(PathBuf, usize)>,
+    /// Workers reading a folder right now; zero with an empty queue = done.
+    busy: usize,
+}
+
+struct Walk<'a> {
+    query: &'a Query,
+    by_name: Query,
+    by_text: Query,
+    phrase: Option<String>,
+    depth: Option<usize>,
+    queue: Mutex<Queue>,
+    wake: Condvar,
+    stop: AtomicBool,
+    cancel: &'a AtomicBool,
+    folders: AtomicUsize,
+    files: AtomicUsize,
+    denied: AtomicUsize,
+}
+
+impl Walk<'_> {
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn next_folder(&self) -> Option<(PathBuf, usize)> {
+        let mut queue = self.queue.lock().ok()?;
+        loop {
+            if self.stopped() { return None; }
+            if let Some(folder) = queue.folders.pop() {
+                queue.busy += 1;
+                return Some(folder);
+            }
+            if queue.busy == 0 { return None; }
+            queue = self.wake.wait(queue).ok()?;
+        }
+    }
+
+    fn finish_folder(&self, found: Vec<(PathBuf, usize)>) {
+        let Ok(mut queue) = self.queue.lock() else { return };
+        queue.busy -= 1;
+        queue.folders.extend(found);
+        drop(queue);
+        // New folders for idle workers, or the end of the walk for all.
+        self.wake.notify_all();
+    }
+
+    fn worker(&self, hits: &mpsc::Sender<Hit>) {
+        while let Some((folder, level)) = self.next_folder() {
+            let mut subfolders = Vec::new();
+            match fs::read_dir(&folder) {
+                Ok(entries) => for entry in entries {
+                    if self.stopped() { break; }
+                    let Ok(entry) = entry else { self.denied.fetch_add(1, Ordering::Relaxed); continue };
+                    let Ok(file_type) = entry.file_type() else { continue };
+                    if descend(&entry, file_type) && self.depth.is_none_or(|depth| level < depth) {
+                        subfolders.push((entry.path(), level + 1));
+                    }
+                    if let Some(hit) = self.check(&entry, file_type) {
+                        if hits.send(hit).is_err() { self.stop.store(true, Ordering::Relaxed); }
+                    }
+                },
+                Err(_) => { self.denied.fetch_add(1, Ordering::Relaxed); }
+            }
+            // Deeper folders go last on the stack: depth-first per worker
+            // keeps the queue small; workers still share the whole tree.
+            subfolders.reverse();
+            self.finish_folder(subfolders);
+        }
+        self.wake.notify_all();
+    }
+
+    fn check(&self, entry: &fs::DirEntry, file_type: fs::FileType) -> Option<Hit> {
+        let is_dir = file_type.is_dir();
+        if is_dir { self.folders.fetch_add(1, Ordering::Relaxed); } else { self.files.fetch_add(1, Ordering::Relaxed); }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Free on Windows (it comes with the listing); a stat elsewhere, so
+        // only taken when a condition needs it or for a hit's columns.
+        let query = self.query;
+        let needs_metadata = query.min_size.is_some() || query.max_size.is_some()
+            || query.modified_after.is_some() || query.modified_before.is_some() || self.phrase.is_some();
+        let mut metadata = needs_metadata.then(|| entry.metadata().ok()).flatten();
+        let facts = |metadata: &Option<fs::Metadata>| (
+            metadata.as_ref().filter(|_| !is_dir).map_or(0, fs::Metadata::len),
+            metadata.as_ref().and_then(|metadata| metadata.modified().ok()),
+        );
+        let (size, modified) = facts(&metadata);
+        let by_content = if query.content.is_none() && self.by_name.matches(&name, is_dir, size, modified) {
+            false
+        } else if let Some(phrase) = self.phrase.as_deref()
+            && !is_dir && size <= CONTENT_LIMIT && is_text_file(Path::new(&*name))
+            && self.by_text.matches(&name, is_dir, size, modified)
+            && file_contains(&entry.path(), phrase, self.cancel) {
+            true
+        } else {
+            return None;
+        };
+        if metadata.is_none() { metadata = entry.metadata().ok(); }
+        let (size, modified) = facts(&metadata);
+        Some(Hit { path: entry.path(), is_dir, size, modified, by_content })
+    }
+
+    fn progress(&self, found: usize, truncated: bool) -> Progress {
+        Progress {
+            folders: self.folders.load(Ordering::Relaxed),
+            files: self.files.load(Ordering::Relaxed),
+            denied: self.denied.load(Ordering::Relaxed),
+            found,
+            truncated,
+        }
+    }
+}
+
+/// Walk `root` (not itself a hit) with several folder readers at once.
+/// `emit` gets new hits about ten times a second and returns false to stop;
+/// `cancel` also stops the walk. Hits arrive in the order they are found.
 pub fn search(
     root: &Path,
     query: &Query,
-    content_too: bool,
-    limit: usize,
+    options: Options,
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(Vec<Hit>, Progress) -> bool,
 ) -> Progress {
-    let mut progress = Progress::default();
-    let mut batch = Vec::new();
-    let mut flushed = Instant::now();
     // The text box doubles as the content phrase when asked to look inside.
-    let phrase = query.content.clone().or_else(|| content_too.then(|| query.words.join(" ")).filter(|p| !p.is_empty()));
+    let phrase = query.content.clone()
+        .or_else(|| options.content.then(|| query.words.join(" ")).filter(|p| !p.is_empty()));
     let mut by_name = query.clone();
     by_name.content = None;
     // Conditions a file must meet before its text is read: with "also in
     // content" the words may be in the text instead of the name.
     let mut by_text = by_name.clone();
     if query.content.is_none() { by_text.words.clear(); }
-    for next in WalkDir::new(root).follow_links(false).into_iter().filter_entry(walkable) {
-        if cancel.load(Ordering::Relaxed) { break; }
-        let entry = match next {
-            Ok(entry) => entry,
-            Err(_) => { progress.denied += 1; continue; }
-        };
-        if entry.depth() == 0 { continue; }
-        let is_dir = entry.file_type().is_dir();
-        if is_dir { progress.folders += 1 } else { progress.files += 1 }
-        let metadata = entry.metadata().ok();
-        let size = metadata.as_ref().filter(|_| !is_dir).map_or(0, fs::Metadata::len);
-        let modified = metadata.as_ref().and_then(|metadata| metadata.modified().ok());
-        let name = entry.file_name().to_string_lossy();
-        let hit = if query.content.is_none() && by_name.matches(&name, is_dir, size, modified) {
-            Some(false)
-        } else if let Some(phrase) = phrase.as_deref()
-            && !is_dir && size <= CONTENT_LIMIT && is_text_file(entry.path())
-            && by_text.matches(&name, is_dir, size, modified)
-            && file_contains(entry.path(), phrase, cancel) {
-            Some(true)
-        } else {
-            None
-        };
-        if let Some(by_content) = hit {
-            progress.found += 1;
-            batch.push(Hit { path: entry.into_path(), is_dir, size, modified, by_content });
-            if progress.found >= limit {
-                progress.truncated = true;
-                break;
+    let walk = Walk {
+        query, by_name, by_text, phrase,
+        depth: query.depth.or(options.depth),
+        queue: Mutex::new(Queue { folders: vec![(root.to_path_buf(), 0)], busy: 0 }),
+        wake: Condvar::new(),
+        stop: AtomicBool::new(false),
+        cancel,
+        folders: AtomicUsize::new(0),
+        files: AtomicUsize::new(0),
+        denied: AtomicUsize::new(0),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let mut found = 0;
+    let mut truncated = false;
+    std::thread::scope(|scope| {
+        for _ in 0..options.threads.max(1) {
+            let sender = sender.clone();
+            let walk = &walk;
+            scope.spawn(move || walk.worker(&sender));
+        }
+        drop(sender);
+        let mut batch = Vec::new();
+        let mut flushed = Instant::now();
+        loop {
+            let next = receiver.recv_timeout(Duration::from_millis(50));
+            let finished = matches!(next, Err(mpsc::RecvTimeoutError::Disconnected));
+            if let Ok(hit) = next {
+                if found < options.limit {
+                    found += 1;
+                    batch.push(hit);
+                } else {
+                    truncated = true;
+                    walk.stop.store(true, Ordering::Relaxed);
+                    walk.wake.notify_all();
+                }
             }
+            if finished || flushed.elapsed() >= Duration::from_millis(100) {
+                flushed = Instant::now();
+                if !emit(std::mem::take(&mut batch), walk.progress(found, truncated)) {
+                    walk.stop.store(true, Ordering::Relaxed);
+                    walk.wake.notify_all();
+                }
+            }
+            if finished { break; }
         }
-        if flushed.elapsed() >= Duration::from_millis(100) {
-            flushed = Instant::now();
-            if !emit(std::mem::take(&mut batch), progress) { return progress; }
-        }
-    }
-    emit(batch, progress);
-    progress
+    });
+    walk.progress(found, truncated)
 }
 
 #[cfg(test)]
@@ -367,7 +520,8 @@ mod tests {
 
     fn names(root: &Path, text: &str, content: bool) -> Vec<String> {
         let mut hits = Vec::new();
-        search(root, &Query::parse(text), content, 100, &AtomicBool::new(false), &mut |batch, _| { hits.extend(batch); true });
+        let options = Options { content, ..Options::default() };
+        search(root, &Query::parse(text), options, &AtomicBool::new(false), &mut |batch, _| { hits.extend(batch); true });
         let mut names: Vec<String> = hits.into_iter().map(|hit| hit.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
         names.sort();
         names
@@ -416,11 +570,51 @@ mod tests {
     #[test]
     fn cancel_and_limit_stop_the_walk() {
         let dir = tree();
-        let progress = search(dir.path(), &Query::parse("тип:файл"), false, 2, &AtomicBool::new(false), &mut |_, _| true);
+        let limited = Options { limit: 2, ..Options::default() };
+        let mut total = 0;
+        let progress = search(dir.path(), &Query::parse("тип:файл"), limited, &AtomicBool::new(false), &mut |batch, _| { total += batch.len(); true });
         assert!(progress.truncated);
-        assert_eq!(progress.found, 2);
-        let progress = search(dir.path(), &Query::parse("план"), false, 100, &AtomicBool::new(true), &mut |_, _| true);
+        assert_eq!((progress.found, total), (2, 2));
+        let progress = search(dir.path(), &Query::parse("план"), Options::default(), &AtomicBool::new(true), &mut |_, _| true);
         assert_eq!(progress.found, 0);
+    }
+
+    #[test]
+    fn depth_limits_the_levels_searched() {
+        let dir = tree();
+        let at = |depth| {
+            let mut hits = Vec::new();
+            let options = Options { depth: Some(depth), ..Options::default() };
+            search(dir.path(), &Query::parse("тип:файл"), options, &AtomicBool::new(false), &mut |batch, _| { hits.extend(batch); true });
+            hits.len()
+        };
+        assert_eq!(at(0), 0);
+        assert_eq!(at(1), 3);
+        assert_eq!(at(2), 4);
+        assert_eq!(names(dir.path(), "тип:файл глубина:1", false).len(), 3);
+    }
+
+    #[test]
+    fn content_search_skips_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("data.dat"), b"\0\0beam\0").unwrap();
+        fs::write(dir.path().join("note.dat"), b"beam load").unwrap();
+        assert_eq!(names(dir.path(), "текст:beam", false), ["note.dat"]);
+    }
+
+    #[test]
+    fn many_folders_are_all_visited_by_parallel_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        for a in 0..20 {
+            for b in 0..10 {
+                let folder = dir.path().join(format!("a{a}/b{b}"));
+                fs::create_dir_all(&folder).unwrap();
+                fs::write(folder.join("f.txt"), b"x").unwrap();
+            }
+        }
+        let mut found = 0;
+        let progress = search(dir.path(), &Query::parse("f.txt"), Options::default(), &AtomicBool::new(false), &mut |batch, _| { found += batch.len(); true });
+        assert_eq!((found, progress.found, progress.folders, progress.files), (200, 200, 220, 200));
     }
 
     #[test]
