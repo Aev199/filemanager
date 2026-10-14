@@ -121,6 +121,7 @@ impl Explorer {
                 match result {
                     Ok(Some(found)) if manual || this.updates.skipped.as_deref() != Some(found.version.as_str()) => {
                         this.updates.dialog = manual;
+                        if manual { this.about_open = false; }
                         this.updates.phase = Phase::Available(found);
                     }
                     Ok(_) => if manual { this.updates.note = Some(format!("Установлена последняя версия ({})", channel.label().to_lowercase())); },
@@ -149,6 +150,11 @@ impl Explorer {
             _ => return,
         };
         self.updates.offered = Some(found.clone());
+        if !cfg!(windows) {
+            self.updates.phase = Phase::Failed("Обновление устанавливается только в Windows-версии".into());
+            cx.notify();
+            return;
+        }
         self.updates.phase = Phase::Downloading { update: found.clone(), done: 0, total: None };
         let progress = Arc::new(Mutex::new((0u64, None::<u64>)));
         let shown = progress.clone();
