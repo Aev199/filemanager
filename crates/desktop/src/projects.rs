@@ -4,6 +4,17 @@ use filemanager_core::panes::{GroupId, Workspace};
 use crate::Explorer;
 #[derive(Clone)]
 pub(crate) struct FavoriteDrag { pub index: usize }
+#[derive(Clone)]
+pub(crate) struct PlaceDrag { pub index: usize }
+/// Visible «Места» in the user's order, one path per line.
+pub(crate) const PLACES: &str = "places";
+
+/// The standard places in the saved order; places missing from the saved
+/// list are hidden. Without a saved list every place shows.
+pub(crate) fn arrange_places(all: &[filemanager_core::places::Place], layout: Option<&str>) -> Vec<filemanager_core::places::Place> {
+    let Some(layout) = layout else { return all.to_vec() };
+    layout.lines().filter_map(|line| all.iter().find(|place| place.path == Path::new(line)).cloned()).collect()
+}
 impl Explorer {
     pub(crate) fn prepare_window_close(&mut self,cx: &mut Context<Self>) -> bool {
         match self.persist_workspace() {
@@ -124,4 +135,29 @@ impl Explorer {
         if from>=self.favorites.len() || to>=self.favorites.len() || from==to {return;}
         let mut paths=self.favorites.clone();let path=paths.remove(from);paths.insert(to,path);self.set_favorites(paths,cx);
     }
+    fn save_places(&mut self,visible: Vec<PathBuf>,cx: &mut Context<Self>) {
+        let layout=visible.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
+        let result=self.workspaces.as_ref().ok_or_else(||io::Error::other("База настроек недоступна"))
+            .and_then(|store|store.set_value(PLACES,&layout));
+        match result {Ok(())=>self.places=arrange_places(&self.all_places,Some(&layout)),Err(e)=>self.status=format!("«Места» не сохранены: {e}")}
+        self.context_menu=None;cx.notify();
+    }
+    fn visible_places(&self) -> Vec<PathBuf> { self.places.iter().map(|p|p.path.clone()).collect() }
+    pub(crate) fn hide_place(&mut self,index: usize,cx: &mut Context<Self>) {
+        let mut visible=self.visible_places();
+        if index<visible.len() {visible.remove(index);}
+        self.save_places(visible,cx);
+    }
+    pub(crate) fn move_place(&mut self,from: usize,to: usize,cx: &mut Context<Self>) {
+        let mut visible=self.visible_places();
+        if from>=visible.len() || to>=visible.len() || from==to {return;}
+        let path=visible.remove(from);visible.insert(to,path);self.save_places(visible,cx);
+    }
+    /// Hidden places come back at the end, in their standard order.
+    pub(crate) fn show_all_places(&mut self,cx: &mut Context<Self>) {
+        let mut visible=self.visible_places();
+        for place in &self.all_places { if !visible.contains(&place.path) {visible.push(place.path.clone());} }
+        self.save_places(visible,cx);
+    }
+    pub(crate) fn hidden_places(&self) -> usize { self.all_places.len().saturating_sub(self.places.len()) }
 }

@@ -20,7 +20,7 @@ use filemanager_core::panes::{Node, Axis, Edge, tab_titles};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::Theme;
 use gpui_component::tooltip::Tooltip;
-use crate::projects::FavoriteDrag;
+use crate::projects::{FavoriteDrag, PlaceDrag};
 use gpui_component::{ElementExt, InteractiveElementExt};
 
 use crate::keys;
@@ -290,6 +290,15 @@ impl Explorer {
         }
     }
 
+    /// Ends a list column drag and keeps the widths for the next start.
+    pub(crate) fn finish_list_resize(&mut self) {
+        if self.list_resize.take().is_none() { return; }
+        if let Some(store)=&self.workspaces {
+            let [a,b,c]=self.list_widths;
+            let _=store.set_value(crate::LIST_WIDTHS, &format!("{a:.0},{b:.0},{c:.0}"));
+        }
+    }
+
     pub(crate) fn open_tour(&mut self, cx: &mut Context<Self>) {
         self.palette=None; self.settings=None; self.context_menu=None; self.about_open=false;
         self.tour=Some(0); cx.notify();
@@ -426,16 +435,19 @@ impl Explorer {
             let last = index + 1 == chain.len();
             let target = folder.clone();
             crumbs = crumbs.child(
-                div().id(("crumb", index)).when(last,|crumb|crumb.flex_1().min_w_0())
+                // The current folder is only as wide as its name: the empty
+                // rest of the bar belongs to the bar and opens the path input.
+                div().id(("crumb", index)).when(last,|crumb|crumb.min_w_0())
                     .when(!last,|crumb|crumb.flex_none()).max_w(px(220.)).truncate().px_1p5().py_0p5()
                     .rounded_sm().cursor_pointer()
                     .text_color(rgb(if last { TEXT } else { TEXT_MUTED }))
                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .child(browser::display_name(folder))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    // A click on the current folder edits the path, as in Explorer.
+                    .when(!last, |crumb| crumb.on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.navigate_side(side, &target, None, cx);
-                    }))
+                    })))
             );
         }
         crumbs.into_any_element()
@@ -465,7 +477,7 @@ impl Explorer {
 
     // ------------------------------------------------------------- sidebar
 
-    fn place_row(&self, id: (&'static str, usize), place: &Place, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn place_row(&self, id: (&'static str, usize), place: &Place, active: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let path = place.path.clone();
         let middle=path.clone();
         div().id(id).mx_2().h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
@@ -491,10 +503,21 @@ impl Explorer {
         let active_place = containing_place(&all, &current).map(|place| place.path.clone());
         let mut side = div().id("sidebar").flex_1().min_h_0().flex().flex_col().pb_3()
             .overflow_y_scrollbar().text_size(px(13.))
-            .child(section_title("Места"));
+            .child(div().id("places-title").child(section_title("Места"))
+                .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(None),cx))));
+        // Places are edited like favourites: right click hides, dragging reorders.
         for (index, place) in self.places.iter().enumerate() {
             let active = active_place.as_ref() == Some(&place.path);
-            side = side.child(self.place_row(("place", index), place, active, cx));
+            let drag_name = place.label.clone();
+            side = side.child(self.place_row(("place", index), place, active, cx)
+                .on_mouse_down(MouseButton::Right,cx.listener(move |this,event: &MouseDownEvent,_,cx|this.open_menu(event.position,MenuTarget::Place(Some(index)),cx)))
+                .on_drag(PlaceDrag {index},move |_: &PlaceDrag,position,_,cx|cx.new(|_|FileDragPreview {name:drag_name.clone(),position}))
+                .drag_over::<PlaceDrag>(|style,_,_,_|style.border_t_1().border_color(rgb(ACCENT)))
+                .on_drop(cx.listener(move |this,data: &PlaceDrag,_,cx|this.move_place(data.index,index,cx))));
+        }
+        if self.places.is_empty() {
+            side = side.child(self.sidebar_action("places-restore","fm/plus.svg","Вернуть стандартные места",
+                cx.listener(|this,_,_,cx|this.show_all_places(cx))));
         }
         side = side.child(section_title("Избранное"));
         for (index,path) in self.favorites.iter().enumerate() {
@@ -831,7 +854,7 @@ impl Explorer {
     fn list_header(&self, side: GroupId, cx: &mut Context<Self>) -> impl IntoElement {
         let spec = self.sort;
         let (show_modified, show_kind) = self.list_columns(side);
-        let header = |id: &'static str, label: &'static str, key: SortKey| {
+        let header = |id: &'static str, label: &'static str, key: SortKey, cx: &mut Context<Self>| {
             let active = spec.key == key;
             div().id(id).h_full().px_2().flex().items_center().gap_1().cursor_pointer()
                 .text_color(rgb(if active { TEXT } else { TEXT_DIM }))
@@ -843,12 +866,27 @@ impl Explorer {
                     cx.notify();
                 }))
         };
+        let widths = self.list_widths;
+        // A fixed column with a grip on its left border: dragging it left
+        // widens the column, as in Explorer; the name column takes the rest.
+        let sized = |index: usize, cell: Stateful<Div>, cx: &mut Context<Self>| {
+            div().relative().h_full().w(px(widths[index])).flex_none()
+                .child(cell.size_full())
+                .child(div().id(("list-resize", index)).absolute().top_0().bottom_0().left(px(-5.)).w(px(9.))
+                    .cursor_col_resize().flex().justify_center()
+                    .child(div().w(px(1.)).h_full().bg(rgb(BORDER)))
+                    .hover(|style| style.bg(rgb(HOVER)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.list_resize = Some((index, event.position.x, this.list_widths[index]));
+                    })))
+        };
         div().h(px(28.)).flex_none().flex().items_center().gap_2().pl(px(36.)).pr(px(12.))
             .border_b_1().border_color(rgb(BORDER)).text_size(px(12.)).bg(rgb(SURFACE))
-            .child(header("sort-name", "Имя", SortKey::Name).flex_1().min_w_0())
-            .when(show_modified, |this| this.child(header("sort-modified", "Изменён", SortKey::Modified).w(px(140.)).flex_none()))
-            .when(show_kind, |this| this.child(header("sort-kind", "Тип", SortKey::Kind).w(px(110.)).flex_none()))
-            .child(header("sort-size", "Размер", SortKey::Size).w(px(90.)).flex_none().justify_end())
+            .child(header("sort-name", "Имя", SortKey::Name, cx).flex_1().min_w_0())
+            .when(show_modified, |this| { let cell = header("sort-modified", "Изменён", SortKey::Modified, cx); this.child(sized(0, cell, cx)) })
+            .when(show_kind, |this| { let cell = header("sort-kind", "Тип", SortKey::Kind, cx); this.child(sized(1, cell, cx)) })
+            .child({ let cell = header("sort-size", "Размер", SortKey::Size, cx).justify_end(); sized(2, cell, cx) })
     }
 
     fn column(&mut self, folder: PathBuf, side: GroupId, trail: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
@@ -987,12 +1025,13 @@ impl Explorer {
         };
         if list_mode {
             let (show_modified, show_kind) = self.list_columns(side);
+            let widths = self.list_widths;
             row = row
-                .when(show_modified, |row| row.child(div().w(px(140.)).flex_none().px_2().text_size(px(12.)).text_color(rgb(metadata_text))
+                .when(show_modified, |row| row.child(div().w(px(widths[0])).flex_none().px_2().text_size(px(12.)).text_color(rgb(metadata_text))
                     .child(entry.modified.map(format_time).unwrap_or_default())))
-                .when(show_kind, |row| row.child(div().w(px(110.)).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
+                .when(show_kind, |row| row.child(div().w(px(widths[1])).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
                     .child(kind_label(entry))))
-                .child(div().w(px(90.)).flex_none().px_2().flex().justify_end().text_size(px(12.))
+                .child(div().w(px(widths[2])).flex_none().px_2().flex().justify_end().text_size(px(12.))
                     .text_color(rgb(metadata_text))
                     .child(if is_dir { String::new() } else { format_size(entry.size) }));
         } else if is_dir {
@@ -1478,7 +1517,7 @@ impl Explorer {
     }
 
     fn context_menu_view(&self, menu: &ContextMenu, cx: &mut Context<Self>) -> AnyElement {
-        let mut list = div().id(("context-menu", menu.serial as usize)).w(px(280.)).p_1().flex().flex_col()
+        let mut list = div().id(("context-menu", menu.serial as usize)).occlude().w(px(280.)).p_1().flex().flex_col()
             .rounded_lg().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.context_menu = None;
@@ -1486,6 +1525,21 @@ impl Explorer {
             }));
         let staged = self.zone.items().len();
         match &menu.target {
+            MenuTarget::Place(index) => {
+                let hidden = self.hidden_places();
+                if let Some(index) = *index {
+                    list = list.child(Self::menu_item("place-hide","fm/eye-off.svg","Скрыть из «Мест»","",false,true)
+                            .on_click(cx.listener(move |this,_,_,cx|this.hide_place(index,cx))))
+                        .child(Self::menu_item("place-up","fm/arrow-up.svg","Выше","",false,index>0)
+                            .on_click(cx.listener(move |this,_,_,cx|this.move_place(index,index.saturating_sub(1),cx))))
+                        .child(Self::menu_item("place-down","fm/chevron-down.svg","Ниже","",false,index+1<self.places.len())
+                            .on_click(cx.listener(move |this,_,_,cx|this.move_place(index,index+1,cx))))
+                        .child(Self::separator());
+                }
+                list = list.child(Self::menu_item("places-show",  "fm/eye.svg",
+                        if hidden > 0 { format!("Вернуть скрытые места ({hidden})") } else { "Скрытых мест нет".into() }, "", false, hidden > 0)
+                    .when(hidden > 0, |item| item.on_click(cx.listener(|this,_,_,cx|this.show_all_places(cx)))));
+            }
             MenuTarget::Favorite(index) => {
                 if let Some(path)=self.favorites.get(*index) {
                     let path=path.clone();let index=*index;
@@ -1974,6 +2028,13 @@ impl Render for Explorer {
                         return;
                     }
                 }
+                if let Some((index, start, width)) = this.list_resize {
+                    if !event.dragging() { this.finish_list_resize(); return; }
+                    let (min, max) = crate::LIST_WIDTH_RANGE;
+                    this.list_widths[index] = (width - (event.position.x - start) / px(1.)).clamp(min, max);
+                    cx.notify();
+                    return;
+                }
                 if this.column_resize.is_some() {
                     if !event.dragging() || this.interface_modal() {
                         this.column_resize = None;
@@ -1986,8 +2047,8 @@ impl Render for Explorer {
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.column_resize=None;this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
                 if !drag.active {

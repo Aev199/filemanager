@@ -121,6 +121,15 @@ fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
 
 /// Marks that the feature tour was shown once at first start.
 const TOUR_SEEN: &str = "tour_seen";
+const LIST_WIDTHS: &str = "list_widths";
+const DEFAULT_LIST_WIDTHS: [f32; 3] = [140., 110., 90.];
+pub(crate) const LIST_WIDTH_RANGE: (f32, f32) = (60., 400.);
+
+fn parse_widths(text: &str) -> Option<[f32; 3]> {
+    let values: Vec<f32> = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+    let (min, max) = LIST_WIDTH_RANGE;
+    (values.len() == 3 && values.iter().all(|v| (min..=max).contains(v))).then(|| [values[0], values[1], values[2]])
+}
 
 /// Internal name of the session restored at startup.
 
@@ -135,6 +144,8 @@ enum MenuTarget {
     Tab(GroupId, usize),
     TabList(GroupId),
     Favorite(usize),
+    /// A row of «Места», or (None) the section title.
+    Place(Option<usize>),
 }
 
 struct RightDrag {
@@ -208,7 +219,10 @@ struct Explorer {
     tour: Option<usize>,
     menu_serial: u64,
     focus_handle: FocusHandle,
+    /// «Места» as shown: the user's order, without hidden ones.
     places: Vec<Place>,
+    /// Every standard place, for restoring hidden ones.
+    all_places: Vec<Place>,
     drives: Vec<Place>,
     /// Free and total bytes per local drive, filled in the background.
     drive_space: HashMap<PathBuf, (u64, u64)>,
@@ -228,6 +242,10 @@ struct Explorer {
     column_reveal_keys: HashMap<GroupId, String>,
     column_sizes: HashMap<GroupId, (String, Vec<f32>)>,
     column_resize: Option<ColumnResize>,
+    /// Widths of the list columns Изменён, Тип, Размер; the name takes the rest.
+    list_widths: [f32; 3],
+    /// Dragging a list column border: column, start x, start width.
+    list_resize: Option<(usize, Pixels, f32)>,
     tab_scroll: HashMap<GroupId, gpui::ScrollHandle>,
     tab_reveal: HashMap<GroupId, (usize, usize)>,
     dock_hover: Option<(GroupId, layout::DockZone)>,
@@ -442,7 +460,9 @@ impl Explorer {
             right_drag: None, dragging_out: false, about_open: false,
             menu_serial: 0,
             focus_handle,
-            places: places::user_places(),
+            places: projects::arrange_places(&places::user_places(),
+                workspaces.as_ref().and_then(|store| store.value(projects::PLACES).ok().flatten()).as_deref()),
+            all_places: places::user_places(),
             drives: places::drives(),
             drive_space: HashMap::new(),
             sort: SortSpec::default(),
@@ -469,6 +489,9 @@ impl Explorer {
             column_reveal_keys: HashMap::new(),
             column_sizes: HashMap::new(),
             column_resize: None,
+            list_widths: workspaces.as_ref().and_then(|store| store.value(LIST_WIDTHS).ok().flatten())
+                .and_then(|text| parse_widths(&text)).unwrap_or(DEFAULT_LIST_WIDTHS),
+            list_resize: None,
             tab_scroll: HashMap::new(),
             tab_reveal: HashMap::new(),
             dock_hover: None,

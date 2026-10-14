@@ -123,6 +123,7 @@ impl WorkspaceStore {
         conn.execute_batch("CREATE TABLE IF NOT EXISTS favorites (position INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE);
             CREATE TABLE IF NOT EXISTS project_session (id INTEGER PRIMARY KEY CHECK(id=1),name TEXT);
             CREATE TABLE IF NOT EXISTS app_flags (name TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS app_values (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS pane_projects (
                 workspace_name TEXT NOT NULL, group_id INTEGER NOT NULL, project TEXT NOT NULL,
                 previous_active INTEGER NOT NULL, previous_miller INTEGER NOT NULL,
@@ -248,6 +249,15 @@ impl WorkspaceStore {
     }
     pub fn set_flag(&self, name: &str) -> io::Result<()> {
         self.connection()?.execute("INSERT OR IGNORE INTO app_flags VALUES(?1)",params![name]).map_err(db_error)?;
+        Ok(())
+    }
+    /// Small interface values kept between sessions (column widths, hidden places).
+    pub fn value(&self, name: &str) -> io::Result<Option<String>> {
+        self.connection()?.query_row("SELECT value FROM app_values WHERE name=?1",params![name],|r|r.get(0)).optional().map_err(db_error)
+    }
+    pub fn set_value(&self, name: &str, value: &str) -> io::Result<()> {
+        self.connection()?.execute("INSERT INTO app_values VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+            params![name,value]).map_err(db_error)?;
         Ok(())
     }
 
@@ -495,6 +505,10 @@ mod tests {
         store.set_flag("tour_seen").unwrap();
         store.set_flag("tour_seen").unwrap();
         assert!(WorkspaceStore::open(tmp.path().join("ws.sqlite3")).unwrap().flag("tour_seen").unwrap());
+        assert_eq!(store.value("list_widths").unwrap(), None);
+        store.set_value("list_widths", "140,110,90").unwrap();
+        store.set_value("list_widths", "200,110,90").unwrap();
+        assert_eq!(store.value("list_widths").unwrap().as_deref(), Some("200,110,90"));
     }
 
     #[test]
