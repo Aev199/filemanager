@@ -28,6 +28,28 @@ pub fn set_light(light: bool) {
 pub fn is_light() -> bool {
     LIGHT.load(std::sync::atomic::Ordering::Relaxed)
 }
-pub fn rgb(color: u32) -> gpui::Rgba {
-    gpui::rgb(resolve(is_light(), color))
+/// Accent schemes chosen for the dark and the light theme.
+static ACCENT_DARK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ACCENT_LIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub fn set_accents(dark: usize, light: usize) {
+    ACCENT_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+    ACCENT_LIGHT.store(light, std::sync::atomic::Ordering::Relaxed);
 }
+pub fn accents() -> (usize, usize) {
+    (ACCENT_DARK.load(std::sync::atomic::Ordering::Relaxed), ACCENT_LIGHT.load(std::sync::atomic::Ordering::Relaxed))
+}
+pub fn themed(color: u32) -> u32 {
+    let light = is_light();
+    let (dark, light_scheme) = accents();
+    resolve_with(light, if light { light_scheme } else { dark }, color)
+}
+pub fn rgb(color: u32) -> gpui::Rgba {
+    gpui::rgb(themed(color))
+}
+/// The accent with transparency, for selections and drop highlights.
+pub fn accent_alpha(alpha: u8) -> gpui::Rgba {
+    gpui::rgba((themed(ACCENT) << 8) | alpha as u32)
+}
+/// Keys of the saved schemes in the settings database.
+pub const ACCENT_DARK_KEY: &str = "accent_dark";
+pub const ACCENT_LIGHT_KEY: &str = "accent_light";

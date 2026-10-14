@@ -460,6 +460,9 @@ impl Explorer {
         let prefs_error = session_restore_error.as_ref().map(|e|format!("Проект не восстановлен: {e}")).or(prefs_error);
         let favorites = workspaces.as_ref().and_then(|s|s.favorites().ok()).unwrap_or_default();
         theme::set_light(prefs.light);
+        let accent = |key| workspaces.as_ref().and_then(|store| store.value(key).ok().flatten())
+            .map(|value| theme::accent_scheme(&value)).unwrap_or(0);
+        theme::set_accents(accent(theme::ACCENT_DARK_KEY), accent(theme::ACCENT_LIGHT_KEY));
         Theme::change(if prefs.light { ThemeMode::Light } else { ThemeMode::Dark },Some(window),cx);
         view::apply_component_theme(cx);
         Self {
@@ -1202,9 +1205,17 @@ impl Explorer {
             return;
         };
         let current = browser::display_name(path);
+        // As Explorer: a file's name is selected without its extension.
+        let is_file = self.directory_cache.get(path.parent().unwrap_or(path))
+            .and_then(|listing| listing.entries.iter().find(|e| &e.path == path).map(|e| !e.is_directory))
+            .unwrap_or(false);
+        let stem = current.rfind('.').filter(|dot| is_file && *dot > 0);
         self.rename_input.update(cx, |input, cx| {
-            input.set_value(current, window, cx);
-            input.select_all(window, cx);
+            input.set_value(current.clone(), window, cx);
+            match stem {
+                Some(dot) => input.set_selected_range(0..dot, cx),
+                None => input.select_all(window, cx),
+            }
         });
         self.renaming = true;
         let focus = self.rename_input.focus_handle(cx);

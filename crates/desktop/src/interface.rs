@@ -21,6 +21,9 @@ pub(crate) struct Settings {
     pub focus: gpui::FocusHandle,
     pub selected: usize,
     pub draft: Preferences,
+    /// Accent schemes being chosen for the dark and the light theme.
+    pub accent_dark: usize,
+    pub accent_light: usize,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -180,6 +183,8 @@ impl Explorer {
                 show_sidebar: self.show_sidebar,
                 show_inspector: self.show_inspector,
             },
+            accent_dark: theme::accents().0,
+            accent_light: theme::accents().1,
             saving: false,
             error: None,
         });
@@ -231,13 +236,16 @@ impl Explorer {
         settings.saving = true;
         settings.error = None;
         let prefs = settings.draft;
+        let (accent_dark, accent_light) = (settings.accent_dark, settings.accent_light);
         cx.spawn(async move |weak, cx| {
             let result = cx
                 .background_spawn(async move {
-                    filemanager_core::workspace::WorkspaceStore::open(
+                    let store = filemanager_core::workspace::WorkspaceStore::open(
                         filemanager_core::workspace::WorkspaceStore::default_path(),
-                    )?
-                    .save_preferences(&prefs)
+                    )?;
+                    store.save_preferences(&prefs)?;
+                    store.set_value(theme::ACCENT_DARK_KEY, theme::ACCENT_SCHEMES[accent_dark].key)?;
+                    store.set_value(theme::ACCENT_LIGHT_KEY, theme::ACCENT_SCHEMES[accent_light].key)
                 })
                 .await;
             let _ = weak.update(cx, |this, cx| {
@@ -251,6 +259,7 @@ impl Explorer {
                     this.show_sidebar = prefs.show_sidebar;
                     this.show_inspector = prefs.show_inspector;
                     theme::set_light(prefs.light);
+                    theme::set_accents(accent_dark, accent_light);
                     Theme::change(
                         if prefs.light {
                             ThemeMode::Light
@@ -395,6 +404,26 @@ impl Explorer {
                             }
                         })),
                 );
+            }
+            // Accent colours, chosen separately for each theme.
+            for (light, label, chosen) in [(false, "Акцент тёмной темы", settings.accent_dark), (true, "Акцент светлой темы", settings.accent_light)] {
+                let swatches = theme::ACCENT_SCHEMES.iter().enumerate().map(|(index, scheme)| {
+                    let colour = if light { scheme.light[0] } else { scheme.dark[0] };
+                    div().id((if light { "accent-light" } else { "accent-dark" }, index))
+                        .size(px(22.)).flex_none().rounded_full().cursor_pointer()
+                        .bg(gpui::rgb(colour))
+                        .when(index == chosen, |dot| dot.border_2().border_color(rgb(TEXT)))
+                        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(scheme.label).build(window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) {
+                                if light { s.accent_light = index; } else { s.accent_dark = index; }
+                                cx.notify();
+                            }
+                        }))
+                });
+                body = body.child(div().p_2().rounded_md().bg(rgb(SURFACE)).flex().items_center().gap_2()
+                    .child(div().flex_1().child(label))
+                    .child(div().flex().gap_1p5().children(swatches)));
             }
             if let Some(error) = settings.error.as_ref() {
                 body = body.child(div().text_color(rgb(DANGER)).child(error.clone()));
@@ -726,7 +755,7 @@ impl Explorer {
                 .top(m.start.y.min(m.current.y))
                 .w((m.start.x - m.current.x).abs())
                 .h((m.start.y - m.current.y).abs())
-                .bg(gpui::rgba(0x5E8BFF22))
+                .bg(crate::theme::accent_alpha(0x22))
                 .border_1()
                 .border_color(rgb(ACCENT))
                 .into_any_element(),

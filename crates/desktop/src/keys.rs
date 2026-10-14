@@ -535,6 +535,11 @@ impl Explorer {
     pub(crate) fn key_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(true), cx); }
 
     pub(crate) fn key_open(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+        // Enter in a name or path field belongs to that field: the input
+        // passes the key on, and it must not also open the old file.
+        if self.renaming || self.creating_folder || self.address_editing.is_some() || self.saving_workspace {
+            return;
+        }
         // Enter confirms an open Recycle dialog instead of opening a file.
         if self.confirm_recycle.is_some() {
             self.recycle(cx);

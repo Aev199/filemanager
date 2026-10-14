@@ -15,6 +15,7 @@ use gpui::{
     ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Window,
 };
 use gpui_component::input::Input;
+use gpui_component::Sizable;
 use gpui_component::resizable::{h_resizable, v_resizable, resizable_panel};
 use filemanager_core::panes::{Node, Axis, Edge, tab_titles};
 use gpui_component::scroll::ScrollableElement;
@@ -57,7 +58,7 @@ pub fn apply_component_theme(cx: &mut App) {
     colors.input = hsla(BORDER_STRONG);
     colors.ring = hsla(ACCENT);
     colors.caret = hsla(ACCENT);
-    colors.selection = rgb_to_hsla(rgba(0x5E8BFF55));
+    colors.selection = rgb_to_hsla(crate::theme::accent_alpha(0x55));
     colors.popover = hsla(RAISED);
     colors.popover_foreground = hsla(TEXT);
     colors.primary = hsla(ACCENT);
@@ -937,7 +938,7 @@ impl Explorer {
             }))
             .when_some(self.dock_hover.filter(|(id,_)|*id==side).map(|(_,zone)|zone),|pane,zone| {
                 use crate::layout::DockZone::*;
-                let overlay=div().absolute().bg(rgba(0x5E8BFF22)).border_2().border_color(rgb(ACCENT)).rounded(px(6.));
+                let overlay=div().absolute().bg(crate::theme::accent_alpha(0x22)).border_2().border_color(rgb(ACCENT)).rounded(px(6.));
                 let overlay=match zone {
                     Left=>overlay.left_0().top_0().bottom_0().w(gpui::relative(0.5)),
                     Right=>overlay.right_0().top_0().bottom_0().w(gpui::relative(0.5)),
@@ -1139,7 +1140,9 @@ impl Explorer {
             .child(icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)));
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
         row = if self.renaming && self.selected.as_ref() == Some(&path) {
-            row.child(div().flex_1().min_w_0().child(Input::new(&self.rename_input).h(px(24.))))
+            // A compact field that fits the 24 px row and starts where the name does.
+            row.child(div().flex_1().min_w_0().h(px(ROW_HEIGHT)).flex().items_center().ml(px(-5.))
+                .child(Input::new(&self.rename_input).xsmall().h(px(20.)).w_full().text_size(px(13.))))
         } else {
             row.child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
         };
