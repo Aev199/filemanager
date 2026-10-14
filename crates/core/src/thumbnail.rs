@@ -85,7 +85,7 @@ pub fn thumbnail(path: &Path, edge: u32) -> io::Result<PathBuf> {
         return Ok(target);
     }
     std::fs::create_dir_all(&cache)?;
-    let (width, height, rgba) = platform::render(path, edge)?;
+    let (width, height, rgba) = render(path, edge)?;
     let bytes = validate_bitmap(width, height, edge)?;
     if rgba.len() != bytes { return Err(io::Error::other("Invalid thumbnail buffer")); }
     let temporary = tempfile::NamedTempFile::new_in(&cache)?;
@@ -95,6 +95,16 @@ pub fn thumbnail(path: &Path, edge: u32) -> io::Result<PathBuf> {
     temporary.persist(&target).map_err(|error| error.error)?;
     prune_cache(&cache, &target)?;
     Ok(target)
+}
+
+/// Drawings use the picture stored in the DWG; everything else the Shell.
+fn render(path: &Path, edge: u32) -> io::Result<(u32, u32, Vec<u8>)> {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dwg")) {
+        let picture = crate::dwg::preview(path)?.thumbnail(edge, edge).to_rgba8();
+        let (width, height) = picture.dimensions();
+        return Ok((width, height, picture.into_raw()));
+    }
+    platform::render(path, edge)
 }
 
 #[cfg(windows)]

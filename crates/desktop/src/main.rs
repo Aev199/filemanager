@@ -12,6 +12,7 @@ mod layout;
 mod palette;
 mod projects;
 mod folder_sizes;
+mod quick_look;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -241,6 +242,7 @@ struct Explorer {
     /// Folders used recently, most recent first.
     recent: Vec<PathBuf>,
     sizes: folder_sizes::FolderSizes,
+    quick_look: Option<quick_look::QuickLook>,
     drives: Vec<Place>,
     /// Free and total bytes per local drive, filled in the background.
     drive_space: HashMap<PathBuf, (u64, u64)>,
@@ -482,6 +484,7 @@ impl Explorer {
                 workspaces.as_ref().and_then(|store| store.value(projects::PLACES).ok().flatten()).as_deref()),
             all_places: places::user_places(),
             sizes: Default::default(),
+            quick_look: None,
             recent: workspaces.as_ref().and_then(|store| store.value(projects::RECENT).ok().flatten())
                 .map(|text| text.lines().map(PathBuf::from).collect()).unwrap_or_default(),
             drives: places::drives(),

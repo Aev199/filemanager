@@ -343,6 +343,46 @@ impl Explorer {
             .into_any_element()
     }
 
+    fn quick_look_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::quick_look::QuickContent;
+        let look = self.quick_look.as_ref().unwrap();
+        let path = look.path.clone();
+        let name = browser::display_name(&path);
+        let body: AnyElement = match &look.content {
+            QuickContent::Loading => div().text_color(rgb(TEXT_DIM)).child("Загрузка…").into_any_element(),
+            QuickContent::Image(file) => img(file.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            QuickContent::Text(text) => div().id("quick-look-text").size_full().overflow_y_scroll().p_3()
+                .font_family("Consolas").text_size(px(12.)).line_height(px(18.)).text_color(rgb(TEXT))
+                .child(text.clone()).into_any_element(),
+            QuickContent::Message(message) => div().max_w(px(420.)).text_color(rgb(TEXT_MUTED)).child(message.clone()).into_any_element(),
+        };
+        let (open, preview) = (path.clone(), path.clone());
+        let document = crate::quick_look::is_document(&path);
+        let card = div().id("quick-look").w(gpui::relative(0.8)).h(gpui::relative(0.85)).flex().flex_col()
+            .rounded_md().bg(rgb(RAISED)).border_1().border_color(rgb(BORDER_STRONG)).shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
+            .child(div().h(px(40.)).flex_none().px_3().flex().items_center().gap_2().border_b_1().border_color(rgb(BORDER))
+                .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(name))
+                .when(document, |bar| bar.child(text_button("quick-look-preview", "Подробный предпросмотр", ButtonKind::Ghost)
+                    .on_click(cx.listener(move |this,_,_,cx| {this.quick_look=None;this.open_document_preview(preview.clone(),cx);}))))
+                .child(text_button("quick-look-open", "Открыть", ButtonKind::Ghost)
+                    .on_click(cx.listener(move |this,_,_,cx| {
+                        this.quick_look=None;
+                        let side=this.active_side();
+                        this.open_entry(open.clone(), open.is_dir(), side, cx);
+                    })))
+                .child(icon_button("quick-look-close","fm/x.svg","Закрыть (Пробел, Esc)",false,true)
+                    .on_click(cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))))
+            .child(div().flex_1().min_h_0().p_2().flex().items_center().justify_center().child(body))
+            .child(div().h(px(26.)).flex_none().px_3().flex().items_center().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                .child("Пробел или Esc — закрыть · ↑ ↓ — соседние файлы"));
+        div().id("quick-look-backdrop").absolute().inset_0().flex().items_center().justify_center()
+            .bg(rgba(0x00000080))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))
+            .child(card)
+            .into_any_element()
+    }
+
     /// «О программе» under its titlebar button, as in SoilStiffness:
     /// a click elsewhere or Esc closes it.
     fn about_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2189,6 +2229,11 @@ impl Render for Explorer {
                     || modifiers.control || modifiers.alt || modifiers.platform {
                     return;
                 }
+                if event.keystroke.key == "space" && !modifiers.shift {
+                    this.toggle_quick_look(cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if let Some(text) = event.keystroke.key_char.as_deref()
                     .filter(|t| t.chars().count() == 1 && t.chars().all(|c| !c.is_control() && c != ' '))
                 {
@@ -2223,6 +2268,8 @@ impl Render for Explorer {
                 .px_3().py_1().rounded_md().bg(rgb(SELECTED)).border_1().border_color(rgb(SELECTED_BORDER))
                 .text_color(rgb(SELECTION_TEXT)).text_size(px(13.)).child(name));
         }
+        self.follow_quick_look(cx);
+        if self.quick_look.is_some() { root=root.child(self.quick_look_view(cx)); }
         if self.about_open { root=root.child(self.about_panel(cx)); }
         if let Some(step)=self.tour { root=root.child(self.tour_view(step,cx)); }
         if let Some(overlay)=self.interface_overlay(cx) { root=root.child(overlay); }

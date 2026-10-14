@@ -13,7 +13,7 @@ walkdir = "2"
 chrono = "0.4"
 tempfile = "3"
 filetime = "0.2"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
