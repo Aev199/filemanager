@@ -97,6 +97,7 @@ pub struct Manifest {
     #[serde(default)] pub commit: String,
     pub sha256: String,
     #[serde(default)] pub notes: Vec<String>,
+    #[serde(default)] pub channel: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,6 +210,182 @@ pub fn rollback(exe: &Path) -> io::Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+/// Where releases can be fetched in a browser when Papka itself has no
+/// way out: the direct file for final releases, the list for test builds.
+pub fn browser_url(channel: Channel) -> String {
+    match channel {
+        Channel::Stable => format!("https://github.com/{REPOSITORY}/releases/latest/download/{EXE_ASSET}"),
+        Channel::Beta => format!("https://github.com/{REPOSITORY}/releases"),
+    }
+}
+
+/// The version in a Papka EXE's file properties ("0.1.47").
+#[cfg(windows)]
+pub fn exe_version(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let size = GetFileVersionInfoSizeW(name.as_ptr(), std::ptr::null_mut());
+        if size == 0 { return None; }
+        let mut data = vec![0u8; size as usize];
+        if GetFileVersionInfoW(name.as_ptr(), 0, size, data.as_mut_ptr().cast()) == 0 { return None; }
+        let root = [u16::from(b'\\'), 0];
+        let mut info: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut length = 0u32;
+        if VerQueryValueW(data.as_ptr().cast(), root.as_ptr(), &mut info, &mut length) == 0 || info.is_null() { return None; }
+        let info = &*(info as *const VS_FIXEDFILEINFO);
+        let (ms, ls) = (info.dwFileVersionMS, info.dwFileVersionLS);
+        Some(format!("{}.{}.{}", ms >> 16, ms & 0xFFFF, ls >> 16))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn exe_version(_path: &Path) -> Option<String> { None }
+
+/// The user's Downloads folder, wherever it was moved.
+#[cfg(windows)]
+pub fn downloads_dir() -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG};
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_Downloads, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let text = path.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(path.0 as *const _));
+        text.map(PathBuf::from)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn downloads_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Downloads"))
+}
+
+/// The newest `Papka*.exe` in `folder` (browsers add " (1)" to repeated
+/// downloads) that is newer than `current`, with its version.
+pub fn find_downloaded(folder: &Path, current: &str, version_of: &dyn Fn(&Path) -> Option<String>) -> Option<(PathBuf, String)> {
+    fs::read_dir(folder).ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
+            name.starts_with("papka") && name.ends_with(".exe") && path.is_file()
+        })
+        .filter_map(|path| version_of(&path).map(|version| (path, version)))
+        .filter(|(_, version)| compare_versions(version, current) == Ordering::Greater)
+        .max_by(|a, b| compare_versions(&a.1, &b.1))
+}
+
+/// An update offered from a file the browser downloaded.
+pub fn downloaded_update(path: &Path, version: &str) -> io::Result<Update> {
+    let bytes = fs::read(path)?;
+    Ok(Update {
+        version: version.to_string(),
+        commit: String::new(),
+        notes: Vec::new(),
+        sha256: sha256_hex(&bytes),
+        exe_url: path.to_string_lossy().into_owned(),
+        page: path.parent().map(|parent| parent.to_string_lossy().into_owned()).unwrap_or_default(),
+        prerelease: false,
+    })
+}
+
+/// Puts an installed version into the shared update folder for colleagues,
+/// unless the folder already has it or a newer one. The EXE goes first and
+/// the manifest last, so the folder never announces a file that is not there.
+pub fn publish_to_folder(folder: &Path, update: &Update, bytes: &[u8]) -> io::Result<bool> {
+    let manifest_path = folder.join(MANIFEST_ASSET);
+    if let Ok(existing) = fs::read(&manifest_path).map_err(io::Error::other)
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).map_err(io::Error::other)) {
+        if compare_versions(&existing.version, &update.version) != Ordering::Less { return Ok(false); }
+    }
+    let staged = folder.join(format!("{EXE_ASSET}.part"));
+    fs::write(&staged, bytes)?;
+    let exe = folder.join(EXE_ASSET);
+    // A colleague may be copying the old EXE right now; replace, not truncate.
+    let _ = fs::remove_file(&exe);
+    fs::rename(&staged, &exe)?;
+    let manifest = serde_json::json!({
+        "version": update.version,
+        "commit": update.commit,
+        "channel": if update.prerelease { "beta" } else { "stable" },
+        "sha256": sha256_hex(bytes),
+        "notes": update.notes,
+    });
+    let staged = folder.join(format!("{MANIFEST_ASSET}.part"));
+    fs::write(&staged, serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?)?;
+    let _ = fs::remove_file(&manifest_path);
+    fs::rename(&staged, &manifest_path)?;
+    Ok(true)
+}
+
+/// A text file beside the EXE naming the update folder: an administrator
+/// sets it once for everybody who runs Papka from there.
+pub const SOURCE_FILE: &str = "papka-update.txt";
+
+/// The folder named in `SOURCE_FILE` next to `exe`, if any.
+pub fn folder_from_side_file(exe: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(exe.with_file_name(SOURCE_FILE)).ok()?;
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('#'))?;
+    Some(PathBuf::from(line.trim_matches('"')))
+}
+
+/// An update kept in a shared folder: `latest.json` and `Papka.exe`, as
+/// unpacked from the release archive. No internet access is needed: the
+/// files are read like any other file on the network.
+pub fn check_folder(folder: &Path, current: &str) -> io::Result<Option<Update>> {
+    let unreachable = |error: io::Error| io::Error::new(error.kind(), format!("папка обновлений «{}» недоступна: {error}", folder.display()));
+    let manifest: Manifest = serde_json::from_slice(&fs::read(folder.join(MANIFEST_ASSET)).map_err(unreachable)?)
+        .map_err(|error| io::Error::other(format!("{MANIFEST_ASSET} в папке обновлений повреждён: {error}")))?;
+    if compare_versions(&manifest.version, current) != Ordering::Greater { return Ok(None); }
+    let exe = folder.join(EXE_ASSET);
+    if !exe.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("в папке обновлений нет {EXE_ASSET}")));
+    }
+    Ok(Some(Update {
+        version: manifest.version,
+        commit: manifest.commit,
+        notes: manifest.notes,
+        sha256: manifest.sha256.to_ascii_lowercase(),
+        exe_url: exe.to_string_lossy().into_owned(),
+        page: folder.to_string_lossy().into_owned(),
+        prerelease: manifest.channel == "beta",
+    }))
+}
+
+/// The update's EXE: downloaded for a release, read for a shared folder.
+pub fn get(location: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Result<Vec<u8>> {
+    if location.starts_with("https://") { return fetch(location, progress); }
+    let mut file = fs::File::open(location)?;
+    let total = file.metadata().ok().map(|metadata| metadata.len());
+    let mut body = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let read = io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 { break; }
+        body.extend_from_slice(&buffer[..read]);
+        progress(body.len() as u64, total);
+    }
+    Ok(body)
+}
+
+/// PowerShell writes errors to a redirected stream as CLIXML; this is
+/// the readable text inside.
+pub fn clixml_text(output: &str) -> String {
+    if !output.trim_start().starts_with("#< CLIXML") { return output.trim().to_string(); }
+    let mut parts = Vec::new();
+    let mut rest = output;
+    while let Some(start) = rest.find("<S S=\"Error\">") {
+        rest = &rest[start + "<S S=\"Error\">".len()..];
+        let Some(end) = rest.find("</S>") else { break };
+        parts.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    let text = parts.concat()
+        .replace("_x000D_", "").replace("_x000A_", " ")
+        .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Readable text for WinHTTP's own error codes, which Windows cannot format.
@@ -361,9 +538,9 @@ fn powershell_get(url: &str) -> io::Result<Vec<u8>> {
     let result = match output {
         Ok(output) if output.status.success() => fs::read(&target),
         Ok(output) => {
-            let text = String::from_utf8_lossy(&output.stderr);
-            let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("неизвестная ошибка");
-            Err(io::Error::other(line.chars().take(300).collect::<String>()))
+            let text = clixml_text(&String::from_utf8_lossy(&output.stderr));
+            let text = if text.is_empty() { "неизвестная ошибка".to_string() } else { text };
+            Err(io::Error::other(text.chars().take(300).collect::<String>()))
         }
         Err(error) => Err(error),
     };
@@ -412,6 +589,76 @@ mod tests {
         assert!(winhttp_message(12029).unwrap().contains("подключиться"));
         assert!(describe(&io::Error::from_raw_os_error(12029)).ends_with("(код 12029)"));
         assert_eq!(winhttp_message(5), None);
+    }
+
+    #[test]
+    fn shared_folder_offers_a_newer_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = b"MZ new".to_vec();
+        fs::write(dir.path().join(EXE_ASSET), &exe).unwrap();
+        fs::write(dir.path().join(MANIFEST_ASSET), format!(
+            r#"{{"version":"0.1.47","commit":"abc","channel":"stable","sha256":"{}","notes":["Сеть"]}}"#, sha256_hex(&exe))).unwrap();
+        let found = check_folder(dir.path(), "0.1.46").unwrap().unwrap();
+        assert_eq!((found.version.as_str(), found.prerelease), ("0.1.47", false));
+        let bytes = get(&found.exe_url, &mut |_, _| {}).unwrap();
+        assert_eq!(bytes, exe);
+        assert!(check_folder(dir.path(), "0.1.47").unwrap().is_none());
+        assert!(check_folder(&dir.path().join("нет"), "0.1.0").unwrap_err().to_string().contains("недоступна"));
+        fs::remove_file(dir.path().join(EXE_ASSET)).unwrap();
+        assert!(check_folder(dir.path(), "0.1.0").is_err());
+    }
+
+    #[test]
+    fn side_file_names_the_update_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("Papka.exe");
+        assert_eq!(folder_from_side_file(&exe), None);
+        fs::write(dir.path().join(SOURCE_FILE), "# папка обновлений\n\"\\\\server\\soft\\Papka\"\n").unwrap();
+        assert_eq!(folder_from_side_file(&exe), Some(PathBuf::from(r"\\server\soft\Papka")));
+    }
+
+    #[test]
+    fn clixml_errors_become_plain_text() {
+        let raw = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><S S=\"Error\">Exception calling \"DownloadFile\": _x000D__x000A_</S><S S=\"Error\">Unable to connect &lt;remote&gt;_x000D__x000A_</S></Objs>";
+        assert_eq!(clixml_text(raw), "Exception calling \"DownloadFile\": Unable to connect <remote>");
+        assert_eq!(clixml_text("  plain error \n"), "plain error");
+    }
+
+    #[test]
+    fn newest_downloaded_papka_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["Papka.exe", "Papka (1).exe", "papka (2).exe", "Other.exe", "Papka.zip"] {
+            fs::write(dir.path().join(name), b"MZ").unwrap();
+        }
+        let version_of = |path: &Path| Some(match path.file_name()?.to_str()? {
+            "Papka.exe" => "0.1.45", "Papka (1).exe" => "0.1.48", "papka (2).exe" => "0.1.47", _ => "9.9.9",
+        }.to_string());
+        let (path, version) = find_downloaded(dir.path(), "0.1.46", &version_of).unwrap();
+        assert_eq!((path.file_name().unwrap().to_str().unwrap(), version.as_str()), ("Papka (1).exe", "0.1.48"));
+        assert!(find_downloaded(dir.path(), "0.1.48", &version_of).is_none());
+        let update = downloaded_update(&path, &version).unwrap();
+        assert_eq!(update.sha256, sha256_hex(b"MZ"));
+    }
+
+    #[test]
+    fn publishing_fills_the_shared_folder_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"MZ release".to_vec();
+        let update = Update { version: "0.1.48".into(), commit: "abc".into(), notes: vec!["Сеть".into()],
+            sha256: sha256_hex(&bytes), exe_url: String::new(), page: String::new(), prerelease: true };
+        assert!(publish_to_folder(dir.path(), &update, &bytes).unwrap());
+        let found = check_folder(dir.path(), "0.1.47").unwrap().unwrap();
+        assert_eq!((found.version.as_str(), found.notes.as_slice()), ("0.1.48", &["Сеть".to_string()][..]));
+        assert_eq!(get(&found.exe_url, &mut |_, _| {}).unwrap(), bytes);
+        // The same or an older version is not written again.
+        assert!(!publish_to_folder(dir.path(), &update, &bytes).unwrap());
+        assert!(!dir.path().join("Papka.exe.part").exists());
+    }
+
+    #[test]
+    fn browser_links_follow_the_channel() {
+        assert!(browser_url(Channel::Stable).ends_with("/releases/latest/download/Papka.exe"));
+        assert!(browser_url(Channel::Beta).ends_with("/releases"));
     }
 
     #[test]

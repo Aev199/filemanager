@@ -26,6 +26,8 @@ pub(crate) struct Settings {
     pub accent_light: usize,
     pub update_auto: bool,
     pub update_channel: filemanager_core::update::Channel,
+    pub update_folder: Option<std::path::PathBuf>,
+    pub update_share: bool,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -189,6 +191,8 @@ impl Explorer {
             accent_light: theme::accents().1,
             update_auto: self.updates.auto,
             update_channel: self.updates.channel,
+            update_folder: self.updates.folder.clone(),
+            update_share: self.updates.share,
             saving: false,
             error: None,
         });
@@ -242,6 +246,7 @@ impl Explorer {
         let prefs = settings.draft;
         let (accent_dark, accent_light) = (settings.accent_dark, settings.accent_light);
         let (update_auto, update_channel) = (settings.update_auto, settings.update_channel);
+        let (update_folder, update_share) = (settings.update_folder.clone(), settings.update_share);
         cx.spawn(async move |weak, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -260,7 +265,7 @@ impl Explorer {
                         settings.error = Some(format!("Не удалось сохранить настройки: {error}"));
                     }
                 } else {
-                    this.set_update_preferences(update_auto, update_channel);
+                    this.set_update_preferences(update_auto, update_channel, update_folder, update_share);
                     this.show_hidden = prefs.show_hidden;
                     this.show_sidebar = prefs.show_sidebar;
                     this.show_inspector = prefs.show_inspector;
@@ -456,6 +461,38 @@ impl Explorer {
                                 if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_channel = option; cx.notify(); }
                             }))
                     }))));
+                // The shared folder: for networks where only the browser
+                // may reach the internet.
+                let folder_text = settings.update_folder.as_ref()
+                    .map_or("не задана".to_string(), |folder| folder.display().to_string());
+                let small = |id: &'static str, label: &'static str| div().id(id).h(px(24.)).px_2().flex().flex_none().items_center()
+                    .rounded_md().cursor_pointer().text_size(px(12.)).border_1().border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
+                    .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))).child(label);
+                let share = settings.update_share;
+                body = body.child(div().p_2().rounded_md().bg(rgb(SURFACE)).flex().flex_col().gap_2()
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().flex_none().child("Папка обновлений:"))
+                        .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_MUTED)).child(folder_text))
+                        .child(small("update-folder-here", "Текущая папка")
+                            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Взять папку, открытую в активной панели").build(window, cx))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let folder = this.pane_path(this.active_side());
+                                if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_folder = Some(folder); cx.notify(); }
+                            })))
+                        .when(settings.update_folder.is_some(), |row| row.child(small("update-folder-clear", "Убрать")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_folder = None; cx.notify(); }
+                            })))))
+                    .child(div().id("update-share").flex().items_center().gap_2().cursor_pointer()
+                        .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
+                            .when(share, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
+                            .when(!share, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
+                        .child("Класть установленные версии в эту папку для коллег")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_share = !s.update_share; cx.notify(); }
+                        })))
+                    .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                        .child("Если программе закрыт интернет: обновления берутся из этой папки или из файла Papka.exe, скачанного браузером в «Загрузки».")));
             }
             if let Some(error) = settings.error.as_ref() {
                 body = body.child(div().text_color(rgb(DANGER)).child(error.clone()));
