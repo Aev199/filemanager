@@ -695,6 +695,11 @@ impl Explorer {
     }
 
     fn stage_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if paths.iter().any(|path| !path.exists()) {
+            self.status = "Файлы из архива сюда не добавить: перетащите их прямо в папку — архиватор распакует их туда".into();
+            cx.notify();
+            return;
+        }
         let mut error = None;
         for path in paths {
             if self.zone.items().contains(path) { continue; }
@@ -858,12 +863,38 @@ impl Explorer {
     }
 
     fn drop_into(&mut self, paths: &[PathBuf], folder: PathBuf, copy: bool, cx: &mut Context<Self>) {
+        // A placeholder from an archiver (7-Zip drags out a folder it fills
+        // only when Windows copies it): Explorer's copy engine handles it.
+        #[cfg(windows)]
+        if paths.iter().any(|path| !path.exists()) {
+            self.shell_copy_drop(paths.to_vec(), folder, cx);
+            return;
+        }
         let Some(zone) = self.zone_of(paths, cx) else { return };
         // Dragged out of «Файлы для переноса»: they leave it, and come back
         // if the transfer does not finish.
         let staged = paths.iter().all(|path| self.zone.items().contains(path));
         if staged { self.zone.remove(paths); }
         self.request_transfer(Transfer { zone, target: folder, copy, keep_both: false, replace: false, restore_failed: staged }, cx);
+    }
+
+    #[cfg(windows)]
+    fn shell_copy_drop(&mut self, paths: Vec<PathBuf>, folder: PathBuf, cx: &mut Context<Self>) {
+        self.status = "Копирование через Windows (распаковка из архива)…".into();
+        let target = folder.clone();
+        let task = cx.background_spawn(async move { filemanager_core::shell_drag::shell_copy(&paths, &target) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = match result {
+                    Ok(_) => format!("Передано Windows: файлы появятся в «{}»", browser::display_name(&folder)),
+                    Err(error) => format!("Не удалось скопировать: {error}"),
+                };
+                this.refresh_visible_directories(cx);
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
     }
 
     /// Validated transfer list for external paths (clipboard, drops).
