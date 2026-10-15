@@ -211,9 +211,53 @@ pub fn rollback(exe: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// GET over HTTPS with the system proxy settings (as in the browser).
+/// Readable text for WinHTTP's own error codes, which Windows cannot format.
+pub fn winhttp_message(code: i32) -> Option<&'static str> {
+    Some(match code {
+        12002 => "сервер не ответил вовремя",
+        12005 | 12006 => "неверный адрес",
+        12007 => "сервер не найден: нет интернета или DNS",
+        12029 => "не удалось подключиться к серверу: сеть, прокси, брандмауэр или антивирус не пропускают программу",
+        12030 | 12031 => "соединение прервано",
+        12038 | 12044 | 12045 | 12057 | 12157 | 12175 => "ошибка защищённого соединения (сертификат или TLS); возможно, его подменяет прокси или антивирус",
+        12152 => "неверный ответ сервера или прокси",
+        12180 => "не удалось определить настройки прокси",
+        _ => return None,
+    })
+}
+
+pub fn describe(error: &io::Error) -> String {
+    match error.raw_os_error() {
+        Some(code) => match winhttp_message(code) {
+            Some(text) => format!("{text} (код {code})"),
+            None => error.to_string(),
+        },
+        None => error.to_string(),
+    }
+}
+
+/// GET over HTTPS. WinHTTP with the system proxy settings first; if the
+/// connection itself fails, PowerShell's web client (system proxy and the
+/// Windows login for it), which corporate filters often let through.
 #[cfg(windows)]
 pub fn fetch(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Result<Vec<u8>> {
+    match winhttp_get(url, progress) {
+        Ok(body) => Ok(body),
+        // The server answered: another route would get the same answer.
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Err(error),
+        Err(first) => match powershell_get(url) {
+            Ok(body) => {
+                progress(body.len() as u64, Some(body.len() as u64));
+                Ok(body)
+            }
+            Err(second) => Err(io::Error::other(format!(
+                "{}. Запасной способ (PowerShell) тоже не сработал: {second}", describe(&first)))),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn winhttp_get(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Result<Vec<u8>> {
     use windows_sys::Win32::Networking::WinHttp::*;
     struct Handle(*mut core::ffi::c_void);
     impl Drop for Handle {
@@ -229,10 +273,17 @@ pub fn fetch(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Resul
         let agent = wide(&format!("Papka/{}", env!("CARGO_PKG_VERSION")));
         let session = check(WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, std::ptr::null(), std::ptr::null(), 0))?;
         WinHttpSetTimeouts(session.0, 15_000, 15_000, 30_000, 60_000);
+        // TLS 1.2 is not on by default in older Windows builds; 1.3 where known.
+        for protocols in [WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2] {
+            if WinHttpSetOption(session.0, WINHTTP_OPTION_SECURE_PROTOCOLS, (&protocols as *const u32).cast(), 4) != 0 { break; }
+        }
         let connection = check(WinHttpConnect(session.0, wide(host).as_ptr(), INTERNET_DEFAULT_HTTPS_PORT, 0))?;
         let verb = wide("GET");
         let request = check(WinHttpOpenRequest(connection.0, verb.as_ptr(), wide(&path).as_ptr(), std::ptr::null(),
             std::ptr::null(), std::ptr::null(), WINHTTP_FLAG_SECURE))?;
+        // A proxy asking for the Windows login gets it, as in the browser.
+        let policy = WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW;
+        WinHttpSetOption(request.0, WINHTTP_OPTION_AUTOLOGON_POLICY, (&policy as *const u32).cast(), 4);
         let headers = wide("Accept: application/vnd.github+json, application/octet-stream\r\n");
         if WinHttpSendRequest(request.0, headers.as_ptr(), u32::MAX, std::ptr::null(), 0, 0, 0) == 0
             || WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0 {
@@ -245,8 +296,12 @@ pub fn fetch(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Resul
                 (&mut value as *mut u32).cast(), &mut size, std::ptr::null_mut()) != 0).then_some(value)
         };
         let status = number(WINHTTP_QUERY_STATUS_CODE).unwrap_or(0);
-        if status != 200 {
-            return Err(io::Error::other(format!("сервер ответил {status}")));
+        match status {
+            200 => {}
+            // The proxy refused the login: worth the other route.
+            407 => return Err(io::Error::new(io::ErrorKind::PermissionDenied, "прокси требует входа (407)")),
+            403 | 429 => return Err(io::Error::new(io::ErrorKind::InvalidData, "GitHub временно ограничил запросы, попробуйте через час")),
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("сервер ответил {status}"))),
         }
         let total = number(WINHTTP_QUERY_CONTENT_LENGTH).map(u64::from);
         let mut body = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
@@ -262,6 +317,58 @@ pub fn fetch(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Resul
         }
         Ok(body)
     }
+}
+
+/// The PowerShell script that downloads `url` into `target`.
+pub fn powershell_script(url: &str, target: &Path) -> String {
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "''"));
+    format!("$ErrorActionPreference='Stop'; \
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; \
+        $c = New-Object Net.WebClient; \
+        $c.Headers.Add('User-Agent', 'Papka'); \
+        $c.Headers.Add('Accept', 'application/vnd.github+json, application/octet-stream'); \
+        $c.Proxy = [Net.WebRequest]::GetSystemWebProxy(); \
+        $c.Proxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials; \
+        $c.DownloadFile({}, {})", quote(url), quote(&target.to_string_lossy()))
+}
+
+/// `-EncodedCommand` text: Base64 of UTF-16LE, so no quoting can break it.
+pub fn encode_command(script: &str) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() { out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char) } else { out.push('=') }
+        }
+    }
+    out
+}
+
+#[cfg(windows)]
+fn powershell_get(url: &str) -> io::Result<Vec<u8>> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let target = std::env::temp_dir().join(format!("papka-download-{}-{}.tmp", std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand",
+            &encode_command(&powershell_script(url, &target))])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let result = match output {
+        Ok(output) if output.status.success() => fs::read(&target),
+        Ok(output) => {
+            let text = String::from_utf8_lossy(&output.stderr);
+            let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("неизвестная ошибка");
+            Err(io::Error::other(line.chars().take(300).collect::<String>()))
+        }
+        Err(error) => Err(error),
+    };
+    let _ = fs::remove_file(&target);
+    result
 }
 
 /// Development builds elsewhere use curl; updates themselves are Windows-only.
@@ -289,6 +396,23 @@ mod tests {
         {"tag_name":"v0.1.50","html_url":"h50","draft":false,"prerelease":false,
          "assets":[{"name":"Papka-win64.zip","browser_download_url":"z50"}]}
     ]"#;
+
+    #[test]
+    fn powershell_route_is_encoded_safely() {
+        // "abc" in UTF-16LE is 61 00 62 00 63 00.
+        assert_eq!(encode_command("abc"), "YQBiAGMA");
+        assert_eq!(encode_command("a"), "YQA=");
+        let script = powershell_script("https://x/y?a='b'", Path::new(r"C:\Temp\O'Neil.tmp"));
+        assert!(script.contains(r"'https://x/y?a=''b'''"));
+        assert!(script.contains(r"'C:\Temp\O''Neil.tmp'"));
+    }
+
+    #[test]
+    fn winhttp_codes_read_in_russian() {
+        assert!(winhttp_message(12029).unwrap().contains("подключиться"));
+        assert!(describe(&io::Error::from_raw_os_error(12029)).ends_with("(код 12029)"));
+        assert_eq!(winhttp_message(5), None);
+    }
 
     #[test]
     fn versions_compare_numerically() {
