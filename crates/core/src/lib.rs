@@ -7,6 +7,7 @@ pub mod operations;
 pub mod bulk_rename;
 pub mod search;
 pub mod find;
+pub mod shell_verb;
 pub mod update;
 
 pub mod workspace;
