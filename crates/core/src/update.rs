@@ -21,9 +21,9 @@ pub const MANIFEST_ASSET: &str = "latest.json";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Channel {
     /// Releases marked as final only.
+    #[default]
     Stable,
     /// Every build, test ones included.
-    #[default]
     Beta,
 }
 
@@ -212,13 +212,10 @@ pub fn rollback(exe: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Where releases can be fetched in a browser when Papka itself has no
-/// way out: the direct file for final releases, the list for test builds.
-pub fn browser_url(channel: Channel) -> String {
-    match channel {
-        Channel::Stable => format!("https://github.com/{REPOSITORY}/releases/latest/download/{EXE_ASSET}"),
-        Channel::Beta => format!("https://github.com/{REPOSITORY}/releases"),
-    }
+/// The newest final release's EXE, fetched by the browser when Papka
+/// itself has no way out (GitHub serves "latest" for final releases only).
+pub fn browser_url() -> String {
+    format!("https://github.com/{REPOSITORY}/releases/latest/download/{EXE_ASSET}")
 }
 
 /// The version in a Papka EXE's file properties ("0.1.47").
@@ -657,8 +654,7 @@ mod tests {
 
     #[test]
     fn browser_links_follow_the_channel() {
-        assert!(browser_url(Channel::Stable).ends_with("/releases/latest/download/Papka.exe"));
-        assert!(browser_url(Channel::Beta).ends_with("/releases"));
+        assert!(browser_url().ends_with("/releases/latest/download/Papka.exe"));
     }
 
     #[test]

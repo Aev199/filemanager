@@ -95,7 +95,7 @@ impl Updates {
         Updates {
             folder: value(FOLDER_KEY).filter(|text| !text.is_empty()).map(PathBuf::from).or(side_file),
             share: value(SHARE_KEY).is_some_and(|flag| flag == "1"),
-            channel: value(CHANNEL_KEY).map_or(Channel::Beta, |key| Channel::from_key(&key)),
+            channel: value(CHANNEL_KEY).map_or(Channel::Stable, |key| Channel::from_key(&key)),
             auto: value(AUTO_KEY).is_none_or(|flag| flag != "0"),
             skipped: value(SKIPPED_KEY),
             ..Updates::default()
@@ -202,7 +202,7 @@ impl Explorer {
     /// Opens the release in the browser (the one program allowed out) and
     /// watches Downloads until the file arrives.
     pub(crate) fn download_in_browser(&mut self, cx: &mut Context<Self>) {
-        cx.open_url(&update::browser_url(self.updates.channel));
+        cx.open_url(&update::browser_url());
         self.updates.dialog = false;
         self.updates.phase = Phase::Idle;
         self.status = "Скачайте Papka.exe в браузере — Папка заметит его в «Загрузках» и предложит установить".into();
