@@ -17,6 +17,7 @@ mod compare;
 mod spring;
 mod search_panel;
 mod updates;
+mod icons;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -242,6 +243,7 @@ struct Explorer {
     /// The «О программе» panel under its titlebar button.
     about_open: bool,
     updates: updates::Updates,
+    icons: icons::Icons,
     /// Step of the feature tour, while it is shown.
     tour: Option<usize>,
     menu_serial: u64,
@@ -468,6 +470,8 @@ impl Explorer {
         let session_restore_error = restored.err().map(|e|e.to_string());
         let prefs_error = session_restore_error.as_ref().map(|e|format!("Проект не восстановлен: {e}")).or(prefs_error);
         let favorites = workspaces.as_ref().and_then(|s|s.favorites().ok()).unwrap_or_default();
+        let system_icons = workspaces.as_ref().and_then(|store| store.value(icons::ENABLED_KEY).ok().flatten())
+            .is_none_or(|flag| flag != "0");
         let search_depth = workspaces.as_ref().and_then(|store| store.value(search_panel::DEPTH_KEY).ok().flatten())
             .and_then(|text| text.parse().ok()).filter(|depth| *depth < search_panel::DEPTHS.len()).unwrap_or(0);
         theme::set_light(prefs.light);
@@ -499,7 +503,7 @@ impl Explorer {
             copy_control: None,
             retry: None,
             context_menu: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -1864,6 +1868,18 @@ fn main() {
     if let Some(code) = filemanager_core::preview_host::helper_main(&helper_args) {
         std::process::exit(code);
     }
+    // Files rescued from archivers' drops (vendor/gpui_ce_windows): kept a
+    // day in case a copy from them was still going, then removed.
+    std::thread::spawn(|| {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+        for entry in entries.flatten() {
+            let old = entry.metadata().and_then(|metadata| metadata.modified()).ok()
+                .and_then(|time| time.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(24 * 60 * 60));
+            if old && entry.file_name().to_string_lossy().starts_with("papka-drop-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    });
     gpui_platform::application().with_assets(assets::Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);

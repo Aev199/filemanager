@@ -1178,7 +1178,11 @@ impl Explorer {
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
-            .child(icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)));
+            .child(match self.system_icon(&path).filter(|_| !is_dir) {
+                // The program's own icon, as in Explorer.
+                Some(image) => img(image).size(px(16.)).flex_none().when(entry.hidden && !selected, |image| image.opacity(0.55)).into_any_element(),
+                None => icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)).into_any_element(),
+            });
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
         row = if self.renaming && self.selected.as_ref() == Some(&path) {
             // A compact field that fits the 24 px row and starts where the name does.
@@ -1340,7 +1344,10 @@ impl Explorer {
                     .rounded_md().cursor_pointer().text_color(rgb(text))
                     .when(selected, |row| row.bg(rgb(SELECTED)))
                     .when(!selected, |row| row.hover(|style| style.bg(rgb(HOVER))))
-                    .child(icon(icon_path, if selected { SELECTION_TEXT } else { tint }))
+                    .child(match this.system_icon(&hit.path).filter(|_| !hit.is_dir) {
+                        Some(image) => img(image).size(px(16.)).flex_none().into_any_element(),
+                        None => icon(icon_path, if selected { SELECTION_TEXT } else { tint }).into_any_element(),
+                    })
                     .child(div().w(gpui::relative(0.38)).flex_none().min_w_0().flex().items_center().gap_1()
                         .child(div().min_w_0().truncate().child(browser::display_name(&hit.path)))
                         .when(hit.by_content, |name| name.child(div().flex_none().px_1().rounded_sm().text_size(px(10.))
@@ -1492,7 +1499,10 @@ impl Explorer {
         };
         panel = panel.child(
             div().flex().items_center().gap_2()
-                .child(icon(icon_path, tint))
+                .child(match selected_entry.as_ref().filter(|entry| !entry.is_directory).and_then(|entry| self.system_icon(&entry.path)) {
+                    Some(image) => img(image).size(px(16.)).flex_none().into_any_element(),
+                    None => icon(icon_path, tint).into_any_element(),
+                })
                 .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::SEMIBOLD)
                     .overflow_hidden().child(title))
         );
@@ -2296,6 +2306,7 @@ impl Render for Explorer {
         // Do not compete with the search walk for I/O while showing results.
         if !self.search_active {
             self.load_visible_directories(cx);
+            self.request_icons(window.scale_factor(), cx);
         }
         self.load_selected_details(cx);
         if self.select_first_when_loaded && self.selected.is_none() {

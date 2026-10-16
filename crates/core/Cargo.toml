@@ -21,7 +21,7 @@ image = { version = "0.25", default-features = false, features = ["png", "bmp"] 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
 windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_Foundation"] }
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Networking_WinHttp", "Win32_NetworkManagement_WNet", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Registry", "Win32_Globalization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Networking_WinHttp", "Win32_NetworkManagement_WNet", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Registry", "Win32_Globalization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security"] }
 
 [dev-dependencies]
 tempfile = "3"

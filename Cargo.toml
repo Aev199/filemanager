@@ -1,3 +1,11 @@
 [workspace]
 members = ["crates/core", "crates/desktop", "crates/cli"]
 resolver = "2"
+exclude = ["vendor"]
+
+# gpui's Windows drop target reads the dropped file list only on enter;
+# the copy re-reads it on drop, as Explorer does, so archivers such as 7-Zip
+# (which unpack when the list is asked for at the drop) work. See
+# vendor/gpui_ce_windows/PAPKA.md.
+[patch.crates-io]
+gpui_ce_windows = { path = "vendor/gpui_ce_windows" }
