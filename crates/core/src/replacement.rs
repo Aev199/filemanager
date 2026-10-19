@@ -92,6 +92,11 @@ pub(crate) fn execute(
     guard.source.verify(&plan.source)?;
     guard.target.verify(target)?;
     control.check()?;
+    // No Recycle Bin there (network share, removable drive): Explorer
+    // replaces for good, and so do we, carefully.
+    if !crate::path_utils::has_recycle_bin(target) {
+        return replace_in_place(plan, guard, target, control, checkpoint);
+    }
     let old = crate::recycle_bin::recycle(target)?;
     let incoming = (|| {
         let old = old.clone().ok_or_else(|| {
@@ -132,6 +137,56 @@ pub(crate) fn execute(
             },
         )
     })
+}
+
+/// Replacement where nothing can be recycled. The old file waits under a
+/// hidden name beside the target until the new one is in place and
+/// verified; if anything fails it comes back. Like Explorer's, such a
+/// replacement cannot be undone.
+fn replace_in_place(
+    plan: &Plan,
+    guard: &Guard,
+    target: &Path,
+    control: &CopyControl,
+    checkpoint: &dyn Fn(&str) -> io::Result<()>,
+) -> io::Result<Receipt> {
+    let name = target.file_name().ok_or_else(|| io::Error::other("Missing replacement name"))?;
+    let backup = target.with_file_name(format!(".papka-replacing-{}-{}", std::process::id(), name.to_string_lossy()));
+    if backup.exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("Временный файл {} уже есть", backup.display())));
+    }
+    checkpoint("replace_setting_old_aside")?;
+    guard.target.verify(target)?;
+    std::fs::rename(target, &backup)?;
+    let incoming = (|| {
+        checkpoint("replace_incoming")?;
+        guard.source.verify(&plan.source)?;
+        control.check()?;
+        let incoming = plan.without_replacement().execute_with_checkpoint(control, checkpoint)?;
+        if plan.action == crate::operations::Action::Copy {
+            checkpoint("replace_verifying_copy")?;
+            control.set_phase(crate::operations::TransferPhase::Verifying);
+            crate::copy_verification::verify(&plan.source, target, control)?;
+        }
+        Ok::<_, io::Error>(incoming)
+    })();
+    match incoming {
+        Ok(incoming) => {
+            // The new file is in place and checked; the old one goes. A
+            // backup that cannot be removed now only takes up space.
+            let _ = std::fs::remove_file(&backup);
+            Ok(incoming.without_undo())
+        }
+        Err(error) => {
+            // Whatever reached the target is ours: the old file returns there.
+            if target.exists() { let _ = std::fs::remove_file(target); }
+            let place = match std::fs::rename(&backup, target) {
+                Ok(()) => "прежний файл на месте".to_string(),
+                Err(_) => format!("прежний файл сохранён как {}", backup.display()),
+            };
+            Err(io::Error::new(error.kind(), format!("Замена не выполнена ({place}): {error}")))
+        }
+    }
 }
 
 impl UndoState {
@@ -208,6 +263,39 @@ impl UndoState {
 mod tests {
     use crate::operations::{Action, CopyControl, OperationQueue, Plan};
     use std::{fs, io};
+
+    #[test]
+    fn in_place_replacement_swaps_contents_and_cannot_be_undone() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("in").join("calc.lir");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"new model").unwrap();
+        let target = temp.path().join("calc.lir");
+        fs::write(&target, b"old").unwrap();
+        let plan = Plan::prepare_replace(Action::Copy, &source, &target).unwrap();
+        let guard = super::Guard::prepare(&source, &target).unwrap();
+        let receipt = super::replace_in_place(&plan, &guard, &target, &CopyControl::default(), &|_| Ok(())).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new model");
+        assert!(!receipt.can_undo());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2, "no backup left behind");
+    }
+
+    #[test]
+    fn failed_in_place_replacement_brings_the_old_file_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("in").join("calc.lir");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"new model").unwrap();
+        let target = temp.path().join("calc.lir");
+        fs::write(&target, b"old").unwrap();
+        let plan = Plan::prepare_replace(Action::Copy, &source, &target).unwrap();
+        let guard = super::Guard::prepare(&source, &target).unwrap();
+        let fail = |step: &str| if step == "replace_incoming" { Err(io::Error::other("interrupted")) } else { Ok(()) };
+        let error = super::replace_in_place(&plan, &guard, &target, &CopyControl::default(), &fail).unwrap_err();
+        assert!(error.to_string().contains("прежний файл на месте"));
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
 
     #[test]
     fn replacement_partial_undo_reports_previous_incoming_outcome() {

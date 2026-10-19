@@ -556,6 +556,14 @@ impl Plan {
 }
 
 impl Receipt {
+    /// A result that cannot be undone: the replaced file is gone for good.
+    pub(crate) fn without_undo(mut self) -> Self {
+        self.created_snapshot = None;
+        self.completed_stamp = None;
+        self.cross_move = None;
+        self
+    }
+
     pub(crate) fn with_replacement(mut self, undo: crate::replacement::UndoState) -> Self {
         self.replacement = Some(Arc::new(undo));
         self

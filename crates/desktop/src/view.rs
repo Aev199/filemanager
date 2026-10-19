@@ -289,7 +289,9 @@ impl Explorer {
 
     /// Ends a list column drag and keeps the widths for the next start.
     pub(crate) fn finish_list_resize(&mut self) {
-        if self.list_resize.take().is_none() { return; }
+        let Some((side, ..)) = self.list_resize.take() else { return };
+        // The last widths set start new panes, now and after a restart.
+        self.list_widths = self.list_widths_for(side);
         if let Some(store)=&self.workspaces {
             let [a,b,c]=self.list_widths;
             let _=store.set_value(crate::LIST_WIDTHS, &format!("{a:.0},{b:.0},{c:.0}"));
@@ -1022,7 +1024,7 @@ impl Explorer {
                     cx.notify();
                 }))
         };
-        let widths = self.list_widths;
+        let widths = self.list_widths_for(side);
         // A fixed column with a grip on its left border: dragging it left
         // widens the column, as in Explorer; the name column takes the rest.
         let sized = |index: usize, cell: Stateful<Div>, cx: &mut Context<Self>| {
@@ -1034,7 +1036,7 @@ impl Explorer {
                     .hover(|style| style.bg(rgb(HOVER)))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        this.list_resize = Some((index, event.position.x, this.list_widths[index]));
+                        this.list_resize = Some((side, index, event.position.x, this.list_widths_for(side)[index]));
                     })))
         };
         div().h(px(28.)).flex_none().flex().items_center().gap_2().pl(px(36.)).pr(px(12.))
@@ -1193,15 +1195,17 @@ impl Explorer {
         };
         if list_mode {
             let (show_modified, show_kind) = self.list_columns(side);
-            let widths = self.list_widths;
+            let widths = self.list_widths_for(side);
+            // Cells never wrap: a narrow column cuts its text with "…".
             row = row
-                .when(show_modified, |row| row.child(div().w(px(widths[0])).flex_none().px_2().text_size(px(12.)).text_color(rgb(metadata_text))
+                .when(show_modified, |row| row.child(div().w(px(widths[0])).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
                     .child(entry.modified.map(format_time).unwrap_or_default())))
                 .when(show_kind, |row| row.child(div().w(px(widths[1])).flex_none().px_2().truncate().text_size(px(12.)).text_color(rgb(metadata_text))
                     .child(kind_label(entry))))
                 .child(div().w(px(widths[2])).flex_none().px_2().flex().justify_end().text_size(px(12.))
                     .text_color(rgb(metadata_text))
-                    .child(if is_dir { self.folder_size_label(&entry.path) } else { format_size(entry.size) }));
+                    .child(div().min_w_0().truncate()
+                        .child(if is_dir { self.folder_size_label(&entry.path) } else { format_size(entry.size) })));
         } else if is_dir {
             row = row.child(small_icon("fm/chevron-right.svg", if selected { SELECTION_TEXT } else { TEXT_DIM }));
         }
@@ -2172,6 +2176,7 @@ impl Explorer {
 
     fn conflict_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (transfer, conflicts) = self.pending_transfer.as_ref()?;
+        let recycle = filemanager_core::path_utils::has_recycle_bin(&transfer.target);
         let names: Vec<String> = conflicts.iter().take(4).map(|p| browser::display_name(p)).collect();
         let more = conflicts.len().saturating_sub(names.len());
         let mut list = div().flex().flex_col().gap_1().p_2().rounded_md().bg(rgb(SURFACE))
@@ -2189,10 +2194,12 @@ impl Explorer {
             .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(format!("Совпадают имена: {}", conflicts.len())))
             .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                .child(format!("В папке «{}» уже есть объекты с такими именами. При замене прежние файлы отправляются в Корзину. Каталоги не заменяются.",
-                    browser::display_name(&transfer.target))))
+                .child(format!("В папке «{}» уже есть объекты с такими именами. {} Каталоги не заменяются.",
+                    browser::display_name(&transfer.target),
+                    if recycle { "При замене прежние файлы отправляются в Корзину." }
+                    else { "Здесь нет Корзины (сетевая папка или съёмный диск): прежние файлы заменятся безвозвратно, как в Проводнике." })))
             .child(list)
-            .child(text_button("conflict-replace", "Заменить файлы — прежние в Корзину", ButtonKind::Ghost)
+            .child(text_button("conflict-replace", if recycle { "Заменить файлы — прежние в Корзину" } else { "Заменить файлы безвозвратно" }, ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::Replace, cx))))
             .child(div().flex().justify_end().gap_2()
                 .child(text_button("conflict-cancel", "Отмена", ButtonKind::Ghost)
@@ -2382,10 +2389,12 @@ impl Render for Explorer {
                         return;
                     }
                 }
-                if let Some((index, start, width)) = this.list_resize {
+                if let Some((side, index, start, width)) = this.list_resize {
                     if !event.dragging() { this.finish_list_resize(); return; }
                     let (min, max) = crate::LIST_WIDTH_RANGE;
-                    this.list_widths[index] = (width - (event.position.x - start) / px(1.)).clamp(min, max);
+                    let mut widths = this.list_widths_for(side);
+                    widths[index] = (width - (event.position.x - start) / px(1.)).clamp(min, max);
+                    this.pane_list_widths.insert(side, widths);
                     cx.notify();
                     return;
                 }

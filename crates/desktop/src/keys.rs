@@ -138,6 +138,10 @@ impl Explorer {
         Some((listing, indices))
     }
 
+    pub(crate) fn list_widths_for(&self, group: GroupId) -> [f32; 3] {
+        self.pane_list_widths.get(&group).copied().unwrap_or(self.list_widths)
+    }
+
     pub(crate) fn sort_for(&self, group: GroupId) -> filemanager_core::sort::SortSpec {
         self.sorts.get(&group).copied().unwrap_or_default()
     }
@@ -614,6 +618,7 @@ impl Explorer {
         self.pane_bounds.retain(|id,_|ids.contains(id));
         if self.dock_hover.is_some_and(|(id,_)|!ids.contains(&id)) {self.dock_hover=None;}
         self.pane_measured_widths.retain(|id,_|ids.contains(id));
+        self.pane_list_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));

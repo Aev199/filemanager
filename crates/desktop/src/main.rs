@@ -285,7 +285,9 @@ struct Explorer {
     /// Widths of the list columns Изменён, Тип, Размер; the name takes the rest.
     list_widths: [f32; 3],
     /// Dragging a list column border: column, start x, start width.
-    list_resize: Option<(usize, Pixels, f32)>,
+    /// Each pane's own list columns; `list_widths` (the last set) starts new ones.
+    pane_list_widths: HashMap<GroupId, [f32; 3]>,
+    list_resize: Option<(GroupId, usize, Pixels, f32)>,
     tab_scroll: HashMap<GroupId, gpui::ScrollHandle>,
     tab_reveal: HashMap<GroupId, (usize, usize)>,
     dock_hover: Option<(GroupId, layout::DockZone)>,
@@ -547,6 +549,7 @@ impl Explorer {
             column_resize: None,
             list_widths: workspaces.as_ref().and_then(|store| store.value(LIST_WIDTHS).ok().flatten())
                 .and_then(|text| parse_widths(&text)).unwrap_or(DEFAULT_LIST_WIDTHS),
+            pane_list_widths: HashMap::new(),
             list_resize: None,
             tab_scroll: HashMap::new(),
             tab_reveal: HashMap::new(),
