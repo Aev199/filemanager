@@ -175,6 +175,17 @@ impl Explorer {
         self.pane_column_widths.get(&group).copied().unwrap_or(self.column_width)
     }
 
+    /// Windows keeps counting quick clicks in one spot: 3, 4, … After a
+    /// double click opens a folder, the next quick click on the new list
+    /// would count as a "triple" one. A double click is the second of a
+    /// pair (an even count) on the item the first click of the pair hit.
+    pub(crate) fn is_double_click(&mut self, event: &gpui::ClickEvent, path: &Path) -> bool {
+        let count = event.click_count();
+        let double = count >= 2 && count % 2 == 0 && self.last_click.as_deref() == Some(path);
+        self.last_click = if double { None } else { Some(path.to_path_buf()) };
+        double
+    }
+
     pub(crate) fn list_widths_for(&self, group: GroupId) -> [f32; 3] {
         self.pane_list_widths.get(&group).copied().unwrap_or(self.list_widths)
     }

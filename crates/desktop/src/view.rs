@@ -1304,7 +1304,7 @@ impl Explorer {
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if this.marquee.is_some() {cx.stop_propagation();return;}
-                if event.click_count() >= 2 {
+                if this.is_double_click(event, &path) {
                     this.open_entry(path.clone(), is_dir, side, cx);
                 } else {
                     this.click_entry(side, &column_folder, path.clone(), event.modifiers(), cx);
@@ -1414,7 +1414,7 @@ impl Explorer {
                             this.reveal_search_hit(reveal.clone(), false, cx);
                         }})))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        if event.click_count() >= 2 {
+                        if this.is_double_click(event, &reveal) {
                             this.open_search_hit(index, cx);
                         } else {
                             this.search.selected = Some(index);

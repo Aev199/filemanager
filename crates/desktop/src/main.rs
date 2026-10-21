@@ -297,6 +297,8 @@ struct Explorer {
     /// Dragging a list column border: column, start x, start width.
     /// Each pane's own list columns; `list_widths` (the last set) starts new ones.
     pane_list_widths: HashMap<GroupId, [f32; 3]>,
+    /// The item the last single click hit (see `is_double_click`).
+    last_click: Option<PathBuf>,
     /// Version stacks opened by the user: (folder, family key).
     open_stacks: HashSet<(PathBuf, String)>,
     /// Bumped when stacks open or close, or grouping is switched.
@@ -576,6 +578,7 @@ impl Explorer {
             list_widths: workspaces.as_ref().and_then(|store| store.value(LIST_WIDTHS).ok().flatten())
                 .and_then(|text| parse_widths(&text)).unwrap_or(DEFAULT_LIST_WIDTHS),
             pane_list_widths: HashMap::new(),
+            last_click: None,
             open_stacks: HashSet::new(), stacks_rev: 0, stack_versions,
             list_resize: None,
             tab_scroll: HashMap::new(),
