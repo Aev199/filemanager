@@ -94,6 +94,36 @@ fn app_data_dir_in(base: &Path) -> PathBuf {
     dir
 }
 
+/// Deletes a file or folder for good, read-only ones too (as Explorer does
+/// after asking). Used only where there is no Recycle Bin.
+pub fn remove_permanently(path: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        return std::fs::remove_dir_all(path);
+    }
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && meta.permissions().readonly() => {
+            let mut permissions = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(path, permissions)?;
+            std::fs::remove_file(path)
+        }
+        other => other,
+    }
+}
+
+/// Whether two paths name the same place: `\\?\` prefixes aside, and
+/// ignoring letter case on Windows, where names are case-insensitive.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let (a, b) = (normalize_extended_path(a), normalize_extended_path(b));
+    if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
 /// Whether deleting here can go to the Windows Recycle Bin. Network shares
 /// and removable drives have none: Explorer deletes there permanently after
 /// asking, and so does the program.

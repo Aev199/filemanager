@@ -65,7 +65,14 @@ pub(crate) fn execute(
         target_snapshot.verify(target)?;
         control.check()?;
         control.set_phase(TransferPhase::Recycling);
-        crate::recycle_bin::recycle(&plan.source)
+        // A network share or USB drive has no Recycle Bin: the moved source
+        // goes for good, as in Explorer (the copy was verified above), and
+        // such a move cannot be undone.
+        if crate::path_utils::has_recycle_bin(&plan.source) {
+            crate::recycle_bin::recycle(&plan.source)
+        } else {
+            crate::path_utils::remove_permanently(&plan.source).map(|()| None)
+        }
     })();
     match complete {
         Ok(original) => Ok((copy, UndoState { original, restored: Mutex::new(None) })),
@@ -130,7 +137,13 @@ impl UndoState {
             crate::copy_verification::verify(original, target, &CopyControl::default())?;
             original_snapshot.verify(original)?;
             snapshot.verify(target)?;
-            crate::recycle_bin::recycle(target)?;
+            // The copy matches the restored original; without a Recycle
+            // Bin there it is removed for good.
+            if crate::path_utils::has_recycle_bin(target) {
+                crate::recycle_bin::recycle(target)?;
+            } else {
+                crate::path_utils::remove_permanently(target)?;
+            }
             Ok(())
         })();
         cleanup.map_err(|error: io::Error| io::Error::new(error.kind(), PartialUndoError {

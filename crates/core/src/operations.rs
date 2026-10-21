@@ -301,7 +301,9 @@ pub(crate) fn safe_rename(_source: &Path, _destination: &Path) -> io::Result<()>
 /// Reject characters and device names invalid on Windows. The UI and
 /// CLI must not be able to turn a filename into an arbitrary relative path.
 pub fn validate_leaf_name(name: &str) -> io::Result<()> {
-    if name.is_empty() || name.trim() != name || name == "." || name == ".."
+    // Windows drops trailing spaces and dots; leading spaces and other
+    // whitespace (NBSP in names from a Mac) are valid.
+    if name.is_empty() || name.ends_with(' ') || name == "." || name == ".."
         || name.encode_utf16().count() > 255 || name.ends_with('.')
         || name.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
     {
@@ -317,6 +319,15 @@ pub fn validate_leaf_name(name: &str) -> io::Result<()> {
         return Err(invalid("Reserved Windows device name"));
     }
     Ok(())
+}
+
+/// `a` and `b` resolve to one entry on disk (a name differing only in case
+/// on Windows): renaming between them changes the letters, nothing else.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    match (crate::path_utils::canonical(a), crate::path_utils::canonical(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -364,7 +375,9 @@ impl Plan {
                 if action == Action::CreateFolder && (!source.is_dir() || source != parent) {
                     return Err(invalid("A new folder must be created directly inside the selected parent"));
                 }
-                if occupied(&normalized)? && !replacing { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
+                // A rename that changes only letter case finds its own file there.
+                let own_name = action == Action::Rename && same_entry(&source, &normalized);
+                if occupied(&normalized)? && !replacing && !own_name { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
                 if action != Action::CreateFolder && source.is_dir() && parent.starts_with(&source) {
                     return Err(invalid("Cannot move or copy a folder inside itself"));
                 }
@@ -520,7 +533,8 @@ impl Plan {
             }
             Action::Move | Action::Rename => {
                 let dest = destination.as_ref().unwrap();
-                if occupied(dest)? { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
+                let own_name = self.action == Action::Rename && same_entry(&self.source, dest);
+                if occupied(dest)? && !own_name { return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Destination already exists")); }
                 // MoveFileW never replaces occupied destinations and rejects cross-volume moves.
                 if let Err(error) = safe_rename(&self.source, dest) {
                     if self.action == Action::Move && is_cross_volume_error(&error) {
@@ -533,7 +547,7 @@ impl Plan {
                 recycled = crate::recycle_bin::recycle(&self.source)?;
             }
             Action::Delete => {
-                if meta.is_dir() { fs::remove_dir_all(&self.source)?; } else { fs::remove_file(&self.source)?; }
+                crate::path_utils::remove_permanently(&self.source)?;
             }
             Action::CreateFolder => {
                 let dest = destination.as_ref().ok_or_else(|| invalid("Missing new folder path"))?;
@@ -623,7 +637,10 @@ impl Receipt {
             let snapshot = self.created_snapshot.as_ref().ok_or_else(|| invalid("Original identity unavailable; undo refused"))?;
             snapshot.verify(dest)?;
             // The caller holds the same audited executor lock as all other actions.
-            let plan = Plan::prepare(Action::Recycle, dest, None)?;
+            // Where there is no Recycle Bin, the item just created goes for good:
+            // the snapshot proves it is still exactly what this action made.
+            let undo = if crate::path_utils::has_recycle_bin(dest) { Action::Recycle } else { Action::Delete };
+            let plan = Plan::prepare(undo, dest, None)?;
             snapshot.verify(dest)?;
             plan.execute()?;
             return Ok(UndoOutcome::default());
@@ -792,7 +809,8 @@ impl DropZone {
 /// `target/name`, or the first free "stem (N).ext" for N = 2, 3, …
 /// `reserved` holds names already planned in the same batch.
 pub fn free_destination(target: &Path, name: &Path, reserved: &[PathBuf]) -> PathBuf {
-    let taken = |path: &Path| fs::symlink_metadata(path).is_ok() || reserved.iter().any(|r| r == path);
+    let taken = |path: &Path| fs::symlink_metadata(path).is_ok()
+        || reserved.iter().any(|r| crate::path_utils::same_path(r, path));
     let first = target.join(name);
     if !taken(&first) {
         return first;

@@ -174,7 +174,7 @@ fn replace_in_place(
         Ok(incoming) => {
             // The new file is in place and checked; the old one goes. A
             // backup that cannot be removed now only takes up space.
-            let _ = std::fs::remove_file(&backup);
+            let _ = crate::path_utils::remove_permanently(&backup);
             Ok(incoming.without_undo())
         }
         Err(error) => {
