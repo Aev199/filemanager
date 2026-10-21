@@ -16,6 +16,8 @@ pub(crate) struct Palette {
     pub selected: usize,
     /// Keeps the chosen command visible in the height-limited list.
     pub scroll: gpui::ScrollHandle,
+    /// Ctrl+P: folders to jump to instead of commands.
+    pub folders: Option<crate::jump::Folders>,
 }
 /// Check boxes of the settings window, in the order arrows walk them.
 const SETTING_FLAGS: [&str; 8] = [
@@ -87,10 +89,13 @@ impl Explorer {
             && self.bulk_rename_errors.is_empty()
     }
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette_mode("Найти команду…", None, window, cx);
+    }
+    pub(crate) fn open_palette_mode(&mut self, placeholder: &'static str, folders: Option<crate::jump::Folders>, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_open_interface() || self.settings.is_some() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Найти команду…"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         cx.subscribe_in(
             &input,
             window,
@@ -115,11 +120,21 @@ impl Explorer {
             query: String::new(),
             selected: 0,
             scroll: gpui::ScrollHandle::new(),
+            folders,
         });
         self.context_menu = None;
         cx.notify();
     }
     pub(crate) fn palette_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.palette.as_ref().is_some_and(|palette| palette.folders.is_some()) {
+            let count = self.jump_results().len();
+            if let Some(palette) = self.palette.as_mut() {
+                palette.selected = palette.selected.saturating_add_signed(delta).min(count.saturating_sub(1));
+                palette.scroll.scroll_to_item(palette.selected);
+            }
+            cx.notify();
+            return;
+        }
         if let Some(palette) = self.palette.as_mut() {
             let results = commands(&palette.query);
             palette.selected = palette
@@ -159,6 +174,13 @@ impl Explorer {
         let Some(palette) = self.palette.as_ref() else {
             return;
         };
+        if palette.folders.is_some() {
+            let selected = palette.selected;
+            if let Some((path, _)) = self.jump_results().into_iter().nth(selected) {
+                self.jump_to(path, false, window, cx);
+            }
+            return;
+        }
         if let Some(command) = commands(&palette.query).get(palette.selected) {
             self.execute_command(*command, window, cx);
         }
@@ -211,6 +233,7 @@ impl Explorer {
             Settings => self.open_settings(window, cx),
             Tour => self.open_tour(cx),
             Compare => self.open_comparison(cx),
+            Jump => self.open_jump(window, cx),
             SetLabel(label) => { let paths = self.selection(); self.set_label(paths, label, cx); }
             FilterLabel(label) => self.set_label_filter(label, cx),
         }
@@ -336,7 +359,20 @@ impl Explorer {
         cx.notify();
     }
     pub(crate) fn interface_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let body = if let Some(palette) = self.palette.as_ref() {
+        let body = if let Some(palette) = self.palette.as_ref().filter(|palette| palette.folders.is_some()) {
+            let (list, footer) = self.jump_list(palette, cx);
+            div().flex().flex_col().p_0()
+                .child(div().h(px(44.)).px_2().flex().items_center().border_b_1().border_color(rgb(BORDER))
+                    .child(crate::jump::field(palette)))
+                .child(list)
+                .child(div().h(px(28.)).px_4().flex().items_center().gap_4().border_t_1().border_color(rgb(BORDER))
+                    .text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                    .child(div().flex_1().child(footer))
+                    .child("↑ ↓ выбор")
+                    .child("Enter перейти")
+                    .child("Ctrl+щелчок — в новой вкладке")
+                    .child("Esc закрыть"))
+        } else if let Some(palette) = self.palette.as_ref() {
             // Atlas: search field on top, commands in sections with icons
             // and shortcut keys, key hints at the bottom.
             let results = commands(&palette.query);
@@ -848,6 +884,7 @@ fn command_icon(id: CommandId) -> &'static str {
         Settings => "fm/settings.svg",
         Tour => "fm/help.svg",
         Compare => "fm/split.svg",
+        Jump => "fm/folder-fill.svg",
         SetLabel(_) => "fm/tag.svg",
         FilterLabel(_) => "fm/eye.svg",
     }

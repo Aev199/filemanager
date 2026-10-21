@@ -16,7 +16,7 @@ actions!(filemanager, [
     SplitRight, SplitDown, ClosePane, ReopenTab, PreviousPane, PaneLeft, PaneRight, PaneUp, PaneDown,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
-    LabelWork, LabelReview, LabelIssued, LabelObsolete, LabelImportant, LabelClear,
+    OpenJump, LabelWork, LabelReview, LabelIssued, LabelObsolete, LabelImportant, LabelClear,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -33,6 +33,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("enter", SettingsApply, Some("SettingsOverlay")),
         KeyBinding::new("escape", DismissOverlay, Some("SettingsOverlay")),
         KeyBinding::new("ctrl-k", OpenPalette, Some(CONTEXT)),
+        KeyBinding::new("ctrl-p", OpenJump, Some(CONTEXT)),
+        KeyBinding::new("ctrl-p", OpenJump, Some("CommandPalette > Input")),
         // Atlas opens its command list with Ctrl+Shift+P and toggles hidden files with Ctrl+.
         KeyBinding::new("ctrl-shift-p", OpenPalette, Some(CONTEXT)),
         KeyBinding::new("ctrl-.", ToggleHidden, Some(CONTEXT)),

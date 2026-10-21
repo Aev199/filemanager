@@ -2596,6 +2596,7 @@ impl Render for Explorer {
             .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Forward),cx.listener(|this,event: &MouseDownEvent,_,cx| this.mouse_history(event,true,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenPalette,window,cx|this.open_palette(window,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenSettings,window,cx|this.open_settings(window,cx)))
+            .on_action(cx.listener(|this,_: &keys::OpenJump,window,cx|this.open_jump(window,cx)))
             .on_action(cx.listener(|this,_: &keys::LabelWork,_,cx| this.key_label(Some(Label::Work), cx)))
             .on_action(cx.listener(|this,_: &keys::LabelReview,_,cx| this.key_label(Some(Label::Review), cx)))
             .on_action(cx.listener(|this,_: &keys::LabelIssued,_,cx| this.key_label(Some(Label::Issued), cx)))

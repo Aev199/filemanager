@@ -20,6 +20,7 @@ mod updates;
 mod icons;
 mod feed;
 mod labels;
+mod jump;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};

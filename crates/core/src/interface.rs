@@ -40,6 +40,8 @@ pub enum CommandId {
     Settings,
     Tour,
     Compare,
+    /// Ctrl+P: quick jump to a folder.
+    Jump,
     /// Sets (None: removes) the label of the selection.
     SetLabel(Option<crate::labels::Label>),
     /// Shows only items with the label in the active pane (None: all).
@@ -104,6 +106,7 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (Back, "Назад", "Alt+←", NAVIGATION),
         (Forward, "Вперёд", "Alt+→", NAVIGATION),
         (Up, "Вверх", "Alt+↑", NAVIGATION),
+        (Jump, "Быстрый переход к папке", "Ctrl+P", NAVIGATION),
         (Address, "Перейти по пути", "Ctrl+L", NAVIGATION),
         (Find, "Поиск файлов", "Ctrl+F", NAVIGATION),
         (Refresh, "Обновить папку", "F5", NAVIGATION),
