@@ -76,6 +76,11 @@ impl Pane {
 fn canonical_directory(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     // Windows canonicalize() returns verbatim `\\?\C:\...` paths. They work,
     // but must never reach breadcrumbs, tab titles or copied paths.
+    // A zip or 7z archive, or a folder in one, is browsed as a folder.
+    if let Some((archive, inner)) = crate::archive::split(path.as_ref()) {
+        let file = normalize_extended_path(&crate::path_utils::canonical(&archive)?);
+        return Ok(crate::archive::inner_path(&file, &inner));
+    }
     let path = normalize_extended_path(&crate::path_utils::canonical(path.as_ref())?);
     if !fs::metadata(&path)?.is_dir() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "Expected a directory"));

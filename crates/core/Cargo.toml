@@ -17,6 +17,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+zip = { version = "2", default-features = false, features = ["deflate", "deflate64"] }
+sevenz-rust2 = { version = "0.20", default-features = false, features = ["ppmd", "deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
@@ -25,3 +27,4 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 
 [dev-dependencies]
 tempfile = "3"
+sevenz-rust2 = { version = "0.20", default-features = false, features = ["ppmd", "deflate", "compress", "util"] }

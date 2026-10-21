@@ -27,6 +27,7 @@ pub(crate) struct FolderSizes {
 impl Explorer {
     /// Measures `paths` on request, network ones included, and reports the result.
     pub(crate) fn measure_folders(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|path| !filemanager_core::archive::is_inside(path)).collect();
         for path in paths.iter().rev() {
             self.sizes.known.insert(path.clone(), None);
             self.sizes.requested.insert(path.clone());
@@ -41,7 +42,8 @@ impl Explorer {
 
     /// List view of a local folder: its subfolders get sizes by themselves.
     pub(crate) fn auto_folder_sizes(&mut self, folder: &Path, cx: &mut Context<Self>) {
-        if self.sizes.scheduled.contains(folder) || filemanager_core::path_utils::is_network_path(folder) {
+        if self.sizes.scheduled.contains(folder) || filemanager_core::path_utils::is_network_path(folder)
+            || filemanager_core::archive::split(folder).is_some() {
             return;
         }
         let Some(listing) = self.directory_cache.get(folder) else { return };

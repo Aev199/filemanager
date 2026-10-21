@@ -387,6 +387,12 @@ impl Explorer {
     /// Enter / double-click: folders open in place, files in their
     /// associated Windows application.
     pub(crate) fn open_entry(&mut self, path: PathBuf, is_dir: bool, side: GroupId, cx: &mut Context<Self>) {
+        if !is_dir && filemanager_core::archive::is_inside(&path) {
+            self.open_from_archive(path, cx);
+            return;
+        }
+        // A zip or 7z opens as a folder (nested archives open from a copy).
+        let is_dir = is_dir || filemanager_core::archive::is_archive_name(&path);
         if is_dir {
             self.navigate_side(side, &path, None, cx);
             self.select_first_when_loaded = true;
@@ -512,6 +518,8 @@ impl Explorer {
 
     pub(crate) fn begin_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
+        let folder = self.pane_path(self.active_side());
+        if self.refuse_in_archive(&folder, cx) { return; }
         self.creating_folder = true;
         self.folder_input.update(cx, |input, cx| input.set_value("Новая папка", window, cx));
         let focus = self.folder_input.focus_handle(cx);

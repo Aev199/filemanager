@@ -60,12 +60,22 @@ impl Explorer {
         for place in &self.places { folders.add(place.path.clone(), "Места"); }
         // Deeper folders of the current folder and the favourites; network
         // favourites are left out, their reading could take minutes.
-        let mut roots = vec![current];
-        roots.extend(self.favorites.iter().filter(|path| !path_utils::is_network_path(path)).cloned());
+        let near = |path: &PathBuf| !path_utils::is_network_path(path) && filemanager_core::archive::split(path).is_none();
+        let mut roots = vec![current.clone()];
+        roots.extend(self.favorites.iter().filter(|path| near(path)).cloned());
+        // One level of the places, recent folders and the current folder's
+        // neighbours.
+        let mut shallow: Vec<PathBuf> = self.places.iter().map(|place| place.path.clone())
+            .chain(self.recent.iter().cloned()).chain(current.parent().map(PathBuf::from)).filter(|path| near(path)).collect();
+        shallow.dedup();
         folders.reading = true;
         self.open_palette_mode("Перейти к папке: несколько букв имени или путь…", Some(folders), window, cx);
         if self.palette.is_none() { return; }
-        let task = cx.background_spawn(async move { jump::subfolders(&roots, DEPTH, LIMIT) });
+        let task = cx.background_spawn(async move {
+            let mut found = jump::subfolders(&roots, DEPTH, LIMIT);
+            found.extend(jump::subfolders(&shallow, 1, LIMIT));
+            found
+        });
         cx.spawn(async move |this, cx| {
             let found = task.await;
             let _ = this.update(cx, |this, cx| {

@@ -21,6 +21,7 @@ mod icons;
 mod feed;
 mod labels;
 mod jump;
+mod archives;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -656,6 +657,10 @@ impl Explorer {
         let observe_history = self.watched_root.is_some();
         let selected_path = path.clone();
         let task = cx.background_spawn(async move {
+            // Inside an archive there is nothing on disk to read or record.
+            if filemanager_core::archive::is_inside(&path) {
+                return (Some(("archive".to_owned(), String::new())), Ok(Vec::new()), Vec::new());
+            }
             // Expensive network paths and a busy SQLite database may take
             // seconds. Neither can hold up GPUI painting or scrolling.
             let preview = match search::preview(&path, 1024) {
@@ -790,6 +795,11 @@ impl Explorer {
         if paths.is_empty() {
             return;
         }
+        if Self::any_in_archive(&paths) {
+            // Nothing is cut out of an archive: it is copied.
+            self.clipboard_from_archive(paths, cx);
+            return;
+        }
         self.status = match clipboard::write_files(&paths, cut) {
             Ok(()) if cut => format!("Вырезано: {} — вставьте в папке назначения (Ctrl+V)", paths.len()),
             Ok(()) => format!("Скопировано в буфер: {}", paths.len()),
@@ -814,8 +824,9 @@ impl Explorer {
                 return;
             }
         };
-        let Some(zone) = self.zone_of(&files.paths, cx) else { return };
         let target = self.browser.active().active().path.clone();
+        if self.refuse_in_archive(&target, cx) { return; }
+        let Some(zone) = self.zone_of(&files.paths, cx) else { return };
         if self.copy_in_progress || self.operation_busy {
             // Not consumed: the cut stays on the clipboard for a later paste.
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
@@ -835,6 +846,13 @@ impl Explorer {
     /// Hands dragged files to Windows once the cursor leaves the window, so
     /// they can be dropped into Explorer or any program that takes files.
     fn drag_out(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if Self::any_in_archive(&paths) {
+            if !self.dragging_out {
+                self.status = "Из архива перетаскивайте в папку внутри Papka или копируйте Ctrl+C → Ctrl+V".into();
+                cx.notify();
+            }
+            return;
+        }
         #[cfg(windows)]
         {
             if self.dragging_out || paths.is_empty() { return; }
@@ -874,6 +892,10 @@ impl Explorer {
         self.context_menu = None;
         self.right_drag = None;
         cx.notify();
+        if Self::any_in_archive(&paths) {
+            self.status = "Внутри архива меню Проводника нет: извлеките файлы".into();
+            return;
+        }
         #[cfg(windows)]
         {
             let Some(hwnd) = window_hwnd(window) else { return };
@@ -913,6 +935,12 @@ impl Explorer {
     }
 
     fn drop_into(&mut self, paths: &[PathBuf], folder: PathBuf, copy: bool, cx: &mut Context<Self>) {
+        if self.refuse_in_archive(&folder, cx) { return; }
+        // Out of an archive shown as a folder: extracted, never moved.
+        if Self::any_in_archive(paths) {
+            self.extract_into(paths.to_vec(), folder, cx);
+            return;
+        }
         // A placeholder from an archiver (7-Zip drags out a folder it fills
         // only when Windows copies it): Explorer's copy engine handles it.
         #[cfg(windows)]
@@ -990,6 +1018,10 @@ impl Explorer {
     /// folder makes numbered copies (as Explorer does); occupied names
     /// elsewhere ask the user. Nothing is ever replaced.
     fn request_transfer(&mut self, mut transfer: Transfer, cx: &mut Context<Self>) {
+        if self.refuse_in_archive(&transfer.target.clone(), cx) {
+            self.return_to_staging(&transfer);
+            return;
+        }
         if self.copy_in_progress || self.operation_busy {
             self.status = "Выполняется другая операция, дождитесь её завершения".into();
             self.return_to_staging(&transfer);
@@ -1292,6 +1324,11 @@ impl Explorer {
     }
 
     fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if Self::any_in_archive(&self.selection()) {
+            self.status = archives::READ_ONLY.into();
+            cx.notify();
+            return;
+        }
         if self.selection().len() > 1 { self.begin_bulk_rename(window, cx); return; }
         self.context_menu = None;
         let Some(path) = &self.selected else {
@@ -1512,6 +1549,11 @@ impl Explorer {
     }
 
     fn recycle(&mut self, cx: &mut Context<Self>) {
+        if Self::any_in_archive(&self.selection()) {
+            self.status = archives::READ_ONLY.into();
+            cx.notify();
+            return;
+        }
         if self.copy_in_progress || self.operation_busy {
             self.status = "Дождитесь завершения текущей операции".into();
             cx.notify();
@@ -1615,7 +1657,9 @@ impl Explorer {
 
     fn configure_live_watch(&self) {
         if let Some(watcher) = &self.watcher {
-            let folders = if self.search_active { Vec::new() } else { self.visible_directories() };
+            let mut folders = if self.search_active { Vec::new() } else { self.visible_directories() };
+            // Archives are not folders on disk: nothing to watch there.
+            folders.retain(|folder| filemanager_core::archive::split(folder).is_none());
             let journal = self.watched_root.as_ref().and(self.journal.clone());
             watcher.configure(folders, journal);
         }
@@ -1735,7 +1779,11 @@ impl Explorer {
         self.directory_loading.insert(folder.clone(), request);
         let task_path = folder.clone();
         let task = cx.background_spawn(async move {
-            browser::scan_directory(&task_path, 100_000)
+            // A zip or 7z archive, or a folder in one, reads as a folder.
+            match filemanager_core::archive::split(&task_path) {
+                Some((archive, inner)) => filemanager_core::archive::listing(&archive, &inner),
+                None => browser::scan_directory(&task_path, 100_000),
+            }
         });
         cx.spawn(async move |weak, cx| {
             let result = task.await;
@@ -1890,7 +1938,8 @@ fn main() {
         for entry in entries.flatten() {
             let old = entry.metadata().and_then(|metadata| metadata.modified()).ok()
                 .and_then(|time| time.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(24 * 60 * 60));
-            if old && entry.file_name().to_string_lossy().starts_with("papka-drop-") {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if old && (name.starts_with("papka-drop-") || name.starts_with(archives::TEMP_PREFIX)) {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }

@@ -5,7 +5,7 @@ impl Explorer {
         if self.inspector_thumbnail_busy || self.inspector_thumbnail.is_some() {
             return;
         }
-        let Some(path) = self.selected.clone().filter(|p| wants_shell_thumbnail(p)) else {
+        let Some(path) = self.selected.clone().filter(|p| wants_shell_thumbnail(p) && !filemanager_core::archive::is_inside(p)) else {
             return;
         };
         let request = self.inspector_request;

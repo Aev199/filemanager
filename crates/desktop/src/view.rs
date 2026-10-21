@@ -1585,7 +1585,7 @@ impl Explorer {
                 } else if let Some(Some(size)) = self.sizes.known.get(&entry.path) {
                     props = props.child(Self::property("Размер", format!("{}{}", if size.complete { "" } else { "не меньше " }, format_size(size.bytes))))
                         .child(Self::property("Содержит", format!("файлов: {}, папок: {}", size.files, size.folders)));
-                } else {
+                } else if !filemanager_core::archive::is_inside(&entry.path) {
                     let target = vec![entry.path.clone()];
                     props = props.child(div().child(text_button("inspector-measure", "Посчитать размер", ButtonKind::Ghost)
                         .on_click(cx.listener(move |this,_,_,cx| this.measure_folders(target.clone(), cx)))));
@@ -2051,6 +2051,37 @@ impl Explorer {
                                 this.context_menu = None;
                                 this.open_in_other_pane(&other_path, cx);
                             })));
+                }
+                // Archives: the whole one next to it, or what is chosen inside
+                // one into the other pane.
+                let in_archive = filemanager_core::archive::is_inside(path);
+                if !in_archive && !is_dir && filemanager_core::archive::is_archive_name(path) {
+                    let whole = path.clone();
+                    let stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+                    let program = path.clone();
+                    list = list.child(Self::menu_item("m-extract-here", "fm/archive.svg", format!("Извлечь в папку «{stem}»"), "", false, true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.context_menu = None;
+                            this.extract_archive_here(whole.clone(), cx);
+                        })))
+                        .child(Self::menu_item("m-open-archiver", "fm/external.svg", "Открыть в архиваторе", "", false, true)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.context_menu = None;
+                                if let Err(error) = open::that(&program) { this.status = format!("Не удалось открыть: {error}"); }
+                                cx.notify();
+                            })));
+                }
+                if in_archive {
+                    let other = self.browser.other_group(self.browser.active).map(|group| self.pane_path(group))
+                        .filter(|folder| !filemanager_core::archive::is_inside(folder) && filemanager_core::archive::split(folder).is_none());
+                    let chosen = if self.is_selected(path) { self.selection() } else { vec![path.clone()] };
+                    list = list.child(Self::menu_item("m-extract-other", "fm/archive.svg",
+                        match &other { Some(folder) => format!("Извлечь в «{}»", browser::display_name(folder)), None => "Извлечь: откройте папку во второй панели".into() },
+                        "", false, other.is_some())
+                        .when_some(other, |item, folder| item.on_click(cx.listener(move |this, _, _, cx| {
+                            this.context_menu = None;
+                            this.extract_into(chosen.clone(), folder.clone(), cx);
+                        }))));
                 }
                 let stage_target = self.selection();
                 let explorer_target = stage_target.clone();
