@@ -211,6 +211,8 @@ impl Explorer {
             Settings => self.open_settings(window, cx),
             Tour => self.open_tour(cx),
             Compare => self.open_comparison(cx),
+            SetLabel(label) => { let paths = self.selection(); self.set_label(paths, label, cx); }
+            FilterLabel(label) => self.set_label_filter(label, cx),
         }
     }
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -846,5 +848,7 @@ fn command_icon(id: CommandId) -> &'static str {
         Settings => "fm/settings.svg",
         Tour => "fm/help.svg",
         Compare => "fm/split.svg",
+        SetLabel(_) => "fm/tag.svg",
+        FilterLabel(_) => "fm/eye.svg",
     }
 }

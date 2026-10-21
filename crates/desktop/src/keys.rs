@@ -16,6 +16,7 @@ actions!(filemanager, [
     SplitRight, SplitDown, ClosePane, ReopenTab, PreviousPane, PaneLeft, PaneRight, PaneUp, PaneDown,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
+    LabelWork, LabelReview, LabelIssued, LabelObsolete, LabelImportant, LabelClear,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -77,6 +78,12 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-i", ToggleInspector, Some(CONTEXT)),
         KeyBinding::new("ctrl-1", ViewList, Some(CONTEXT)),
         KeyBinding::new("ctrl-2", ViewColumns, Some(CONTEXT)),
+        KeyBinding::new("alt-1", LabelWork, Some(CONTEXT)),
+        KeyBinding::new("alt-2", LabelReview, Some(CONTEXT)),
+        KeyBinding::new("alt-3", LabelIssued, Some(CONTEXT)),
+        KeyBinding::new("alt-4", LabelObsolete, Some(CONTEXT)),
+        KeyBinding::new("alt-5", LabelImportant, Some(CONTEXT)),
+        KeyBinding::new("alt-0", LabelClear, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-c", CopyPath, Some(CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
         KeyBinding::new("shift-down", ExtendNext, Some(CONTEXT)),
@@ -111,6 +118,8 @@ impl Explorer {
         let filter = if group == self.browser.active && folder == self.pane_path(group) { self.filter.clone() } else { String::new() };
         let spec = self.sort_for(group);
         let sizes = if spec.key == filemanager_core::sort::SortKey::Size { self.sizes.revision } else { 0 };
+        let label_filter = self.label_filter(group);
+        let labels_rev = if label_filter.is_some() { self.labels.revision } else { 0 };
         if let Some(view) = self.folder_views.get(&(group,folder.to_path_buf())) {
             if Arc::ptr_eq(&view.listing, &listing)
                 && view.spec == spec
@@ -118,6 +127,8 @@ impl Explorer {
                 && view.show_hidden == self.show_hidden
                 && view.filter == filter
                 && view.stacks_rev == self.stacks_rev
+                && view.label_filter == label_filter
+                && view.labels_rev == labels_rev
             {
                 return Some((listing, Arc::clone(&view.indices)));
             }
@@ -126,7 +137,11 @@ impl Explorer {
         let size = |entry: &browser::Entry| if entry.is_directory {
             known.get(&entry.path).copied().flatten().map(|s| s.bytes)
         } else { Some(entry.size) };
-        let indices = selection::visible_indices_with(&listing.entries,spec,self.show_hidden,&filter,&size);
+        let mut indices = selection::visible_indices_with(&listing.entries,spec,self.show_hidden,&filter,&size);
+        if let Some(label) = label_filter {
+            // Folders stay, so the way to labelled files stays open.
+            indices.retain(|&row| listing.entries[row].is_directory || self.label_of(&listing.entries[row].path) == Some(label));
+        }
         // Versions of one document fold into its newest file.
         let (indices, stacks) = if self.stack_versions {
             let name_of = |row: usize| { let entry = &listing.entries[row]; (!entry.is_directory).then(|| entry.name.clone()) };
@@ -145,6 +160,8 @@ impl Explorer {
             show_hidden: self.show_hidden,
             filter,
             stacks_rev: self.stacks_rev,
+            label_filter,
+            labels_rev,
             indices: Arc::clone(&indices),
             stacks: Arc::new(stacks),
         });

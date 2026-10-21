@@ -91,8 +91,12 @@ fn palette_searches_russian_words_and_gates_mutating_commands() {
     assert!(!rename.enabled(false, false));
     assert!(!rename.enabled(true, true));
     assert!(rename.enabled(true, false));
-    // Pane navigation adds twelve commands to the existing palette.
-    assert!(commands("").len() <= 36);
+    // Labels add twelve commands: five labels, removal, five filters, all.
+    assert!(commands("").len() <= 48);
+    let label = commands("метка «выдано»").into_iter().next().unwrap();
+    assert!(matches!(label.id, CommandId::SetLabel(Some(_))));
+    assert!(!label.enabled(false, false));
+    assert!(label.enabled(true, false));
 }
 
 #[test]

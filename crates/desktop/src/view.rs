@@ -10,6 +10,7 @@ use filemanager_core::format::{format_size, format_time, items_label, kind_label
 use filemanager_core::places::{containing_place, Place, PlaceKind};
 use filemanager_core::sort::SortKey;
 use filemanager_core::versions::Stacked;
+use filemanager_core::labels::Label;
 use gpui::{
     anchored, deferred, div, img, rgb_to_hsla, ObjectFit, ease_out_quint, prelude::*, px, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
@@ -1230,6 +1231,24 @@ impl Explorer {
                 Some(Stacked::Member { label, .. }) => name.child(badge(label.clone())),
                 None => name,
             };
+            // The work status: a dot, with its name where the list has room.
+            let name = match self.label_of(&path) {
+                Some(label) => {
+                    let color = crate::labels::color(label);
+                    let dot = div().size(px(8.)).flex_none().rounded_full().bg(gpui::rgb(color))
+                        .when(selected, |dot| dot.border_1().border_color(rgb(SELECTION_TEXT)));
+                    if list_mode {
+                        name.child(div().flex_none().h(px(16.)).px_1p5().flex().items_center().gap_1().rounded_full()
+                            .text_size(px(11.))
+                            .bg(if selected { gpui::rgba(0xFFFFFF2E) } else { gpui::rgba((color << 8) | 0x24) })
+                            .text_color(if selected { rgb(SELECTION_TEXT) } else { gpui::rgb(color) })
+                            .child(dot).child(label.name()))
+                    } else {
+                        name.child(dot)
+                    }
+                }
+                None => name,
+            };
             row.child(name)
         };
         if list_mode {
@@ -1522,7 +1541,10 @@ impl Explorer {
                 .child(div().flex().flex_col().gap_1p5()
                     .child(Self::property("Файлов", files.to_string()))
                     .child(Self::property("Папок", folders.to_string()))
-                    .child(Self::property("Размер", format!("{} (без папок)", format_size(bytes)))))
+                    .child(Self::property("Размер", format!("{} (без папок)", format_size(bytes))))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(84.)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
+                        .child(self.label_picker("group-label", marked.clone(), cx))))
                 .child(div().flex().gap_2()
                     .child(text_button("group-stage", "Отложить", ButtonKind::Ghost).flex_1()
                         .on_click(cx.listener(|this, _, _, cx| this.stage(cx))))
@@ -1571,6 +1593,9 @@ impl Explorer {
                 if let Some(modified) = entry.modified {
                     props = props.child(Self::property("Изменён", format_time(modified)));
                 }
+                props = props.child(div().flex().items_center().gap_2()
+                    .child(div().w(px(84.)).flex_none().text_color(rgb(TEXT_MUTED)).child("Метка"))
+                    .child(self.label_picker("inspector-label", vec![entry.path.clone()], cx)));
                 panel = panel.child(props);
                 let copy_target=entry.path.clone();let tip=entry.path.display().to_string();
                 panel=panel.child(div().flex().items_center().gap_1().min_w_0()
@@ -1809,6 +1834,16 @@ impl Explorer {
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
             .when_some(selection, |this, text| this.child(div().max_w(px(360.)).truncate().child(text)))
+            .when_some(self.label_filter(self.browser.active), |this, label| this.child(
+                div().id("label-filter").flex_none().h(px(20.)).pl_2().pr_1().flex().items_center().gap_1().rounded_full()
+                    .bg(gpui::rgba((crate::labels::color(label) << 8) | 0x2E)).text_color(rgb(TEXT))
+                    .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(crate::labels::color(label))))
+                    .child(format!("Только «{}»", label.name()))
+                    .child(div().id("label-filter-clear").size(px(16.)).rounded_full().flex().items_center().justify_center()
+                        .cursor_pointer().hover(|style| style.bg(rgb(HOVER)))
+                        .child(small_icon("fm/x.svg", TEXT_MUTED))
+                        .tooltip(|window, cx| Tooltip::new("Показать все файлы").build(window, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.set_label_filter(None, cx))))))
             .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_DIM))
                 .child(crate::messages::localize(&self.status)));
         if self.copy_in_progress {
@@ -1891,6 +1926,46 @@ impl Explorer {
 
     fn separator() -> Div {
         div().my_1().h(px(1.)).bg(rgb(BORDER))
+    }
+
+    /// Five coloured dots and a cross: sets or removes the label of `paths`.
+    fn label_picker(&self, id: &'static str, paths: Vec<PathBuf>, cx: &mut Context<Self>) -> Div {
+        let current = match paths.as_slice() {
+            [single] => self.label_of(single),
+            many => many.first().and_then(|first| self.label_of(first))
+                .filter(|label| many.iter().all(|path| self.label_of(path) == Some(*label))),
+        };
+        let any = paths.iter().any(|path| self.label_of(path).is_some());
+        let paths = std::sync::Arc::new(paths);
+        let mut row = div().flex().items_center().gap_1();
+        for (index, label) in Label::ALL.into_iter().enumerate() {
+            let paths = std::sync::Arc::clone(&paths);
+            let chosen = current == Some(label);
+            row = row.child(div().id((id, index)).size(px(18.)).flex_none().rounded_full().cursor_pointer()
+                .flex().items_center().justify_center()
+                .border_2().border_color(if chosen { rgb(TEXT) } else { gpui::rgba(0) })
+                .child(div().size(px(12.)).rounded_full().bg(gpui::rgb(crate::labels::color(label))))
+                .tooltip(move |window, cx| Tooltip::new(format!("{} (Alt+{})", label.name(), index + 1)).build(window, cx))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.context_menu = None;
+                    this.set_label(paths.to_vec(), Some(label), cx);
+                })));
+        }
+        if any {
+            row = row.child(div().id((id, 9usize)).size(px(18.)).flex_none().rounded_full().cursor_pointer()
+                .flex().items_center().justify_center().hover(|style| style.bg(rgb(HOVER)))
+                .child(small_icon("fm/x.svg", TEXT_DIM))
+                .tooltip(|window, cx| Tooltip::new("Снять метку (Alt+0)").build(window, cx))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.context_menu = None;
+                    this.set_label(paths.to_vec(), None, cx);
+                })));
+        }
+        row
     }
 
     fn context_menu_view(&self, menu: &ContextMenu, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2012,6 +2087,16 @@ impl Explorer {
                             if n > 1 { format!("Посчитать размер ({n})") } else { "Посчитать размер".into() }, "", false, n > 0)
                             .when(n > 0, |item| item.on_click(cx.listener(move |this, _, _, cx| this.measure_folders(folders.clone(), cx)))))
                     })
+                    .child(div().h(px(30.)).flex_none().px_2().flex().items_center().gap_2().text_size(px(13.))
+                        .child(small_icon("fm/tag.svg", TEXT_MUTED))
+                        .child(div().flex_1().child(if count > 1 { format!("Метка ({count})") } else { "Метка".into() }))
+                        .child(self.label_picker("m-label", copy_paths.clone(), cx)))
+                    .when_some(self.label_of(path), |list, label| list.child(Self::menu_item("m-label-filter", "fm/eye.svg",
+                        format!("Показать только «{}»", label.name()), "", false, true)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.context_menu = None;
+                            this.set_label_filter(Some(label), cx);
+                        }))))
                     .child(Self::menu_item("m-stage", "fm/inbox.svg",
                         if count > 1 { format!("Отложить для переноса ({count})") } else { "Отложить для переноса".into() }, "Ctrl+Shift+D", false, true)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2511,6 +2596,12 @@ impl Render for Explorer {
             .on_mouse_down(MouseButton::Navigate(gpui::NavigationDirection::Forward),cx.listener(|this,event: &MouseDownEvent,_,cx| this.mouse_history(event,true,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenPalette,window,cx|this.open_palette(window,cx)))
             .on_action(cx.listener(|this,_: &keys::OpenSettings,window,cx|this.open_settings(window,cx)))
+            .on_action(cx.listener(|this,_: &keys::LabelWork,_,cx| this.key_label(Some(Label::Work), cx)))
+            .on_action(cx.listener(|this,_: &keys::LabelReview,_,cx| this.key_label(Some(Label::Review), cx)))
+            .on_action(cx.listener(|this,_: &keys::LabelIssued,_,cx| this.key_label(Some(Label::Issued), cx)))
+            .on_action(cx.listener(|this,_: &keys::LabelObsolete,_,cx| this.key_label(Some(Label::Obsolete), cx)))
+            .on_action(cx.listener(|this,_: &keys::LabelImportant,_,cx| this.key_label(Some(Label::Important), cx)))
+            .on_action(cx.listener(|this,_: &keys::LabelClear,_,cx| this.key_label(None, cx)))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_back(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_forward(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_up(this,event,window,cx); } }))

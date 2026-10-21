@@ -40,6 +40,10 @@ pub enum CommandId {
     Settings,
     Tour,
     Compare,
+    /// Sets (None: removes) the label of the selection.
+    SetLabel(Option<crate::labels::Label>),
+    /// Shows only items with the label in the active pane (None: all).
+    FilterLabel(Option<crate::labels::Label>),
 }
 #[derive(Clone, Copy)]
 pub struct CommandSpec {
@@ -54,6 +58,7 @@ impl CommandSpec {
         match self.id {
             CommandId::Rename => has_selection && !busy,
             CommandId::NewFolder => !busy,
+            CommandId::SetLabel(_) => has_selection,
             _ => true,
         }
     }
@@ -65,6 +70,20 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
     const NAVIGATION: &str = "Навигация";
     const FILES: &str = "Файлы";
     const VIEW: &str = "Вид";
+    const LABELS: &str = "Метки";
+    use crate::labels::Label;
+    const SET: [(&str, &str); 5] = [
+        ("Метка «В работе»", "Alt+1"), ("Метка «На согласовании»", "Alt+2"), ("Метка «Выдано»", "Alt+3"),
+        ("Метка «Устарело»", "Alt+4"), ("Метка «Важно»", "Alt+5"),
+    ];
+    const FILTER: [&str; 5] = [
+        "Показать только «В работе»", "Показать только «На согласовании»", "Показать только «Выдано»",
+        "Показать только «Устарело»", "Показать только «Важно»",
+    ];
+    let labels = Label::ALL.into_iter().zip(SET).map(|(label, (name, keys))| (SetLabel(Some(label)), name, keys, LABELS))
+        .chain([(SetLabel(None), "Снять метку", "Alt+0", LABELS)])
+        .chain(Label::ALL.into_iter().zip(FILTER).map(|(label, name)| (FilterLabel(Some(label)), name, "", LABELS)))
+        .chain([(FilterLabel(None), "Показать все файлы, без отбора по метке", "", LABELS)]);
     [
         (NewTab, "Новая вкладка", "Ctrl+T", TABS),
         (CloseTab, "Закрыть вкладку", "Ctrl+W", TABS),
@@ -100,6 +119,7 @@ pub fn commands(query: &str) -> Vec<CommandSpec> {
         (Tour, "Экскурс по возможностям", "", VIEW),
     ]
     .into_iter()
+    .chain(labels)
     .map(|(id, label, shortcut, group)| CommandSpec {
         id,
         label,

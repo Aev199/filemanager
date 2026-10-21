@@ -7,6 +7,7 @@ use gpui::{AssetSource, Result, SharedString};
 
 const ICONS: &[(&str, &[u8])] = &[
     ("fm/star.svg", include_bytes!("../assets/fm/star.svg")),
+    ("fm/tag.svg", include_bytes!("../assets/fm/tag.svg")),
     ("fm/settings.svg", include_bytes!("../assets/fm/settings.svg")),
     ("fm/help.svg", include_bytes!("../assets/fm/help.svg")),
     ("fm/window-minimize.svg", include_bytes!("../assets/fm/window-minimize.svg")),

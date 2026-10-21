@@ -69,6 +69,13 @@ impl Event {
     }
 }
 
+/// Whether a file seen for the first time goes to the feed: when it was
+/// just created (copies keep their old write time) or just written. An old
+/// file merely opened or previewed is not news, nor an old version of it.
+fn first_sighting_is_news(just_created: bool, recently_written: bool) -> bool {
+    just_created || recently_written
+}
+
 /// Local midnight `days` days ago, in the journal's milliseconds.
 pub fn days_ago_ms(days: i64) -> i64 {
     let day = chrono::Local::now().date_naive() - chrono::Duration::days(days);
@@ -182,6 +189,15 @@ impl Journal {
         tx.execute("INSERT INTO observed(path,size,modified_ns) VALUES(?1,?2,?3)
                     ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ns=excluded.modified_ns",
             params![path, size, modified]).map_err(sqlite_error)?;
+        // An old file seen for the first time (opened, previewed, its
+        // attributes touched) was not changed: it only gets a baseline.
+        let recently_written = metadata.modified().ok()
+            .and_then(|written| SystemTime::now().duration_since(written).ok())
+            .is_none_or(|age| age.as_secs() < 120);
+        if old.is_none() && !first_sighting_is_news(just_created, recently_written) {
+            tx.commit().map_err(sqlite_error)?;
+            return Ok(false);
+        }
         let event_time = clock_ms(SystemTime::now());
         // One Ctrl+S can emit many rapid MODIFY signals, and a file being
         // created is often first seen empty and then written. Merge such
@@ -383,6 +399,13 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn an_old_file_seen_first_is_not_a_change() {
+        assert!(!first_sighting_is_news(false, false));
+        assert!(first_sighting_is_news(true, false));
+        assert!(first_sighting_is_news(false, true));
+    }
+
     #[test]
     fn saving_as_next_version_is_a_new_version_of_one_document() {
         let temp = tempfile::tempdir().unwrap();

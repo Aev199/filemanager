@@ -19,6 +19,7 @@ mod search_panel;
 mod updates;
 mod icons;
 mod feed;
+mod labels;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -199,6 +200,9 @@ struct FolderView {
     filter: String,
     /// Version stacks as they were when sorted (see `stacks_rev`).
     stacks_rev: u64,
+    /// The label shown alone, and the labels as they were when filtered.
+    label_filter: Option<filemanager_core::labels::Label>,
+    labels_rev: u64,
     indices: Arc<Vec<usize>>,
     /// Rows that head or belong to a stack of versions.
     stacks: Arc<HashMap<PathBuf, filemanager_core::versions::Stacked>>,
@@ -252,6 +256,7 @@ struct Explorer {
     updates: updates::Updates,
     icons: icons::Icons,
     feed: feed::Feed,
+    labels: labels::LabelState,
     /// Step of the feature tour, while it is shown.
     tour: Option<usize>,
     menu_serial: u64,
@@ -532,7 +537,7 @@ impl Explorer {
             copy_control: None,
             retry: None,
             context_menu: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(), labels: labels::LabelState::open(),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -1373,6 +1378,7 @@ impl Explorer {
     }
 
     fn push_undo(&mut self, receipts: Vec<Receipt>, label: String) {
+        self.follow_labels(&receipts, false);
         let all_reversible = receipts.iter().all(Receipt::can_undo);
         let receipts: Vec<_> = receipts.into_iter().filter(Receipt::can_undo).collect();
         if !all_reversible {
@@ -1421,9 +1427,11 @@ impl Explorer {
             let mut warnings: Vec<String> = Vec::new();
             let queue = OperationQueue::default();
             let mut remaining = Vec::new();
+            let mut undone = Vec::new();
             for receipt in undo.receipts.iter().rev() {
                 match queue.undo_completed_audited(receipt, &audit) {
                     Ok(outcome) => {
+                        undone.push(receipt.clone());
                         touched.push(receipt.source.clone());
                         touched.extend(receipt.destination.clone());
                         touched.extend(outcome.restored_path);
@@ -1438,12 +1446,13 @@ impl Explorer {
             // Original order, so another Ctrl+Z retries only failed items,
             // in reverse execution order. Successful items are never replayed.
             remaining.reverse();
-            (touched, errors, remaining, warnings, undo.unavailable)
+            (touched, errors, remaining, warnings, undo.unavailable, undone)
         });
         cx.spawn(async move |weak, cx| {
-            let (touched, errors, remaining, warnings, unavailable) = task.await;
+            let (touched, errors, remaining, warnings, unavailable, undone) = task.await;
             let _ = weak.update(cx, |this, cx| {
                 this.operation_busy = false;
+                this.follow_labels(&undone, true);
                 for path in &touched {
                     this.refresh_parent_of(path, cx);
                 }
