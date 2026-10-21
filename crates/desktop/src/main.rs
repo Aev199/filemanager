@@ -18,6 +18,7 @@ mod spring;
 mod search_panel;
 mod updates;
 mod icons;
+mod feed;
 
 use filemanager_core::browser;
 use filemanager_core::panes::{Workspace, GroupId, Edge};
@@ -46,6 +47,7 @@ use std::time::Duration;
 
 
 struct ColumnResize {
+    group: GroupId,
     start_x: Pixels,
     start_width: f32,
 }
@@ -124,6 +126,7 @@ fn normalized(path: Option<PathBuf>) -> Option<PathBuf> {
 const TOUR_SEEN: &str = "tour_seen";
 const LIST_WIDTHS: &str = "list_widths";
 const COLUMN_WIDTH: &str = "column_width";
+const STACK_VERSIONS: &str = "stack_versions";
 const DEFAULT_LIST_WIDTHS: [f32; 3] = [140., 110., 90.];
 pub(crate) const LIST_WIDTH_RANGE: (f32, f32) = (60., 400.);
 
@@ -194,7 +197,11 @@ struct FolderView {
     sizes: u64,
     show_hidden: bool,
     filter: String,
+    /// Version stacks as they were when sorted (see `stacks_rev`).
+    stacks_rev: u64,
     indices: Arc<Vec<usize>>,
+    /// Rows that head or belong to a stack of versions.
+    stacks: Arc<HashMap<PathBuf, filemanager_core::versions::Stacked>>,
 }
 
 struct Explorer {
@@ -244,6 +251,7 @@ struct Explorer {
     about_open: bool,
     updates: updates::Updates,
     icons: icons::Icons,
+    feed: feed::Feed,
     /// Step of the feature tour, while it is shown.
     tour: Option<usize>,
     menu_serial: u64,
@@ -282,11 +290,19 @@ struct Explorer {
     /// Shared width of Miller columns, changed by dragging any column edge.
     column_width: f32,
     column_resize: Option<ColumnResize>,
+    /// Each pane's own column width; `column_width` (the last set) starts new ones.
+    pane_column_widths: HashMap<GroupId, f32>,
     /// Widths of the list columns Изменён, Тип, Размер; the name takes the rest.
     list_widths: [f32; 3],
     /// Dragging a list column border: column, start x, start width.
     /// Each pane's own list columns; `list_widths` (the last set) starts new ones.
     pane_list_widths: HashMap<GroupId, [f32; 3]>,
+    /// Version stacks opened by the user: (folder, family key).
+    open_stacks: HashSet<(PathBuf, String)>,
+    /// Bumped when stacks open or close, or grouping is switched.
+    stacks_rev: u64,
+    /// Versions of a document shown as one row (setting).
+    stack_versions: bool,
     list_resize: Option<(GroupId, usize, Pixels, f32)>,
     tab_scroll: HashMap<GroupId, gpui::ScrollHandle>,
     tab_reveal: HashMap<GroupId, (usize, usize)>,
@@ -313,7 +329,6 @@ struct Explorer {
     workspaces: Option<WorkspaceStore>,
     favorites: Vec<PathBuf>,
     saved_layout: String,
-    history_expanded: bool,
     versions_expanded: bool,
     project_error: Option<String>,
     close_error: Option<String>,
@@ -477,6 +492,8 @@ impl Explorer {
         let session_restore_error = restored.err().map(|e|e.to_string());
         let prefs_error = session_restore_error.as_ref().map(|e|format!("Проект не восстановлен: {e}")).or(prefs_error);
         let favorites = workspaces.as_ref().and_then(|s|s.favorites().ok()).unwrap_or_default();
+        let stack_versions = workspaces.as_ref().and_then(|store| store.value(STACK_VERSIONS).ok().flatten())
+            .is_none_or(|flag| flag != "0");
         let system_icons = workspaces.as_ref().and_then(|store| store.value(icons::ENABLED_KEY).ok().flatten())
             .is_none_or(|flag| flag != "0");
         let search_depth = workspaces.as_ref().and_then(|store| store.value(search_panel::DEPTH_KEY).ok().flatten())
@@ -510,7 +527,7 @@ impl Explorer {
             copy_control: None,
             retry: None,
             context_menu: None,
-            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons),
+            right_drag: None, file_drag: false, drag_paths: Vec::new(), spring: None, spring_generation: 0, dragging_out: false, about_open: false, updates: updates::Updates::load(workspaces.as_ref()), icons: icons::Icons::new(system_icons), feed: feed::Feed::new(),
             menu_serial: 0,
             focus_handle,
             places: projects::arrange_places(&places::user_places(),
@@ -552,9 +569,11 @@ impl Explorer {
                 .and_then(|text| text.parse::<f32>().ok()).filter(|width| width.is_finite())
                 .map_or(crate::layout::COLUMN_DEFAULT, |width| width.clamp(crate::layout::COLUMN_MIN, crate::layout::COLUMN_MAX)),
             column_resize: None,
+            pane_column_widths: HashMap::new(),
             list_widths: workspaces.as_ref().and_then(|store| store.value(LIST_WIDTHS).ok().flatten())
                 .and_then(|text| parse_widths(&text)).unwrap_or(DEFAULT_LIST_WIDTHS),
             pane_list_widths: HashMap::new(),
+            open_stacks: HashSet::new(), stacks_rev: 0, stack_versions,
             list_resize: None,
             tab_scroll: HashMap::new(),
             tab_reveal: HashMap::new(),
@@ -573,7 +592,7 @@ impl Explorer {
             directory_cache_order: VecDeque::new(),
             directory_request: 0,
             tour: workspaces.as_ref().and_then(|store| store.flag(TOUR_SEEN).ok()).is_some_and(|seen| !seen).then_some(0),
-            workspaces, favorites, saved_layout: String::new(), history_expanded: false, versions_expanded: false, project_error: None, close_error: None, session_restore_error,
+            workspaces, favorites, saved_layout: String::new(), versions_expanded: false, project_error: None, close_error: None, session_restore_error,
             journal: None,
             operation_journal,
             operation_review: false,
@@ -632,9 +651,9 @@ impl Explorer {
             };
             let history = match history_journal.as_ref() {
                 Some(journal) => {
-                    if observe_history {
-                        journal.observe(&path).and_then(|_| journal.family_events(&path, 8))
-                    } else { journal.family_events(&path, 8) }
+                    // The feed shows the history now; selecting a file still
+                    // records its state, so the next change of it is noticed.
+                    if observe_history { journal.observe(&path).map(|_| Vec::new()) } else { Ok(Vec::new()) }
                 }
                 None => Ok(Vec::new()),
             };
@@ -1577,49 +1596,6 @@ impl Explorer {
         }).detach();
     }
 
-    fn save_comment(&mut self, cx: &mut Context<Self>) {
-        let Some(event_id) = self.selected_history_event else {
-            self.status = "Сначала выберите запись истории".into();
-            cx.notify();
-            return;
-        };
-        let comment = self.comment_input.read(cx).value().to_string();
-        let author = self.author_input.read(cx).value().to_string();
-        self.status = match &self.journal {
-            Some(journal) => match journal.annotate(
-                event_id,
-                if author.trim().is_empty() { None } else { Some(author.trim()) },
-                comment.trim()
-            ) {
-                Ok(true) => format!("Комментарий сохранён (#{event_id})"),
-                Ok(false) => "Запись истории больше не существует".into(),
-                Err(error) => format!("Комментарий не сохранён: {error}"),
-            },
-            None => "История недоступна".into(),
-        };
-        // Reload the newly annotated row without querying SQLite on Render.
-        self.inspector_path = None;
-        cx.notify();
-    }
-
-    fn watch(&mut self, cx: &mut Context<Self>) {
-        if self.watched_root.is_some() {
-            self.watched_root = None;
-            self.history_paused = true;
-            self.status = "Запись истории остановлена".into();
-        } else if self.journal.is_some() {
-            self.watched_root = Some(self.browser.active().active().path.clone());
-            self.history_paused = false;
-            self.inspector_dirty = true;
-            self.status = "История записывается".into();
-        } else {
-            self.status = self.live_watch_error.clone()
-                .unwrap_or_else(|| "История ещё загружается".into());
-        }
-        self.configure_live_watch();
-        cx.notify();
-    }
-
     fn configure_live_watch(&self) {
         if let Some(watcher) = &self.watcher {
             let folders = if self.search_active { Vec::new() } else { self.visible_directories() };
@@ -1684,6 +1660,7 @@ impl Explorer {
                         this.unwatched_folders = unwatched;
                         cx.notify();
                     }
+                    if changes.refresh_all || !changes.paths.is_empty() { this.feed.dirty = true; }
                     if changes.refresh_all || this.selected.as_ref().is_some_and(|selected| {
                         changes.paths.iter().any(|path| selected == path || selected.starts_with(path))
                     }) {

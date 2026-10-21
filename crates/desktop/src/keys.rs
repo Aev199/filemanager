@@ -117,6 +117,7 @@ impl Explorer {
                 && view.sizes == sizes
                 && view.show_hidden == self.show_hidden
                 && view.filter == filter
+                && view.stacks_rev == self.stacks_rev
             {
                 return Some((listing, Arc::clone(&view.indices)));
             }
@@ -126,6 +127,16 @@ impl Explorer {
             known.get(&entry.path).copied().flatten().map(|s| s.bytes)
         } else { Some(entry.size) };
         let indices = selection::visible_indices_with(&listing.entries,spec,self.show_hidden,&filter,&size);
+        // Versions of one document fold into its newest file.
+        let (indices, stacks) = if self.stack_versions {
+            let name_of = |row: usize| { let entry = &listing.entries[row]; (!entry.is_directory).then(|| entry.name.clone()) };
+            let open = |key: &str| self.open_stacks.contains(&(folder.to_path_buf(), key.to_owned()));
+            let (order, roles) = filemanager_core::versions::stack(&indices, &name_of, &open);
+            let roles = roles.into_iter().map(|(row, role)| (listing.entries[row].path.clone(), role)).collect();
+            (order, roles)
+        } else {
+            (indices, std::collections::HashMap::new())
+        };
         let indices = Arc::new(indices);
         self.folder_views.insert((group,folder.to_path_buf()), FolderView {
             listing: Arc::clone(&listing),
@@ -133,9 +144,35 @@ impl Explorer {
             sizes,
             show_hidden: self.show_hidden,
             filter,
+            stacks_rev: self.stacks_rev,
             indices: Arc::clone(&indices),
+            stacks: Arc::new(stacks),
         });
         Some((listing, indices))
+    }
+
+    /// The stack role of a row in `folder` as shown in `group`.
+    pub(crate) fn stack_role(&self, group: GroupId, folder: &Path, path: &Path) -> Option<filemanager_core::versions::Stacked> {
+        self.folder_views.get(&(group, folder.to_path_buf()))?.stacks.get(path).cloned()
+    }
+
+    /// Opens or closes the stack of versions `key` in `folder`.
+    pub(crate) fn toggle_stack(&mut self, folder: &Path, key: &str, cx: &mut Context<Self>) {
+        let id = (folder.to_path_buf(), key.to_owned());
+        if !self.open_stacks.remove(&id) { self.open_stacks.insert(id); }
+        self.stacks_rev += 1;
+        cx.notify();
+    }
+
+    pub(crate) fn set_stack_versions(&mut self, enabled: bool) {
+        if self.stack_versions == enabled { return; }
+        self.stack_versions = enabled;
+        self.stacks_rev += 1;
+        if let Some(store) = &self.workspaces { let _ = store.set_value(crate::STACK_VERSIONS, if enabled { "1" } else { "0" }); }
+    }
+
+    pub(crate) fn column_width_for(&self, group: GroupId) -> f32 {
+        self.pane_column_widths.get(&group).copied().unwrap_or(self.column_width)
     }
 
     pub(crate) fn list_widths_for(&self, group: GroupId) -> [f32; 3] {
@@ -511,7 +548,7 @@ impl Explorer {
         self.dock_hover=None;
         if cx.stop_active_drag(window) { cx.notify(); return; }
         if let Some(resize) = self.column_resize.take() {
-            self.column_width = resize.start_width;
+            self.pane_column_widths.insert(resize.group, resize.start_width);
             cx.notify();
             return;
         }
@@ -625,6 +662,7 @@ impl Explorer {
         if self.dock_hover.is_some_and(|(id,_)|!ids.contains(&id)) {self.dock_hover=None;}
         self.pane_measured_widths.retain(|id,_|ids.contains(id));
         self.pane_list_widths.retain(|id,_|ids.contains(id));
+        self.pane_column_widths.retain(|id,_|ids.contains(id));
         self.column_scroll_handles.retain(|id,_|ids.contains(id));
         self.column_reveal_keys.retain(|id,_|ids.contains(id));
         self.scroll_handles.retain(|(id,_),_|ids.contains(id));

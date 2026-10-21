@@ -34,11 +34,47 @@ impl Event {
         }
     }
 
+    /// The label in a folder's feed of changes.
+    pub fn feed_label(&self) -> &str {
+        match self.kind.as_str() {
+            "observed" => "Новый файл",
+            "modified" => "Изменён",
+            "missing" => "Удалён или перемещён",
+            "version" => "Новая версия",
+            other => other,
+        }
+    }
+
+    /// "Сегодня", "Вчера" or "14.10.2026": the day heading in a feed.
+    pub fn day_label(&self) -> String {
+        let Some(time) = DateTime::<Utc>::from_timestamp_millis(self.observed_ms) else { return "Дата неизвестна".into() };
+        let day = time.with_timezone(&chrono::Local).date_naive();
+        let today = chrono::Local::now().date_naive();
+        if day == today { "Сегодня".into() }
+        else if today.pred_opt() == Some(day) { "Вчера".into() }
+        else { day.format("%d.%m.%Y").to_string() }
+    }
+
+    /// "14:20" in local time.
+    pub fn clock_label(&self) -> String {
+        DateTime::<Utc>::from_timestamp_millis(self.observed_ms)
+            .map(|utc| utc.with_timezone(&chrono::Local).format("%H:%M").to_string())
+            .unwrap_or_default()
+    }
+
     pub fn display_time(&self) -> String {
         DateTime::<Utc>::from_timestamp_millis(self.observed_ms)
             .map(|utc| utc.with_timezone(&chrono::Local).format("%d.%m.%Y %H:%M:%S").to_string())
             .unwrap_or_else(|| "время неизвестно".into())
     }
+}
+
+/// Local midnight `days` days ago, in the journal's milliseconds.
+pub fn days_ago_ms(days: i64) -> i64 {
+    let day = chrono::Local::now().date_naive() - chrono::Duration::days(days);
+    day.and_hms_opt(0, 0, 0)
+        .and_then(|midnight| midnight.and_local_timezone(chrono::Local).earliest())
+        .map_or(0, |time| time.timestamp_millis())
 }
 
 fn clock_ms(t: SystemTime) -> i64 {
@@ -68,7 +104,9 @@ fn ignored(path: &Path) -> bool {
         }
     }
     let Some(name) = path.file_name().map(|x| x.to_string_lossy().to_lowercase()) else { return true; };
-    name.starts_with("~$") || name.ends_with(".tmp") || name.ends_with(".part") || name.ends_with(".swp") || name.ends_with(".fm-partial")
+    // Lock files of AutoCAD, Access and others come and go with every open.
+    name.starts_with("~$") || name.starts_with(".~lock.") || name.starts_with(".papka-replacing-")
+        || [".tmp", ".part", ".swp", ".fm-partial", ".dwl", ".dwl2", ".lck", ".ldb", ".laccdb"].iter().any(|ext| name.ends_with(ext))
 }
 
 impl Journal {
@@ -135,7 +173,12 @@ impl Journal {
         let new_version = old.is_none()
             && Path::new(&path).file_name().is_some_and(|name| crate::versions::is_versioned(&name.to_string_lossy()))
             && crate::versions::previous(Path::new(&path)).ok().flatten().is_some();
-        let kind = if new_version { "version" } else if old.is_none() { "observed" } else { "modified" };
+        // A file seen for the first time is new only if it was just created;
+        // an older file first seen because it changed was modified.
+        let just_created = metadata.created().ok()
+            .and_then(|created| SystemTime::now().duration_since(created).ok())
+            .is_none_or(|age| age.as_secs() < 120);
+        let kind = if new_version { "version" } else if old.is_none() && just_created { "observed" } else { "modified" };
         tx.execute("INSERT INTO observed(path,size,modified_ns) VALUES(?1,?2,?3)
                     ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ns=excluded.modified_ns",
             params![path, size, modified]).map_err(sqlite_error)?;
@@ -169,6 +212,13 @@ impl Journal {
         let mut connection = self.connect()?;
         let tx = connection.transaction().map_err(sqlite_error)?;
         let removed = tx.execute("DELETE FROM observed WHERE path=?1", params![path]).map_err(sqlite_error)?;
+        // Also a file never seen before (deleted before it changed while
+        // shown), unless its last event already says it is gone.
+        let already_gone = removed == 0 && tx.query_row(
+            "SELECT kind FROM events WHERE path=?1 ORDER BY id DESC LIMIT 1",
+            params![path], |row| row.get::<_, String>(0),
+        ).optional().map_err(sqlite_error)?.is_some_and(|kind| kind == "missing");
+        let removed = if already_gone { 0 } else { 1 };
         if removed != 0 {
             tx.execute("INSERT INTO events(path,kind,observed_ms,recorded_by) VALUES(?1,'missing',?2,?3)",
                 params![path, clock_ms(SystemTime::now()), observer()]).map_err(sqlite_error)?;
@@ -249,6 +299,32 @@ impl Journal {
         Ok(events)
     }
 
+    /// What changed in `folder` and its subfolders since `since_ms`
+    /// (everything when None), newest first: the feed of a folder.
+    pub fn folder_events(&self, folder: &Path, since_ms: Option<i64>, limit: usize) -> io::Result<Vec<Event>> {
+        let mut prefix = folder.to_string_lossy().into_owned();
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let mut upper = prefix.clone();
+        upper.push(char::MAX);
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT id,path,kind,observed_ms,recorded_by,author,comment
+               FROM events WHERE path >= ?1 AND path < ?2 AND observed_ms >= ?3
+              ORDER BY observed_ms DESC, id DESC LIMIT ?4",
+        ).map_err(sqlite_error)?;
+        let mapped = statement.query_map(
+            params![prefix, upper, since_ms.unwrap_or(0), limit.min(5000) as i64],
+            |row| Ok(Event {
+                id: row.get(0)?, path: PathBuf::from(row.get::<_, String>(1)?),
+                kind: row.get(2)?, observed_ms: row.get(3)?, recorded_by: row.get(4)?,
+                author: row.get(5)?, comment: row.get(6)?,
+            }),
+        ).map_err(sqlite_error)?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)
+    }
+
     /// Optional initial snapshot of metadata, limited to avoid a full-disk scan.
     pub fn establish_baseline(&self, root: &Path, max_files: usize) -> io::Result<usize> {
         if !root.is_dir() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "Not a folder")); }
@@ -282,6 +358,30 @@ impl HistoryWatch {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folder_feed_covers_subfolders_newest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path().join("history.sqlite3")).unwrap();
+        let root = temp.path().join("Проект");
+        std::fs::create_dir_all(root.join("Расчёты")).unwrap();
+        let near = root.join("Отчёт.docx");
+        let deep = root.join("Расчёты").join("Модель.lir");
+        let outside = temp.path().join("Проект 2").join("x.txt");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        for path in [&near, &deep, &outside] {
+            std::fs::write(path, b"1").unwrap();
+            journal.observe(path).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&near, b"22").unwrap();
+        journal.observe(&near).unwrap();
+        let feed = journal.folder_events(&root, None, 100).unwrap();
+        let shown: Vec<(&str, String)> = feed.iter().map(|event| (event.kind.as_str(), event.path.file_name().unwrap().to_string_lossy().into_owned())).collect();
+        assert_eq!(shown, [("modified", "Отчёт.docx".to_string()), ("observed", "Модель.lir".to_string()), ("observed", "Отчёт.docx".to_string())]);
+        let future = feed[0].observed_ms + 60_000;
+        assert!(journal.folder_events(&root, Some(future), 100).unwrap().is_empty());
+    }
+
     use super::*;
     #[test]
     fn saving_as_next_version_is_a_new_version_of_one_document() {

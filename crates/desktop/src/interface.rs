@@ -29,6 +29,7 @@ pub(crate) struct Settings {
     pub update_folder: Option<std::path::PathBuf>,
     pub update_share: bool,
     pub system_icons: bool,
+    pub stack_versions: bool,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -195,6 +196,7 @@ impl Explorer {
             update_folder: self.updates.folder.clone(),
             update_share: self.updates.share,
             system_icons: self.icons.enabled,
+            stack_versions: self.stack_versions,
             saving: false,
             error: None,
         });
@@ -250,6 +252,7 @@ impl Explorer {
         let (update_auto, update_channel) = (settings.update_auto, settings.update_channel);
         let (update_folder, update_share) = (settings.update_folder.clone(), settings.update_share);
         let system_icons = settings.system_icons;
+        let stack_versions = settings.stack_versions;
         cx.spawn(async move |weak, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -270,6 +273,7 @@ impl Explorer {
                 } else {
                     this.set_update_preferences(update_auto, update_channel, update_folder, update_share);
                     this.set_system_icons(system_icons);
+                    this.set_stack_versions(stack_versions);
                     this.show_hidden = prefs.show_hidden;
                     this.show_sidebar = prefs.show_sidebar;
                     this.show_inspector = prefs.show_inspector;
@@ -450,6 +454,18 @@ impl Explorer {
                     .child("Значки программ у файлов, как в Проводнике")
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.system_icons = !s.system_icons; cx.notify(); }
+                    })));
+            }
+            // Versions of a document folded into its newest file.
+            {
+                let on = settings.stack_versions;
+                body = body.child(div().id("stack-versions").p_2().rounded_md().bg(rgb(SURFACE)).cursor_pointer().flex().items_center().gap_2()
+                    .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
+                        .when(on, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
+                        .when(!on, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
+                    .child("Показывать только последнюю версию файла (Отчёт_v_1_6 и т. п.)")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.stack_versions = !s.stack_versions; cx.notify(); }
                     })));
             }
             // Updates: a check box and the channel, switched by clicking.

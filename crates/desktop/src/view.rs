@@ -9,6 +9,7 @@ use filemanager_core::browser::{self, Entry};
 use filemanager_core::format::{format_size, format_time, items_label, kind_label};
 use filemanager_core::places::{containing_place, Place, PlaceKind};
 use filemanager_core::sort::SortKey;
+use filemanager_core::versions::Stacked;
 use gpui::{
     anchored, deferred, div, img, rgb_to_hsla, ObjectFit, ease_out_quint, prelude::*, px, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
@@ -116,9 +117,6 @@ fn bar_button(id: &'static str, path: &'static str, tip: &'static str, active: b
 }
 
 /// «Версия 1.6», or «Исходный» for the file without a suffix.
-fn version_label(version: &filemanager_core::versions::Version) -> String {
-    if version.number.is_empty() { "Исходный".into() } else { format!("Версия {}", version.label()) }
-}
 
 fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>, kind: ButtonKind) -> Stateful<Div> {
     let (bg, hover, fg) = match kind {
@@ -290,6 +288,12 @@ impl Explorer {
     /// Ends a list column drag and keeps the widths for the next start.
     pub(crate) fn finish_list_resize(&mut self) {
         let Some((side, ..)) = self.list_resize.take() else { return };
+        // Panes still on the old shared widths keep them: only this one changed.
+        for id in self.browser.leaves() {
+            if id != side && !self.pane_list_widths.contains_key(&id) {
+                self.pane_list_widths.insert(id, self.list_widths);
+            }
+        }
         // The last widths set start new panes, now and after a restart.
         self.list_widths = self.list_widths_for(side);
         if let Some(store)=&self.workspaces {
@@ -299,7 +303,14 @@ impl Explorer {
     }
 
     pub(crate) fn finish_column_resize(&mut self) {
-        if self.column_resize.take().is_none() { return; }
+        let Some(resize) = self.column_resize.take() else { return };
+        // Panes still on the old shared width keep it: only this one changed.
+        for id in self.browser.leaves() {
+            if id != resize.group && !self.pane_column_widths.contains_key(&id) {
+                self.pane_column_widths.insert(id, self.column_width);
+            }
+        }
+        self.column_width = self.column_width_for(resize.group);
         if let Some(store)=&self.workspaces {
             let _=store.set_value(crate::COLUMN_WIDTH, &format!("{:.0}", self.column_width));
         }
@@ -878,7 +889,7 @@ impl Explorer {
             );
             let scroll = self.column_scroll_handles.entry(side).or_default().clone();
             let reveal_key = format!("{group_id}-{:?}-{:?}-{}", path, folders.last(), pane_width as u32);
-            let widths = crate::layout::column_widths(pane_width, folders.len(), self.column_width);
+            let widths = crate::layout::column_widths(pane_width, folders.len(), self.column_width_for(side));
             let content_width = px(widths.iter().sum::<f32>().max(pane_width));
             let mut group = div().id(group_id).w(content_width).h_full().flex().flex_row().flex_none();
             for (index, folder) in folders.iter().enumerate() {
@@ -895,7 +906,7 @@ impl Explorer {
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                             if this.interface_modal() { return; }
-                            this.column_resize = Some(crate::ColumnResize { start_x: event.position.x, start_width: this.column_width });
+                            this.column_resize = Some(crate::ColumnResize { group: side, start_x: event.position.x, start_width: this.column_width_for(side) });
                             this.marquee = None;
                         })))
                     .when(index == current_index, |column| column.on_prepaint(move |bounds, _, cx| {
@@ -1158,6 +1169,7 @@ impl Explorer {
         let selected = self.is_selected(&path);
         let focused_pane = side == self.active_side();
         let (icon_path, tint) = entry_icon(entry);
+        let stack = self.stack_role(side, folder, &path);
         let bg = if selected && focused_pane {
             Some(SELECTED)
         } else if selected {
@@ -1180,18 +1192,43 @@ impl Explorer {
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
+            // An older version sits indented under the newest one.
+            .when(matches!(stack, Some(Stacked::Member { .. })), |row| row.child(div().w(px(16.)).flex_none()))
             .child(match self.system_icon(&path).filter(|_| !is_dir) {
                 // The program's own icon, as in Explorer.
                 Some(image) => img(image).size(px(16.)).flex_none().when(entry.hidden && !selected, |image| image.opacity(0.55)).into_any_element(),
                 None => icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)).into_any_element(),
             });
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.
-        row = if self.renaming && self.selected.as_ref() == Some(&path) {
+        row = if self.renaming && side == self.active_side() && self.selected.as_ref() == Some(&path) {
             // A compact field that fits the 24 px row and starts where the name does.
             row.child(div().flex_1().min_w_0().h(px(ROW_HEIGHT)).flex().items_center().ml(px(-5.))
                 .child(Input::new(&self.rename_input).xsmall().h(px(20.)).w_full().text_size(px(13.))))
         } else {
-            row.child(div().flex_1().min_w_0().truncate().child(entry.name.clone()))
+            let badge = |text: String| div().flex_none().px_1p5().rounded_sm().text_size(px(11.))
+                .bg(rgb(if selected { SELECTED_BORDER } else { ACCENT_SOFT })).text_color(rgb(if selected { SELECTION_TEXT } else { TEXT_MUTED }))
+                .child(text);
+            let name = div().flex_1().min_w_0().flex().items_center().gap_1p5()
+                .child(div().min_w_0().truncate().child(entry.name.clone()));
+            let name = match &stack {
+                Some(Stacked::Head { key, label, others, expanded }) => {
+                    let (folder_key, key) = (folder.to_path_buf(), key.clone());
+                    let expanded = *expanded;
+                    name.child(div().id(SharedString::from(format!("stack-{}", path.display())))
+                        .flex_none().flex().items_center().gap_0p5().cursor_pointer()
+                        .tooltip(move |window, cx| Tooltip::new(if expanded { "Скрыть прежние версии" } else { "Показать прежние версии" }).build(window, cx))
+                        .child(badge(format!("{label} +{others}")))
+                        .child(small_icon(if expanded { "fm/chevron-down.svg" } else { "fm/chevron-right.svg" }, if selected { SELECTION_TEXT } else { TEXT_DIM }))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_stack(&folder_key, &key, cx);
+                        })))
+                }
+                Some(Stacked::Member { label, .. }) => name.child(badge(label.clone())),
+                None => name,
+            };
+            row.child(name)
         };
         if list_mode {
             let (show_modified, show_kind) = self.list_columns(side);
@@ -1235,6 +1272,12 @@ impl Explorer {
         let column_folder = folder.to_path_buf();
         let menu_path = path.clone();
         let menu_folder = folder.to_path_buf();
+        // While the name is edited the mouse belongs to the text field:
+        // pressing and moving selects text, it must not drag the file or
+        // start a frame selection in the column.
+        if self.renaming && side == self.active_side() && self.selected.as_ref() == Some(&path) {
+            return row.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).into_any_element();
+        }
         // Dragging a selected row carries the whole selection.
         let drag_paths = if selected { self.selection() } else { vec![path.clone()] };
         row.on_drag(FileDragInfo { paths: drag_paths }, |info: &FileDragInfo, position, _, cx| {
@@ -1566,7 +1609,7 @@ impl Explorer {
             }
         }
         panel = panel.child(self.versions_section(cx));
-        panel = panel.child(self.history_section(cx));
+        panel = panel.child(self.feed_section(cx));
         panel.into_any_element()
     }
 
@@ -1633,68 +1676,58 @@ impl Explorer {
         }
     }
 
-    fn history_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let watching = self.watched_root.is_some();
-        let mut section = div().flex().flex_col().gap_2().pt_2().border_t_1().border_color(rgb(BORDER))
-            .child(div().flex().items_center().gap_1()
-                .child(div().id("history-toggle").flex_1().min_w_0().h(px(28.)).flex().items_center().gap_1().cursor_pointer()
-                    .text_size(px(12.)).text_color(rgb(TEXT_MUTED))
-                    .child(small_icon(if self.history_expanded {"fm/chevron-down.svg"} else {"fm/chevron-right.svg"},TEXT_MUTED))
-                    .child("История изменений")
-                    .on_click(cx.listener(|this,_,_,cx| {this.history_expanded=!this.history_expanded;cx.notify();})))
-                .child(icon_button("watch-toggle","fm/eye-watch.svg",if watching {"Остановить запись истории"} else {"Записывать историю"},watching,true)
-                    .on_click(cx.listener(|this,_,_,cx|this.watch(cx)))));
+    /// What changed in the current folder and its subfolders: newest first,
+    /// by day; a click shows the file. Only names and times are recorded.
+    fn feed_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::feed::PERIODS;
+        let current = self.pane_path(self.active_side());
+        let mut section = div().flex().flex_col().gap_1().pt_2().border_t_1().border_color(rgb(BORDER))
+            .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child(format!("Изменения в «{}»", browser::display_name(&current))))
+            .child(div().flex().flex_wrap().gap_1().children(PERIODS.iter().enumerate().map(|(index, (label, _))| {
+                let chosen = index == self.feed.period;
+                div().id(("feed-period", index)).h(px(22.)).px_2().flex().items_center().rounded_md().cursor_pointer()
+                    .text_size(px(11.)).border_1()
+                    .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
+                    .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED)).hover(|style| style.bg(rgb(HOVER))))
+                    .child(*label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_feed_period(index, cx)))
+            })));
         if let Some(reason) = &self.live_watch_error {
             section = section.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(reason.clone()));
         }
-        if !self.history_expanded || self.selected.is_none() || self.journal.is_none() {
-            return section.into_any_element();
+        let events: Vec<&filemanager_core::history::Event> = if self.feed.folder.as_ref() == Some(&current) { self.feed.events.iter().collect() } else { Vec::new() };
+        if events.is_empty() {
+            return section.child(div().pt_1().text_size(px(12.)).text_color(rgb(TEXT_DIM))
+                .child("Изменений нет. Папка замечает изменения в папках, пока они открыты в ней; содержимое файлов не сохраняется."))
+                .into_any_element();
         }
-        if self.inspector_history.is_empty() && !self.inspector_loading {
-            section = section.child(div().text_size(px(12.)).text_color(rgb(TEXT_DIM))
-                .child("Изменений нет"));
+        let mut day = String::new();
+        let mut list = div().id("feed-list").max_h(px(420.)).overflow_y_scrollbar().flex().flex_col();
+        for event in events {
+            let heading = event.day_label();
+            if heading != day {
+                list = list.child(div().pt_2().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT_MUTED)).child(heading.clone()));
+                day = heading;
+            }
+            let name = browser::display_name(&event.path);
+            // Where in the folder, when not directly in it.
+            let place = event.path.parent().and_then(|parent| parent.strip_prefix(&current).ok())
+                .map(|relative| relative.display().to_string()).filter(|relative| !relative.is_empty());
+            let tint = match event.kind.as_str() { "missing" => DANGER, "observed" | "version" => ACCENT, _ => TEXT_MUTED };
+            let path = event.path.clone();
+            let gone = event.kind == "missing";
+            list = list.child(div().id(("feed-event", event.id as usize)).py_1().px_1().rounded_sm().cursor_pointer()
+                .flex().flex_col().gap_0p5().text_size(px(12.))
+                .hover(|style| style.bg(rgb(HOVER)))
+                .child(div().truncate().text_color(rgb(if gone { TEXT_MUTED } else { TEXT })).child(name))
+                .child(div().flex().gap_1().min_w_0().text_size(px(11.))
+                    .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(event.clock_label()))
+                    .child(div().flex_none().text_color(rgb(tint)).child(event.feed_label().to_owned()))
+                    .when_some(place, |row, place| row.child(div().min_w_0().truncate().text_color(rgb(TEXT_DIM)).child(format!("· {place}")))))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_feed_event(path.clone(), cx))));
         }
-        for event in &self.inspector_history {
-            let event_id = event.id;
-            let saved_comment = event.comment.clone();
-            let saved_author = event.author.clone().unwrap_or_default();
-            let chosen = self.selected_history_event == Some(event_id);
-            // Family history mixes files; name the version an event belongs to.
-            let event_version = (!self.inspector_versions.is_empty()).then(|| event.path.file_name()
-                .map(|name| version_label(&filemanager_core::versions::parse(&name.to_string_lossy())))
-                .unwrap_or_default());
-            section = section.child(
-                div().id(("history-event", event_id as usize)).py_2().px_1().cursor_pointer()
-                    .flex().flex_col().gap_0p5().text_size(px(12.))
-                    .when(chosen,|row|row.bg(rgb(ACCENT_SOFT)))
-                    .border_b_1().border_color(rgb(BORDER))
-                    .hover(|style| style.bg(rgb(HOVER)))
-                    .child(div().text_color(rgb(TEXT)).child(format!("{} · {}", event.kind_label(), event.display_time())))
-                    .when(event_version.is_some(), |this| this.child(
-                        div().text_color(rgb(ACCENT)).child(event_version.clone().unwrap_or_default())))
-                    .when(event.author.as_ref().is_some_and(|author|!author.is_empty()),|row|row.child(
-                        div().text_color(rgb(TEXT_MUTED)).child(event.author.clone().unwrap_or_default())))
-                    .when(chosen,|row|row.child(div().text_color(rgb(TEXT_DIM)).child(format!("Учётная запись: {}", event.recorded_by))))
-                    .when(chosen && !event.comment.is_empty(), |this| this.child(
-                        div().text_color(rgb(TEXT)).child(event.comment.clone())))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.selected_history_event = if this.selected_history_event==Some(event_id) {None} else {Some(event_id)};
-                        this.comment_input.update(cx, |input, cx| input.set_value(saved_comment.clone(), window, cx));
-                        this.author_input.update(cx, |input, cx| input.set_value(saved_author.clone(), window, cx));
-                        cx.notify();
-                    }))
-            );
-        }
-        if self.selected_history_event.is_some() {
-            section = section
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Автор"))
-                .child(Input::new(&self.author_input))
-                .child(div().text_size(px(12.)).text_color(rgb(TEXT_MUTED)).child("Комментарий"))
-                .child(Input::new(&self.comment_input))
-                .child(text_button("save-comment", "Сохранить комментарий", ButtonKind::Primary)
-                    .on_click(cx.listener(|this, _, _, cx| this.save_comment(cx))));
-        }
-        section.into_any_element()
+        section.child(list).into_any_element()
     }
 
     // -------------------------------------------------------- status bar
@@ -2316,6 +2349,7 @@ impl Render for Explorer {
             self.request_icons(window.scale_factor(), cx);
         }
         self.load_selected_details(cx);
+        self.load_feed(cx);
         if self.select_first_when_loaded && self.selected.is_none() {
             let folder = self.pane_path(self.active_side());
             if let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) {
@@ -2404,7 +2438,8 @@ impl Render for Explorer {
                         return;
                     }
                     let resize = this.column_resize.as_ref().unwrap();
-                    this.column_width = crate::layout::resize_columns(resize.start_width, (event.position.x - resize.start_x) / px(1.));
+                    let width = crate::layout::resize_columns(resize.start_width, (event.position.x - resize.start_x) / px(1.));
+                    this.pane_column_widths.insert(resize.group, width);
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
@@ -2562,7 +2597,8 @@ const TOUR: &[(&str, &str, &str)] = &[
     ("fm/search.svg", "Поиск и команды",
         "Ctrl+F — поиск файлов, Ctrl+L — ввести путь, Ctrl+K — все команды с клавишами. \
         Набор в английской раскладке тоже находит: «yfcnh» — это «настр»."),
-    ("fm/history.svg", "История и версии",
-        "Ctrl+I открывает панель сведений: история изменений файла, его версии вида «Отчёт_v_1_6» и комментарии. \
-        Хранятся только сведения о файлах, не их копии. «Журнал операций» в боковой панели показывает, что сделала Papka."),
+    ("fm/history.svg", "Версии и лента изменений",
+        "Версии одного документа («Отчёт_v_1_6») показываются одной строкой — последней; стрелка у метки раскрывает прежние. \
+        Ctrl+I открывает панель сведений с лентой изменений папки: что и когда появилось, изменилось или пропало. \
+        Хранятся только сведения о файлах, не их копии."),
 ];
