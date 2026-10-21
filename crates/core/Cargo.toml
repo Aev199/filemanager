@@ -19,10 +19,12 @@ sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
 zip = { version = "2", default-features = false, features = ["deflate", "deflate64"] }
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["ppmd", "deflate"] }
+calamine = { version = "0.30", features = ["dates"] }
+encoding_rs = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
-windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_Foundation"] }
+windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_Foundation", "Data_Pdf", "Foundation", "Storage", "Storage_Streams"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Networking_WinHttp", "Win32_NetworkManagement_WNet", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Registry", "Win32_Globalization", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security"] }
 
 [dev-dependencies]

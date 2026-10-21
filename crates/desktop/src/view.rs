@@ -439,6 +439,30 @@ impl Explorer {
                 .font_family("Consolas").text_size(px(12.)).line_height(px(18.)).text_color(rgb(TEXT))
                 .child(text.clone()).into_any_element(),
             QuickContent::Message(message) => div().max_w(px(420.)).text_color(rgb(TEXT_MUTED)).child(message.clone()).into_any_element(),
+            QuickContent::Pdf { image, .. } => img(image.clone()).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            QuickContent::Table(table) => Self::quick_table(table),
+        };
+        // Under a PDF: pages; under a workbook: its sheets.
+        let footer: AnyElement = match &look.content {
+            QuickContent::Pdf { page, pages, .. } => div().flex().items_center().gap_2()
+                .child(icon_button("quick-look-prev", "fm/arrow-left.svg", "Предыдущая страница (PageUp)", false, *page > 0)
+                    .on_click(cx.listener(|this,_,_,cx| this.quick_look_page(-1, cx))))
+                .child(format!("Страница {} из {pages}", page + 1))
+                .child(icon_button("quick-look-next", "fm/arrow-right.svg", "Следующая страница (PageDown)", false, page + 1 < *pages)
+                    .on_click(cx.listener(|this,_,_,cx| this.quick_look_page(1, cx))))
+                .into_any_element(),
+            QuickContent::Table(table) if table.sheets.len() > 1 => div().flex().items_center().gap_1().min_w_0().overflow_hidden()
+                .children(table.sheets.iter().enumerate().map(|(index, name)| {
+                    let chosen = index == table.sheet;
+                    div().id(("quick-look-sheet", index)).h(px(20.)).px_2().flex().flex_none().items_center().rounded_sm().cursor_pointer()
+                        .when(chosen, |tab| tab.bg(rgb(ACCENT_SOFT)).text_color(rgb(TEXT)))
+                        .when(!chosen, |tab| tab.hover(|style| style.bg(rgb(HOVER))))
+                        .child(name.clone())
+                        .on_click(cx.listener(move |this,_,_,cx| this.quick_look_sheet(index, cx)))
+                }))
+                .into_any_element(),
+            QuickContent::Table(table) if table.cut => div().child("Показано начало таблицы").into_any_element(),
+            _ => div().into_any_element(),
         };
         let (open, preview) = (path.clone(), path.clone());
         let document = crate::quick_look::is_document(&path);
@@ -458,13 +482,43 @@ impl Explorer {
                 .child(icon_button("quick-look-close","fm/x.svg","Закрыть (Пробел, Esc)",false,true)
                     .on_click(cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))))
             .child(div().flex_1().min_h_0().p_2().flex().items_center().justify_center().child(body))
-            .child(div().h(px(26.)).flex_none().px_3().flex().items_center().text_size(px(11.)).text_color(rgb(TEXT_DIM))
-                .child("Пробел или Esc — закрыть · ↑ ↓ — соседние файлы"));
+            .child(div().h(px(30.)).flex_none().px_3().flex().items_center().gap_3().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                .child(div().flex_1().min_w_0().child(footer))
+                .child(div().flex_none().child("Пробел или Esc — закрыть · ↑ ↓ — соседние файлы")));
         div().id("quick-look-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x00000080))
             .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))
             .child(card)
             .into_any_element()
+    }
+
+    /// A table in the quick look: columns as wide as their text (within
+    /// bounds), first row as a header, scrolled both ways.
+    fn quick_table(table: &filemanager_core::table::Table) -> AnyElement {
+        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let widths: Vec<f32> = (0..columns).map(|column| {
+            let chars = table.rows.iter().take(60).filter_map(|row| row.get(column))
+                .map(|cell| cell.lines().next().unwrap_or("").chars().count()).max().unwrap_or(0);
+            (chars.clamp(4, 40) as f32) * 7.5 + 16.
+        }).collect();
+        let total: f32 = widths.iter().sum::<f32>() + 40.;
+        let mut grid = div().flex().flex_col().w(px(total)).text_size(px(12.));
+        for (index, row) in table.rows.iter().enumerate() {
+            let header = index == 0;
+            let mut line = div().flex().flex_none().h(px(24.)).border_b_1().border_color(rgb(BORDER))
+                .when(header, |line| line.bg(rgb(PANEL)).font_weight(gpui::FontWeight::SEMIBOLD))
+                .when(!header && index % 2 == 0, |line| line.bg(rgb(STRIPE)))
+                .child(div().w(px(40.)).flex_none().px_1().flex().items_center().justify_end()
+                    .text_size(px(11.)).text_color(rgb(TEXT_DIM)).border_r_1().border_color(rgb(BORDER))
+                    .child((index + 1).to_string()));
+            for (column, width) in widths.iter().enumerate() {
+                let cell = row.get(column).map(|cell| cell.replace('\n', " ")).unwrap_or_default();
+                line = line.child(div().w(px(*width)).flex_none().px_2().flex().items_center().truncate()
+                    .border_r_1().border_color(rgb(BORDER)).text_color(rgb(TEXT)).child(cell));
+            }
+            grid = grid.child(line);
+        }
+        div().id("quick-look-table").size_full().overflow_scroll().child(grid).into_any_element()
     }
 
     /// «О программе» under its titlebar button, as in SoilStiffness:
@@ -2689,6 +2743,11 @@ impl Render for Explorer {
                 }
                 if event.keystroke.key == "space" && !modifiers.shift {
                     this.toggle_quick_look(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.quick_look.is_some() && matches!(event.keystroke.key.as_str(), "pagedown" | "pageup") {
+                    this.quick_look_page(if event.keystroke.key == "pagedown" { 1 } else { -1 }, cx);
                     cx.stop_propagation();
                     return;
                 }
