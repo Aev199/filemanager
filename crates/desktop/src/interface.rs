@@ -17,6 +17,45 @@ pub(crate) struct Palette {
     /// Keeps the chosen command visible in the height-limited list.
     pub scroll: gpui::ScrollHandle,
 }
+/// Check boxes of the settings window, in the order arrows walk them.
+const SETTING_FLAGS: [&str; 8] = [
+    "Светлая тема",
+    "Боковая панель",
+    "Панель сведений",
+    "Показывать скрытые файлы",
+    "Значки программ у файлов, как в Проводнике",
+    "Показывать только последнюю версию файла (Отчёт_v_1_6 и т. п.)",
+    "Проверять обновления раз в день",
+    "Класть установленные версии в папку обновлений для коллег",
+];
+
+fn flag_value(s: &Settings, index: usize) -> bool {
+    match index {
+        0 => s.draft.light,
+        1 => s.draft.show_sidebar,
+        2 => s.draft.show_inspector,
+        3 => s.draft.show_hidden,
+        4 => s.system_icons,
+        5 => s.stack_versions,
+        6 => s.update_auto,
+        _ => s.update_share,
+    }
+}
+
+fn toggle_flag(s: &mut Settings, index: usize) {
+    let flag = match index {
+        0 => &mut s.draft.light,
+        1 => &mut s.draft.show_sidebar,
+        2 => &mut s.draft.show_inspector,
+        3 => &mut s.draft.show_hidden,
+        4 => &mut s.system_icons,
+        5 => &mut s.stack_versions,
+        6 => &mut s.update_auto,
+        _ => &mut s.update_share,
+    };
+    *flag = !*flag;
+}
+
 pub(crate) struct Settings {
     pub focus: gpui::FocusHandle,
     pub selected: usize,
@@ -222,19 +261,14 @@ impl Explorer {
     }
     pub(crate) fn settings_move(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(s) = self.settings.as_mut().filter(|s| !s.saving) {
-            s.selected = s.selected.saturating_add_signed(delta).min(3);
+            s.selected = s.selected.saturating_add_signed(delta).min(SETTING_FLAGS.len() - 1);
             cx.notify();
         }
     }
     pub(crate) fn settings_toggle(&mut self, cx: &mut Context<Self>) {
         if let Some(s) = self.settings.as_mut().filter(|s| !s.saving) {
-            let flag = match s.selected {
-                0 => &mut s.draft.light,
-                1 => &mut s.draft.show_hidden,
-                2 => &mut s.draft.show_sidebar,
-                _ => &mut s.draft.show_inspector,
-            };
-            *flag = !*flag;
+            let index = s.selected;
+            toggle_flag(s, index);
             cx.notify();
         }
     }
@@ -370,66 +404,39 @@ impl Explorer {
                         .child("Esc закрыть"),
                 )
         } else if let Some(settings) = self.settings.as_ref() {
-            let mut body = div().flex().flex_col().gap_3().child("Настройки").child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(TEXT_MUTED))
-                    .child("↑ ↓ — выбор · Пробел — переключить · Enter — сохранить · Esc — отмена"),
-            );
-            for (index, label, value) in [
-                (0, "Светлая тема", settings.draft.light),
-                (1, "Показывать скрытые файлы", settings.draft.show_hidden),
-                (2, "Боковая панель", settings.draft.show_sidebar),
-                (3, "Панель сведений", settings.draft.show_inspector),
-            ] {
-                body = body.child(
-                    div()
-                        .id(("preference", index as usize))
-                        .when(index as usize == settings.selected, |row| {
-                            row.border_1().border_color(rgb(ACCENT))
-                        })
-                        .p_2()
-                        .rounded_md()
-                        .bg(rgb(SURFACE))
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .size(px(16.))
-                                .flex_none()
-                                .rounded_sm()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(value, |b| b.bg(rgb(ACCENT)))
-                                .when(!value, |b| b.border_1().border_color(rgb(BORDER_STRONG)))
-                                .when(value, |b| {
-                                    b.child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT)))
-                                }),
-                        )
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) {
-                                let flag = match index {
-                                    0 => &mut s.draft.light,
-                                    1 => &mut s.draft.show_hidden,
-                                    2 => &mut s.draft.show_sidebar,
-                                    _ => &mut s.draft.show_inspector,
-                                };
-                                *flag = !*flag;
-                                cx.notify();
-                            }
-                        })),
-                );
-            }
-            // Accent colours, chosen separately for each theme.
+            // A check box row; arrows walk them, Space toggles.
+            let check = |index: usize, cx: &mut Context<Self>| {
+                let on = flag_value(settings, index);
+                div().id(("preference", index)).h(px(30.)).px_2().rounded_md().cursor_pointer()
+                    .flex().items_center().gap_2().border_1()
+                    .border_color(if index == settings.selected { rgb(ACCENT) } else { gpui::rgba(0) })
+                    .hover(|row| row.bg(rgb(HOVER)))
+                    .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
+                        .when(on, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
+                        .when(!on, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
+                    .child(div().min_w_0().truncate().child(SETTING_FLAGS[index]))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) {
+                            s.selected = index;
+                            toggle_flag(s, index);
+                            cx.notify();
+                        }
+                    }))
+            };
+            let section = |title: &'static str| div().flex().flex_col().gap_0p5().p_1().rounded_md().bg(rgb(PANEL))
+                .border_1().border_color(rgb(BORDER))
+                .child(div().px_2().pt_1().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT_DIM)).child(title));
+            let mut body = div().flex().flex_col().gap_3().text_size(px(13.))
+                .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Настройки"));
+
+            // Appearance, with the accent colours chosen separately for each theme.
+            let mut look = section("ВИД").child(check(0, cx)).child(check(1, cx)).child(check(2, cx));
             for (light, label, chosen) in [(false, "Акцент тёмной темы", settings.accent_dark), (true, "Акцент светлой темы", settings.accent_light)] {
                 let swatches = theme::ACCENT_SCHEMES.iter().enumerate().map(|(index, scheme)| {
                     let colour = if light { scheme.light[0] } else { scheme.dark[0] };
                     div().id((if light { "accent-light" } else { "accent-dark" }, index))
-                        .size(px(22.)).flex_none().rounded_full().cursor_pointer()
+                        .size(px(20.)).flex_none().rounded_full().cursor_pointer()
                         .bg(gpui::rgb(colour))
                         .when(index == chosen, |dot| dot.border_2().border_color(rgb(TEXT)))
                         .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(scheme.label).build(window, cx))
@@ -440,123 +447,65 @@ impl Explorer {
                             }
                         }))
                 });
-                body = body.child(div().p_2().rounded_md().bg(rgb(SURFACE)).flex().items_center().gap_2()
+                look = look.child(div().h(px(30.)).px_2().flex().items_center().gap_2()
                     .child(div().flex_1().child(label))
                     .child(div().flex().gap_1p5().children(swatches)));
             }
-            // Program icons for files, as in Explorer.
-            {
-                let on = settings.system_icons;
-                body = body.child(div().id("system-icons").p_2().rounded_md().bg(rgb(SURFACE)).cursor_pointer().flex().items_center().gap_2()
-                    .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
-                        .when(on, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
-                        .when(!on, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
-                    .child("Значки программ у файлов, как в Проводнике")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.system_icons = !s.system_icons; cx.notify(); }
-                    })));
-            }
-            // Versions of a document folded into its newest file.
-            {
-                let on = settings.stack_versions;
-                body = body.child(div().id("stack-versions").p_2().rounded_md().bg(rgb(SURFACE)).cursor_pointer().flex().items_center().gap_2()
-                    .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
-                        .when(on, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
-                        .when(!on, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
-                    .child("Показывать только последнюю версию файла (Отчёт_v_1_6 и т. п.)")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.stack_versions = !s.stack_versions; cx.notify(); }
-                    })));
-            }
-            // Updates: a check box and the channel, switched by clicking.
+            body = body.child(look)
+                .child(section("ФАЙЛЫ").child(check(3, cx)).child(check(4, cx)).child(check(5, cx)));
+
+            // Updates: the channel, and the shared folder for networks where
+            // only the browser may reach the internet.
             {
                 use filemanager_core::update::Channel;
-                let auto = settings.update_auto;
                 let channel = settings.update_channel;
-                body = body.child(div().p_2().rounded_md().bg(rgb(SURFACE)).flex().items_center().gap_2()
-                    .child(div().id("update-auto").flex_1().flex().items_center().gap_2().cursor_pointer()
-                        .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
-                            .when(auto, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
-                            .when(!auto, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
-                        .child("Проверять обновления раз в день")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_auto = !s.update_auto; cx.notify(); }
-                        })))
-                    .child(div().flex().gap_1().children([Channel::Beta, Channel::Stable].into_iter().map(|option| {
-                        let chosen = option == channel;
-                        div().id(option.key()).h(px(24.)).px_2().flex().items_center().rounded_md().cursor_pointer()
-                            .text_size(px(12.)).border_1()
-                            .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
-                            .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED)).hover(|s| s.bg(rgb(HOVER))))
-                            .child(option.label())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_channel = option; cx.notify(); }
-                            }))
-                    }))));
-                // The shared folder: for networks where only the browser
-                // may reach the internet.
+                let chip = |id: &'static str, label: &'static str, chosen: bool| div().id(id).h(px(24.)).px_2().flex().flex_none()
+                    .items_center().rounded_md().cursor_pointer().text_size(px(12.)).border_1()
+                    .when(chosen, |chip| chip.bg(rgb(ACCENT_SOFT)).border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
+                    .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
+                        .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
+                    .child(label);
                 let folder_text = settings.update_folder.as_ref()
                     .map_or("не задана".to_string(), |folder| folder.display().to_string());
-                let small = |id: &'static str, label: &'static str| div().id(id).h(px(24.)).px_2().flex().flex_none().items_center()
-                    .rounded_md().cursor_pointer().text_size(px(12.)).border_1().border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
-                    .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))).child(label);
-                let share = settings.update_share;
-                body = body.child(div().p_2().rounded_md().bg(rgb(SURFACE)).flex().flex_col().gap_2()
-                    .child(div().flex().items_center().gap_2()
-                        .child(div().flex_none().child("Папка обновлений:"))
+                body = body.child(section("ОБНОВЛЕНИЯ")
+                    .child(check(6, cx))
+                    .child(div().h(px(30.)).px_2().flex().items_center().gap_2()
+                        .child(div().flex_1().child("Канал"))
+                        .children([Channel::Stable, Channel::Beta].into_iter().map(|option| {
+                            chip(option.key(), option.label(), option == channel)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_channel = option; cx.notify(); }
+                                }))
+                        })))
+                    .child(div().h(px(30.)).px_2().flex().items_center().gap_2()
+                        .child(div().flex_none().child("Папка обновлений"))
                         .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_MUTED)).child(folder_text))
-                        .child(small("update-folder-here", "Текущая папка")
+                        .child(chip("update-folder-here", "Текущая папка", false)
                             .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Взять папку, открытую в активной панели").build(window, cx))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let folder = this.pane_path(this.active_side());
                                 if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_folder = Some(folder); cx.notify(); }
                             })))
-                        .when(settings.update_folder.is_some(), |row| row.child(small("update-folder-clear", "Убрать")
+                        .when(settings.update_folder.is_some(), |row| row.child(chip("update-folder-clear", "Убрать", false)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_folder = None; cx.notify(); }
                             })))))
-                    .child(div().id("update-share").flex().items_center().gap_2().cursor_pointer()
-                        .child(div().size(px(16.)).flex_none().rounded_sm().flex().items_center().justify_center()
-                            .when(share, |b| b.bg(rgb(ACCENT)).child(gpui::svg().path("fm/check.svg").size(px(12.)).text_color(rgb(SELECTION_TEXT))))
-                            .when(!share, |b| b.border_1().border_color(rgb(BORDER_STRONG))))
-                        .child("Класть установленные версии в эту папку для коллег")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_share = !s.update_share; cx.notify(); }
-                        })))
-                    .child(div().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                    .child(check(7, cx))
+                    .child(div().px_2().pb_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
                         .child("Если программе закрыт интернет: обновления берутся из этой папки или из файла Papka.exe, скачанного браузером в «Загрузки».")));
             }
             if let Some(error) = settings.error.as_ref() {
-                body = body.child(div().text_color(rgb(DANGER)).child(error.clone()));
+                body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error.clone()));
             }
             body.child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("apply-settings")
-                            .p_2()
-                            .rounded_md()
-                            .bg(rgb(ACCENT_SOFT))
-                            .cursor_pointer()
-                            .child(if settings.saving {
-                                "Сохранение…"
-                            } else {
-                                "Сохранить"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.apply_settings(cx))),
-                    )
-                    .child(
-                        div()
-                            .id("cancel-settings")
-                            .p_2()
-                            .cursor_pointer()
-                            .child("Отмена")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dismiss_interface(window, cx);
-                            })),
-                    ),
+                div().flex().items_center().gap_2()
+                    .child(div().flex_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
+                        .child("↑ ↓ выбор · Пробел переключить · Enter сохранить"))
+                    .child(crate::view::text_button("cancel-settings", "Отмена", crate::view::ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, window, cx| { this.dismiss_interface(window, cx); })))
+                    .child(crate::view::text_button("apply-settings", if settings.saving { "Сохранение…" } else { "Сохранить" },
+                        crate::view::ButtonKind::Primary)
+                        .on_click(cx.listener(|this, _, _, cx| this.apply_settings(cx)))),
             )
         } else {
             return None;

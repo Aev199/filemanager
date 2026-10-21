@@ -118,20 +118,22 @@ fn bar_button(id: &'static str, path: &'static str, tip: &'static str, active: b
 
 /// «Версия 1.6», or «Исходный» for the file without a suffix.
 
-fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>, kind: ButtonKind) -> Stateful<Div> {
-    let (bg, hover, fg) = match kind {
-        ButtonKind::Primary => (ACCENT, 0x7AA0FF, 0xFFFFFF),
-        ButtonKind::Danger => (0x9E3A43, 0xB8454F, 0xFFFFFF),
-        ButtonKind::Ghost => (RAISED, HOVER, TEXT),
+pub(crate) fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>, kind: ButtonKind) -> Stateful<Div> {
+    // Hover colours follow the accent scheme; a ghost button keeps a frame
+    // so it stays visible on a dialog of its own colour.
+    let (bg, hover, fg, frame) = match kind {
+        ButtonKind::Primary => (SELECTED, SELECTED_BORDER, SELECTION_TEXT, SELECTED),
+        ButtonKind::Danger => (0x9E3A43, 0xB8454F, 0xFFFFFF, 0x9E3A43),
+        ButtonKind::Ghost => (RAISED, HOVER, TEXT, BORDER_STRONG),
     };
     div().id(id).flex_none().h(px(28.)).px_3().rounded_md().flex().items_center()
-        .justify_center().bg(rgb(bg)).text_color(rgb(fg)).cursor_pointer()
+        .justify_center().bg(rgb(bg)).border_1().border_color(rgb(frame)).text_color(rgb(fg)).cursor_pointer()
         .hover(move |style| style.bg(rgb(hover)))
         .child(label.into())
 }
 
 #[derive(Clone, Copy)]
-enum ButtonKind { Primary, Danger, Ghost }
+pub(crate) enum ButtonKind { Primary, Danger, Ghost }
 
 fn place_icon(kind: PlaceKind) -> &'static str {
     match kind {
@@ -1701,9 +1703,22 @@ impl Explorer {
                 .child("Изменений нет. Папка замечает изменения в папках, пока они открыты в ней; содержимое файлов не сохраняется."))
                 .into_any_element();
         }
+        // Saving a file again and again makes a run of the same entry:
+        // one row per run, with the count.
+        let mut rows: Vec<(&filemanager_core::history::Event, usize)> = Vec::new();
+        for event in events {
+            let plain = event.comment.trim().is_empty() && event.author.as_deref().is_none_or(str::is_empty);
+            if let Some((last, count)) = rows.last_mut() {
+                if plain && last.path == event.path && last.kind == event.kind && last.day_label() == event.day_label() {
+                    *count += 1;
+                    continue;
+                }
+            }
+            rows.push((event, 1));
+        }
         let mut day = String::new();
         let mut list = div().id("feed-list").max_h(px(420.)).overflow_y_scrollbar().flex().flex_col();
-        for event in events {
+        for (event, repeats) in rows {
             let heading = event.day_label();
             if heading != day {
                 list = list.child(div().pt_2().pb_0p5().text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1744,6 +1759,7 @@ impl Explorer {
                 .child(div().flex().gap_1().min_w_0().text_size(px(11.))
                     .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(event.clock_label()))
                     .child(div().flex_none().text_color(rgb(tint)).child(event.feed_label().to_owned()))
+                    .when(repeats > 1, |row| row.child(div().flex_none().text_color(rgb(TEXT_DIM)).child(format!("×{repeats}"))))
                     .when_some(place, |row, place| row.child(div().min_w_0().truncate().text_color(rgb(TEXT_DIM)).child(format!("· {place}")))))
                 .when_some(note.filter(|_| !editing), |row, note| row.child(div().text_size(px(11.)).text_color(rgb(TEXT)).child(note)))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_feed_event(path.clone(), cx))));
