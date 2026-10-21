@@ -141,32 +141,54 @@ impl Explorer {
     /// Looks, in order, in Downloads (a file the browser fetched), the shared
     /// folder, and — when `online` — GitHub itself.
     fn check_updates_from(&mut self, manual: bool, online: bool, cx: &mut Context<Self>) {
-        if matches!(self.updates.phase, Phase::Checking | Phase::Downloading { .. }) { return; }
+        match &self.updates.phase {
+            Phase::Checking | Phase::Downloading { .. } => return,
+            // Installed (or rolled back) but not restarted yet: this process
+            // still reports the old version, so a check would offer the same
+            // update again. The pending restart is what is left to do.
+            Phase::Ready(_) | Phase::RolledBack => {
+                if manual { self.updates.dialog = true; self.about_open = false; cx.notify(); }
+                return;
+            }
+            _ => {}
+        }
         self.updates.phase = Phase::Checking;
         self.updates.note = None;
         let channel = self.updates.channel;
         let folder = self.updates.folder.clone();
+        // A skipped version is passed over, not allowed to hide newer ones.
+        let skipped = (!manual).then(|| self.updates.skipped.clone()).flatten();
         let task = cx.background_spawn(async move {
+            // Every source is asked; the newest offer wins.
+            let mut best: Option<Update> = None;
+            let mut consider = |found: Update| {
+                if skipped.as_deref() == Some(found.version.as_str()) { return; }
+                if best.as_ref().is_none_or(|best| update::compare_versions(&found.version, &best.version).is_gt()) {
+                    best = Some(found);
+                }
+            };
             if let Some((path, version)) = update::downloads_dir()
                 .and_then(|downloads| update::find_downloaded(&downloads, VERSION, &update::exe_version)) {
-                if let Ok(found) = update::downloaded_update(&path, &version) { return Outcome::Found(found); }
+                if let Ok(found) = update::downloaded_update(&path, &version) { consider(found); }
             }
             let mut folder_error = None;
             if let Some(folder) = folder.as_deref() {
-                match update::check_folder(folder, VERSION) {
-                    Ok(Some(found)) => return Outcome::Found(found),
-                    Ok(None) => if !online { return Outcome::Latest },
+                match update::check_folder(folder, VERSION, channel) {
+                    Ok(Some(found)) => consider(found),
+                    Ok(None) => {}
                     Err(error) => folder_error = Some(error.to_string()),
                 }
             }
-            if !online { return folder_error.map_or(Outcome::Latest, Outcome::Failed); }
-            match update::check(VERSION, channel, &update::fetch) {
-                Ok(Some(found)) => Outcome::Found(found),
+            let online_result = online.then(|| update::check(VERSION, channel, &update::fetch));
+            if let Some(Ok(Some(found))) = &online_result { consider(found.clone()); }
+            if let Some(found) = best { return Outcome::Found(found); }
+            match online_result {
+                None => folder_error.map_or(Outcome::Latest, Outcome::Failed),
+                Some(Ok(_)) => Outcome::Latest,
                 // A shared folder that is up to date answers for the network.
-                Ok(None) => Outcome::Latest,
-                Err(_) if folder.is_some() && folder_error.is_none() => Outcome::Latest,
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Outcome::Failed(error.to_string()),
-                Err(error) => Outcome::Blocked(match folder_error {
+                Some(Err(_)) if folder.is_some() && folder_error.is_none() => Outcome::Latest,
+                Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => Outcome::Failed(error.to_string()),
+                Some(Err(error)) => Outcome::Blocked(match folder_error {
                     Some(folder_error) => format!("{error}. Папка обновлений: {folder_error}"),
                     None => error.to_string(),
                 }),
@@ -176,6 +198,8 @@ impl Explorer {
             let outcome = task.await;
             let _ = this.update(cx, |this, cx| {
                 if online { this.remember(CHECKED_KEY, &now().to_string()); }
+                // Something else moved on meanwhile (a rollback): keep it.
+                if !matches!(this.updates.phase, Phase::Checking) { return; }
                 this.updates.phase = Phase::Idle;
                 match outcome {
                     Outcome::Found(found) if manual || this.updates.skipped.as_deref() != Some(found.version.as_str()) => {
@@ -202,7 +226,7 @@ impl Explorer {
     /// Opens the release in the browser (the one program allowed out) and
     /// watches Downloads until the file arrives.
     pub(crate) fn download_in_browser(&mut self, cx: &mut Context<Self>) {
-        cx.open_url(&update::browser_url());
+        cx.open_url(&update::browser_url(self.updates.channel));
         self.updates.dialog = false;
         self.updates.phase = Phase::Idle;
         self.status = "Скачайте Papka.exe в браузере — Папка заметит его в «Загрузках» и предложит установить".into();
@@ -336,8 +360,10 @@ impl Explorer {
     }
 
     pub(crate) fn set_update_preferences(&mut self, auto: bool, channel: Channel, folder: Option<PathBuf>, share: bool) {
-        if self.updates.channel != channel || self.updates.folder != folder {
-            // Another source may offer a different version.
+        if (self.updates.channel != channel || self.updates.folder != folder)
+            && matches!(self.updates.phase, Phase::Available(_) | Phase::Failed(_) | Phase::Blocked(_)) {
+            // Another source may offer a different version. A download in
+            // progress or an installed update is left alone.
             self.updates.phase = Phase::Idle;
         }
         self.updates.auto = auto;

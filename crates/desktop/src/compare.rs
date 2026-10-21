@@ -52,11 +52,14 @@ impl Explorer {
             return;
         }
         self.comparison = Some(Comparison { left: left.clone(), right: right.clone(), rows: None });
+        let pair = (left.clone(), right.clone());
         let task = cx.background_spawn(async move { compare(&left, &right, &AtomicBool::new(false)).map_err(|e| e.to_string()) });
         cx.spawn(async move |this, cx| {
             let rows = task.await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(comparison) = this.comparison.as_mut().filter(|c| c.rows.is_none()) {
+                // An older, abandoned comparison must not fill in a newer one.
+                if let Some(comparison) = this.comparison.as_mut()
+                    .filter(|c| c.rows.is_none() && c.left == pair.0 && c.right == pair.1) {
                     comparison.rows = Some(rows);
                     cx.notify();
                 }
@@ -69,11 +72,16 @@ impl Explorer {
         let Some(comparison) = self.comparison.take() else { return };
         self.comparison = Some(Comparison { rows: None, ..comparison });
         let (left, right) = { let c = self.comparison.as_ref().unwrap(); (c.left.clone(), c.right.clone()) };
+        let pair = (left.clone(), right.clone());
         let task = cx.background_spawn(async move { compare(&left, &right, &AtomicBool::new(false)).map_err(|e| e.to_string()) });
         cx.spawn(async move |this, cx| {
             let rows = task.await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(comparison) = this.comparison.as_mut() { comparison.rows = Some(rows); cx.notify(); }
+                if let Some(comparison) = this.comparison.as_mut()
+                    .filter(|c| c.rows.is_none() && c.left == pair.0 && c.right == pair.1) {
+                    comparison.rows = Some(rows);
+                    cx.notify();
+                }
             });
         }).detach();
         cx.notify();

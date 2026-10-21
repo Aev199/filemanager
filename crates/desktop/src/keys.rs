@@ -343,7 +343,7 @@ impl Explorer {
         let pane = self.browser.active_mut().active_mut();
         let moved = if forward { pane.forward() } else { pane.back() };
         if moved {
-            self.selected = None;
+            self.selected = None; self.marked.clear(); self.anchor = None;
             self.close_search();
             cx.notify();
         }
@@ -360,7 +360,7 @@ impl Explorer {
             self.browser.active_group_mut().active_tab = index;
             self.select_first_when_loaded=false;
             self.address_editing=None;
-            self.selected = None;
+            self.selected = None; self.marked.clear(); self.anchor = None;
             self.selected_history_event = None;
             self.confirm_recycle = None;
             self.context_menu = None;
@@ -378,7 +378,7 @@ impl Explorer {
         }
         self.browser.close_tab(self.browser.active, index);
         self.prune_group_state();
-        self.selected = None;
+        self.selected = None; self.marked.clear(); self.anchor = None;
         self.context_menu = None;
         cx.notify();
     }
@@ -555,7 +555,10 @@ impl Explorer {
         // Enter in a name, path or search field belongs to that field: the
         // input passes the key on, and it must not also open the old file.
         if self.renaming || self.creating_folder || self.address_editing.is_some() || self.saving_workspace
-            || self.search_input.focus_handle(cx).is_focused(window) {
+            || self.search_input.focus_handle(cx).is_focused(window)
+            || self.comment_input.focus_handle(cx).is_focused(window)
+            || self.author_input.focus_handle(cx).is_focused(window)
+            || self.bulk_rename.is_some() {
             return;
         }
         if self.search_active {
@@ -589,6 +592,9 @@ impl Explorer {
     }
 
     pub(crate) fn key_recycle(&mut self, _: &RecycleSelected, _: &mut Window, cx: &mut Context<Self>) {
+        // Search results replace the panes: a selection made before the
+        // search is out of sight and must not be deleted from here.
+        if self.search_active { return; }
         if self.selected.is_some() || !self.marked.is_empty() { self.recycle(cx); }
     }
 

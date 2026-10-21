@@ -657,6 +657,13 @@ impl Explorer {
         }
         let switched = self.active_side() != side;
         self.browser.focus(side);
+        if switched {
+            // The other pane's selection must not stay active here, even
+            // when the gesture ends without moving.
+            self.selected = None;
+            self.marked.clear();
+            self.anchor = None;
+        }
         let selected = if switched {
             None
         } else {

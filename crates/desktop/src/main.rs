@@ -443,6 +443,11 @@ impl Explorer {
                 InputEvent::PressEnter { .. } if !this.search_query.trim().is_empty() => {
                     this.search_active = true;
                     this.search_root = None;
+                    // The panes are hidden behind the results: their selection
+                    // must not be cut, copied or deleted from there.
+                    this.selected = None;
+                    this.marked.clear();
+                    this.anchor = None;
                     this.run_search(cx);
                 }
                 _ => {}
@@ -675,7 +680,7 @@ impl Explorer {
         if let Err(e) = self.browser.new_tab(self.browser.active, path) {
             self.status = e.to_string();
         }
-        self.selected = None;
+        self.selected = None; self.marked.clear(); self.anchor = None;
         self.close_search();
         cx.notify();
     }
@@ -779,6 +784,12 @@ impl Explorer {
         };
         let Some(zone) = self.zone_of(&files.paths, cx) else { return };
         let target = self.browser.active().active().path.clone();
+        if self.copy_in_progress || self.operation_busy {
+            // Not consumed: the cut stays on the clipboard for a later paste.
+            self.status = "Выполняется другая операция, дождитесь её завершения".into();
+            cx.notify();
+            return;
+        }
         if files.cut {
             // A cut is consumed once, as in Explorer.
             let _ = clipboard::write_files(&[], false);
@@ -954,13 +965,15 @@ impl Explorer {
             return;
         }
         let items = transfer.zone.items().to_vec();
-        if items.iter().any(|path| transfer.target.starts_with(path)) {
+        let target_plain = filemanager_core::path_utils::normalize_extended_path(&transfer.target);
+        if items.iter().any(|path| target_plain.starts_with(filemanager_core::path_utils::normalize_extended_path(path))) {
             self.status = "Нельзя переместить или скопировать папку внутрь самой себя".into();
             self.return_to_staging(&transfer);
             cx.notify();
             return;
         }
-        if items.iter().all(|path| path.parent() == Some(transfer.target.as_path())) {
+        // Staged paths are canonical (\\?\C:\…), the pane's are not.
+        if items.iter().all(|path| path.parent().is_some_and(|parent| filemanager_core::path_utils::same_path(parent, &transfer.target))) {
             if !transfer.copy {
                 self.status = "Объекты уже находятся в этой папке".into();
                 self.return_to_staging(&transfer);
@@ -1748,11 +1761,16 @@ impl Explorer {
                         this.directory_cache.insert(folder.clone(), Arc::new(listing));
                         // 16 slots bound the memory used by the file listing
                         // cache even after navigating through many directories.
-                        while this.directory_cache_order.len() > 16 {
-                            if let Some(old) = this.directory_cache_order.pop_front() {
-                                this.directory_cache.remove(&old);
-                            }
+                        // Folders on screen are never evicted: dropping one
+                        // would load it again at once, and so on forever.
+                        let visible: HashSet<PathBuf> = this.visible_directories().into_iter().collect();
+                        let mut kept = VecDeque::new();
+                        while this.directory_cache_order.len() + kept.len() > 16 {
+                            let Some(old) = this.directory_cache_order.pop_front() else { break };
+                            if visible.contains(&old) { kept.push_back(old); } else { this.directory_cache.remove(&old); }
                         }
+                        kept.append(&mut this.directory_cache_order);
+                        this.directory_cache_order = kept;
                     }
                     Err(error) => {
                         this.directory_errors.insert(folder.clone(), error.to_string());

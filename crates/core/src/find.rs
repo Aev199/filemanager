@@ -158,7 +158,8 @@ impl Query {
 
     /// No condition at all: nothing to look for.
     pub fn is_empty(&self) -> bool {
-        self.words.is_empty() && self.patterns.is_empty() && self.extensions.is_empty()
+        // "Папки" or "Файлы" alone is a query too: list them all.
+        self.kind == Kind::Any && self.words.is_empty() && self.patterns.is_empty() && self.extensions.is_empty()
             && self.min_size.is_none() && self.max_size.is_none()
             && self.modified_after.is_none() && self.modified_before.is_none()
             && self.content.as_deref().is_none_or(str::is_empty)

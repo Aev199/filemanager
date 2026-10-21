@@ -2408,8 +2408,8 @@ impl Render for Explorer {
                     cx.notify();
                 } else { this.move_marquee(event,cx); }
             }))
-            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
-            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
+            .on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,_,cx| {this.dock_hover=None;this.file_drag=false;this.finish_column_resize();this.finish_list_resize();this.finish_marquee(cx);cx.notify();}))
             .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,window,cx| {
                 let Some(drag)=this.right_drag.take() else {return};
                 if !drag.active && event.modifiers.shift {

@@ -40,7 +40,7 @@ struct Entry { is_dir: bool, size: u64, modified: Option<SystemTime> }
 fn read(folder: &Path) -> io::Result<BTreeMap<String, Entry>> {
     let mut entries = BTreeMap::new();
     for item in fs::read_dir(folder)? {
-        let item = item?;
+        let Ok(item) = item else { continue };
         let Ok(meta) = item.metadata() else { continue };
         if meta.file_type().is_symlink() { continue; }
         // Windows names ignore case: one key for "Отчёт.docx" and "отчёт.docx".
@@ -64,7 +64,13 @@ pub fn compare(left: &Path, right: &Path, cancel: &AtomicBool) -> io::Result<Vec
 
 fn walk(left: &Path, right: &Path, relative: &Path, cancel: &AtomicBool, rows: &mut Vec<Row>) -> io::Result<()> {
     if cancel.load(Ordering::Relaxed) { return Ok(()); }
-    let (a, b) = (read(&left.join(relative))?, read(&right.join(relative))?);
+    // A subfolder that cannot be read (no access on a share) is passed
+    // over; only the two folders being compared must be readable.
+    let (a, b) = match (read(&left.join(relative)), read(&right.join(relative))) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(error), _) | (_, Err(error)) if relative.as_os_str().is_empty() => return Err(error),
+        _ => return Ok(()),
+    };
     // Display names come from whichever side has the entry.
     let names = |folder: &Path| -> BTreeMap<String, String> {
         fs::read_dir(folder).map(|items| items.filter_map(Result::ok)

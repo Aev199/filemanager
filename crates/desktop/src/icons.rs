@@ -48,6 +48,12 @@ impl Explorer {
             self.icons.map.clear();
             self.icons.scanned.clear();
         }
+        // Programs and shortcuts have an icon per file: a long browse
+        // through program folders must not keep thousands of them.
+        if self.icons.map.len() > 3000 {
+            self.icons.map.clear();
+            self.icons.scanned.clear();
+        }
         for folder in self.visible_directories() {
             let Some(listing) = self.directory_cache.get(&folder) else { continue };
             let id = Arc::as_ptr(listing) as usize;

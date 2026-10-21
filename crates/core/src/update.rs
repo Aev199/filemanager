@@ -115,7 +115,7 @@ pub struct Update {
 pub type Fetch<'a> = &'a dyn Fn(&str, &mut dyn FnMut(u64, Option<u64>)) -> io::Result<Vec<u8>>;
 
 pub fn releases_url() -> String {
-    format!("https://api.github.com/repos/{REPOSITORY}/releases?per_page=20")
+    format!("https://api.github.com/repos/{REPOSITORY}/releases?per_page=100")
 }
 
 /// A newer version than `current` on `channel`, if there is one.
@@ -173,21 +173,32 @@ pub fn install(exe: &Path, bytes: &[u8], sha256: &str) -> io::Result<()> {
         let _ = fs::remove_file(&staged);
         return Err(error);
     }
-    if previous.exists() {
-        if let Err(error) = fs::remove_file(&previous) {
+    // The kept previous version steps aside rather than being deleted
+    // first: if the swap fails it returns, and if it is the running EXE
+    // (installed again without a restart) renaming still works.
+    let retired = exe.with_file_name(format!("{}.retired", previous.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+    let had_previous = previous.exists();
+    if had_previous {
+        let _ = fs::remove_file(&retired);
+        if let Err(error) = fs::rename(&previous, &retired) {
             let _ = fs::remove_file(&staged);
             return Err(error);
         }
     }
+    let restore_previous = || { if had_previous { let _ = fs::rename(&retired, &previous); } };
     if let Err(error) = fs::rename(exe, &previous) {
         let _ = fs::remove_file(&staged);
+        restore_previous();
         return Err(error);
     }
     if let Err(error) = fs::rename(&staged, exe) {
         let _ = fs::rename(&previous, exe);
         let _ = fs::remove_file(&staged);
+        restore_previous();
         return Err(error);
     }
+    // A running image cannot be deleted; it goes on a later install.
+    let _ = fs::remove_file(&retired);
     Ok(())
 }
 
@@ -214,8 +225,12 @@ pub fn rollback(exe: &Path) -> io::Result<()> {
 
 /// The newest final release's EXE, fetched by the browser when Papka
 /// itself has no way out (GitHub serves "latest" for final releases only).
-pub fn browser_url() -> String {
-    format!("https://github.com/{REPOSITORY}/releases/latest/download/{EXE_ASSET}")
+pub fn browser_url(channel: Channel) -> String {
+    match channel {
+        Channel::Stable => format!("https://github.com/{REPOSITORY}/releases/latest/download/{EXE_ASSET}"),
+        // Test builds have no "latest" link: the list, newest first.
+        Channel::Beta => format!("https://github.com/{REPOSITORY}/releases"),
+    }
 }
 
 /// The version in a Papka EXE's file properties ("0.1.47").
@@ -331,11 +346,13 @@ pub fn folder_from_side_file(exe: &Path) -> Option<PathBuf> {
 /// An update kept in a shared folder: `latest.json` and `Papka.exe`, as
 /// unpacked from the release archive. No internet access is needed: the
 /// files are read like any other file on the network.
-pub fn check_folder(folder: &Path, current: &str) -> io::Result<Option<Update>> {
+pub fn check_folder(folder: &Path, current: &str, channel: Channel) -> io::Result<Option<Update>> {
     let unreachable = |error: io::Error| io::Error::new(error.kind(), format!("папка обновлений «{}» недоступна: {error}", folder.display()));
     let manifest: Manifest = serde_json::from_slice(&fs::read(folder.join(MANIFEST_ASSET)).map_err(unreachable)?)
         .map_err(|error| io::Error::other(format!("{MANIFEST_ASSET} в папке обновлений повреждён: {error}")))?;
     if compare_versions(&manifest.version, current) != Ordering::Greater { return Ok(None); }
+    // A colleague on test builds may have put one there.
+    if channel == Channel::Stable && manifest.channel == "beta" { return Ok(None); }
     let exe = folder.join(EXE_ASSET);
     if !exe.is_file() {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("в папке обновлений нет {EXE_ASSET}")));
@@ -595,14 +612,14 @@ mod tests {
         fs::write(dir.path().join(EXE_ASSET), &exe).unwrap();
         fs::write(dir.path().join(MANIFEST_ASSET), format!(
             r#"{{"version":"0.1.47","commit":"abc","channel":"stable","sha256":"{}","notes":["Сеть"]}}"#, sha256_hex(&exe))).unwrap();
-        let found = check_folder(dir.path(), "0.1.46").unwrap().unwrap();
+        let found = check_folder(dir.path(), "0.1.46", Channel::Beta).unwrap().unwrap();
         assert_eq!((found.version.as_str(), found.prerelease), ("0.1.47", false));
         let bytes = get(&found.exe_url, &mut |_, _| {}).unwrap();
         assert_eq!(bytes, exe);
-        assert!(check_folder(dir.path(), "0.1.47").unwrap().is_none());
-        assert!(check_folder(&dir.path().join("нет"), "0.1.0").unwrap_err().to_string().contains("недоступна"));
+        assert!(check_folder(dir.path(), "0.1.47", Channel::Beta).unwrap().is_none());
+        assert!(check_folder(&dir.path().join("нет"), "0.1.0", Channel::Beta).unwrap_err().to_string().contains("недоступна"));
         fs::remove_file(dir.path().join(EXE_ASSET)).unwrap();
-        assert!(check_folder(dir.path(), "0.1.0").is_err());
+        assert!(check_folder(dir.path(), "0.1.0", Channel::Beta).is_err());
     }
 
     #[test]
@@ -644,7 +661,7 @@ mod tests {
         let update = Update { version: "0.1.48".into(), commit: "abc".into(), notes: vec!["Сеть".into()],
             sha256: sha256_hex(&bytes), exe_url: String::new(), page: String::new(), prerelease: true };
         assert!(publish_to_folder(dir.path(), &update, &bytes).unwrap());
-        let found = check_folder(dir.path(), "0.1.47").unwrap().unwrap();
+        let found = check_folder(dir.path(), "0.1.47", Channel::Beta).unwrap().unwrap();
         assert_eq!((found.version.as_str(), found.notes.as_slice()), ("0.1.48", &["Сеть".to_string()][..]));
         assert_eq!(get(&found.exe_url, &mut |_, _| {}).unwrap(), bytes);
         // The same or an older version is not written again.
@@ -654,7 +671,8 @@ mod tests {
 
     #[test]
     fn browser_links_follow_the_channel() {
-        assert!(browser_url().ends_with("/releases/latest/download/Papka.exe"));
+        assert!(browser_url(Channel::Stable).ends_with("/releases/latest/download/Papka.exe"));
+        assert!(browser_url(Channel::Beta).ends_with("/releases"));
     }
 
     #[test]
