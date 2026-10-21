@@ -542,6 +542,12 @@ impl Explorer {
         if self.close_error.take().is_some() {cx.notify();return;}
         if std::mem::take(&mut self.about_open) {cx.notify();return;}
         if std::mem::take(&mut self.updates.dialog) {cx.notify();return;}
+        if self.feed.editing.take().is_some() {
+            let handle = self.focus_handle.clone();
+            window.focus(&handle, cx);
+            cx.notify();
+            return;
+        }
         if self.quick_look.take().is_some() {cx.notify();return;}
         if self.comparison.take().is_some() {cx.notify();return;}
         if self.tour.is_some() {self.close_tour(cx);return;}

@@ -1717,15 +1717,46 @@ impl Explorer {
             let tint = match event.kind.as_str() { "missing" => DANGER, "observed" | "version" => ACCENT, _ => TEXT_MUTED };
             let path = event.path.clone();
             let gone = event.kind == "missing";
-            list = list.child(div().id(("feed-event", event.id as usize)).py_1().px_1().rounded_sm().cursor_pointer()
+            let event_id = event.id;
+            let editing = self.feed.editing == Some(event_id);
+            let note = match (event.author.as_deref().filter(|author| !author.is_empty()), event.comment.trim()) {
+                (Some(author), "") => Some(author.to_owned()),
+                (Some(author), comment) => Some(format!("{author}: {comment}")),
+                (None, "") => None,
+                (None, comment) => Some(comment.to_owned()),
+            };
+            list = list.child(div().id(("feed-event", event_id as usize)).group("feed-row").py_1().px_1().rounded_sm().cursor_pointer()
                 .flex().flex_col().gap_0p5().text_size(px(12.))
-                .hover(|style| style.bg(rgb(HOVER)))
-                .child(div().truncate().text_color(rgb(if gone { TEXT_MUTED } else { TEXT })).child(name))
+                .when(editing, |row| row.bg(rgb(ACCENT_SOFT)))
+                .when(!editing, |row| row.hover(|style| style.bg(rgb(HOVER))))
+                .child(div().flex().items_center().gap_1()
+                    .child(div().flex_1().min_w_0().truncate().text_color(rgb(if gone { TEXT_MUTED } else { TEXT })).child(name))
+                    // Who changed it and why: written by hand, kept with the entry.
+                    .child(div().id(("feed-comment", event_id as usize)).flex_none().size(px(20.)).rounded_sm().flex().items_center().justify_center()
+                        .when(!editing && note.is_none(), |button| button.invisible().group_hover("feed-row", |style| style.visible()))
+                        .hover(|style| style.bg(rgb(HOVER)))
+                        .child(small_icon("fm/pencil.svg", if note.is_some() || editing { ACCENT } else { TEXT_DIM }))
+                        .tooltip(|window, cx| Tooltip::new("Комментарий: кто и что изменил").build(window, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.edit_feed_comment(event_id, window, cx);
+                        }))))
                 .child(div().flex().gap_1().min_w_0().text_size(px(11.))
                     .child(div().flex_none().text_color(rgb(TEXT_DIM)).child(event.clock_label()))
                     .child(div().flex_none().text_color(rgb(tint)).child(event.feed_label().to_owned()))
                     .when_some(place, |row, place| row.child(div().min_w_0().truncate().text_color(rgb(TEXT_DIM)).child(format!("· {place}")))))
+                .when_some(note.filter(|_| !editing), |row, note| row.child(div().text_size(px(11.)).text_color(rgb(TEXT)).child(note)))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_feed_event(path.clone(), cx))));
+            if editing {
+                list = list.child(div().p_1().flex().flex_col().gap_1()
+                    .child(Input::new(&self.author_input).xsmall())
+                    .child(Input::new(&self.comment_input).xsmall())
+                    .child(div().flex().gap_1().justify_end()
+                        .child(text_button("feed-comment-cancel", "Отмена", ButtonKind::Ghost)
+                            .on_click(cx.listener(|this, _, _, cx| { this.feed.editing = None; cx.notify(); })))
+                        .child(text_button("feed-comment-save", "Сохранить", ButtonKind::Primary)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_feed_comment(cx))))));
+            }
         }
         section.child(list).into_any_element()
     }

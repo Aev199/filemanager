@@ -388,8 +388,11 @@ impl Explorer {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр · Enter — поиск"));
         let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке"));
-        let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Комментарий к сохранению…"));
-        let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фактический автор (необязательно)…"));
+        let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Что изменено…"));
+        let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Кто изменил (необязательно)…"));
+        let comment_subscription = cx.subscribe_in(&comment_input, window, |this, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) { this.save_feed_comment(cx); }
+        });
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Новое имя"));
         let bulk_template_input = cx.new(|cx| InputState::new(window, cx).placeholder("{stem} ({n}){ext}"));
         let bulk_subscription = cx.subscribe_in(&bulk_template_input, window, |this, _, event: &InputEvent, _, cx| {
@@ -613,6 +616,7 @@ impl Explorer {
                 search_subscription, address_subscription, rename_subscription, folder_subscription,
                 workspace_subscription,
                 bulk_subscription,
+                comment_subscription,
             ],
         }
     }

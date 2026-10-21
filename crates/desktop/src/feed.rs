@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use filemanager_core::history::{self, Event};
-use gpui::{AppContext, Context};
+use gpui::{AppContext, Context, Focusable, Window};
 
 use crate::Explorer;
 
@@ -28,6 +28,8 @@ pub(crate) struct Feed {
     loading: bool,
     /// Files changed since the feed was read.
     pub(crate) dirty: bool,
+    /// The entry whose comment is being written.
+    pub(crate) editing: Option<i64>,
 }
 
 impl Feed {
@@ -61,6 +63,52 @@ impl Explorer {
                 match events {
                     Ok(events) => this.feed.events = events,
                     Err(error) => this.status = format!("Лента изменений недоступна: {error}"),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Opens the comment fields under a feed entry, filled with what it has.
+    pub(crate) fn edit_feed_comment(&mut self, event_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feed.editing == Some(event_id) {
+            self.feed.editing = None;
+            cx.notify();
+            return;
+        }
+        let Some(event) = self.feed.events.iter().find(|event| event.id == event_id) else { return };
+        let (comment, author) = (event.comment.clone(), event.author.clone().unwrap_or_default());
+        self.feed.editing = Some(event_id);
+        self.comment_input.update(cx, |input, cx| input.set_value(comment, window, cx));
+        self.author_input.update(cx, |input, cx| input.set_value(author, window, cx));
+        let focus = self.comment_input.focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Saves who changed the file and why; Enter in the comment does it too.
+    pub(crate) fn save_feed_comment(&mut self, cx: &mut Context<Self>) {
+        let (Some(event_id), Some(journal)) = (self.feed.editing, self.journal.clone()) else { return };
+        let comment = self.comment_input.read(cx).value().trim().to_string();
+        let author = self.author_input.read(cx).value().trim().to_string();
+        let (saved_comment, saved_author) = (comment.clone(), author.clone());
+        let task = cx.background_spawn(async move {
+            journal.annotate(event_id, (!author.is_empty()).then_some(author.as_str()), &comment)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(true) => {
+                        if let Some(event) = this.feed.events.iter_mut().find(|event| event.id == event_id) {
+                            event.comment = saved_comment;
+                            event.author = (!saved_author.is_empty()).then_some(saved_author);
+                        }
+                        if this.feed.editing == Some(event_id) { this.feed.editing = None; }
+                        this.status = "Комментарий сохранён".into();
+                    }
+                    Ok(false) => this.status = "Запись ленты не найдена".into(),
+                    Err(error) => this.status = format!("Комментарий не сохранён: {error}"),
                 }
                 cx.notify();
             });
