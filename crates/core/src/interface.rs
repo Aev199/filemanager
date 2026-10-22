@@ -146,19 +146,3 @@ pub fn to_russian_layout(text: &str) -> String {
         .map(|c| EN.chars().position(|e| e == c).and_then(|i| RU.chars().nth(i)).unwrap_or(c))
         .collect()
 }
-
-/// Whether Windows plays interface animations («Эффекты анимации» in
-/// Accessibility settings); elsewhere always.
-pub fn system_animations() -> bool {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION};
-        let mut on: i32 = 1;
-        let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut on as *mut i32).cast(), 0) };
-        read == 0 || on != 0
-    }
-    #[cfg(not(windows))]
-    {
-        true
-    }
-}

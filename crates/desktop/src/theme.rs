@@ -22,12 +22,10 @@ pub fn file_icon(extension: Option<&str>) -> (&'static str, u32) {
 }
 
 static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// A popup's entrance: quick and easing out, like macOS; a single frame
-/// when Windows has animation effects turned off.
+/// A popup's entrance: quick and easing out, like macOS. It plays whatever
+/// Windows' own animation setting is: often it is off and locked by policy.
 pub fn motion(ms: u64) -> gpui::Animation {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *ON.get_or_init(filemanager_core::interface::system_animations);
-    gpui::Animation::new(std::time::Duration::from_millis(if on { ms } else { 1 })).with_easing(gpui::ease_out_quint())
+    gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(gpui::ease_out_quint())
 }
 
 pub fn set_light(light: bool) {
