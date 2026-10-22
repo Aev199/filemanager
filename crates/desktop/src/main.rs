@@ -395,7 +395,7 @@ impl Explorer {
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр · Enter — поиск"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Фильтр · Shift+Enter — везде"));
         let address_input = cx.new(|cx| InputState::new(window, cx).placeholder("Путь к папке"));
         let comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Что изменено…"));
         let author_input = cx.new(|cx| InputState::new(window, cx).placeholder("Кто изменил (необязательно)…"));
@@ -464,18 +464,10 @@ impl Explorer {
                         this.close_search();
                     } else if this.search_active {
                         this.schedule_search(cx);
+                    } else {
+                        this.select_first_match(cx);
                     }
                     cx.notify();
-                }
-                InputEvent::PressEnter { .. } if !this.search_query.trim().is_empty() => {
-                    this.search_active = true;
-                    this.search_root = None;
-                    // The panes are hidden behind the results: their selection
-                    // must not be cut, copied or deleted from there.
-                    this.selected = None;
-                    this.marked.clear();
-                    this.anchor = None;
-                    this.run_search(cx);
                 }
                 _ => {}
             }

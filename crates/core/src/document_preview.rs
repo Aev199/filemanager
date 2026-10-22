@@ -104,7 +104,15 @@ fn run(path: &Path) -> windows::core::Result<()> {
         let clsid = CLSIDFromString(PCWSTR(clsid_text.as_ptr()))?;
         // INPROC keeps provider code within our bounded helper, not in GPUI or
         // an unowned external COM server that cannot be cancelled by our Job.
-        let handler: IPreviewHandler = CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER)?;
+        // A 32-bit handler (32-bit Office on 64-bit Windows) is registered
+        // only for 32-bit programs: like Explorer, run it in the system
+        // preview host (prevhost.exe), which closes with its handler.
+        let handler: IPreviewHandler = match CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER) {
+            Err(error) if error.code() == REGDB_E_CLASSNOTREG || error.code() == CLASS_E_CLASSNOTAVAILABLE =>
+                CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER | CLSCTX_ACTIVATE_32_BIT_SERVER)
+                    .or_else(|_| CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER))?,
+            other => other?,
+        };
         let frame: IUnknown = Frame.into();
         let mut session = Box::new(Session {
             site: handler.cast().ok(),

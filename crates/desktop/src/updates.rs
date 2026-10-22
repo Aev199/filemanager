@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use filemanager_core::update::{self, Channel, Update};
-use gpui::{AnyElement, Context, MouseButton, div, prelude::*, px};
+use gpui::{AnimationExt, AnyElement, Context, MouseButton, div, prelude::*, px};
 
 use crate::Explorer;
 use crate::theme::*;
@@ -484,7 +484,8 @@ impl Explorer {
                 // A running download keeps its dialog closable but not cancelled.
                 close(this, cx);
             }))
-            .child(card)
+            .child(card.with_animation("update-card", crate::theme::motion(160), |card, delta| card.mt(px(-8. * (1. - delta)))))
+            .with_animation("update-appear", crate::theme::motion(130), |this, delta| this.opacity(delta))
             .into_any_element())
     }
 }

@@ -12,9 +12,9 @@ use filemanager_core::sort::SortKey;
 use filemanager_core::versions::Stacked;
 use filemanager_core::labels::Label;
 use gpui::{
-    anchored, deferred, div, img, rgb_to_hsla, ObjectFit, ease_out_quint, prelude::*, px, rgba, svg, uniform_list,
+    anchored, deferred, div, img, rgb_to_hsla, ObjectFit, prelude::*, px, rgba, svg, uniform_list,
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div, ElementId, Hsla,
-    ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Window,
+    ExternalPaths, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Transformation, Window,
 };
 use gpui_component::input::Input;
 use gpui_component::Sizable;
@@ -358,7 +358,7 @@ impl Explorer {
         div().id("tour-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
             .child(card)
-            .with_animation("tour-appear", Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
+            .with_animation("tour-appear", motion(150),
                 |this, delta| this.opacity(delta))
             .into_any_element()
     }
@@ -423,7 +423,8 @@ impl Explorer {
                     .on_click(cx.listener(|this,_,_,cx| {this.comparison=None;cx.notify();}))));
         div().id("comparison-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x0000008C))
-            .child(card)
+            .child(card.with_animation("comparison-card", motion(170), |card, delta| card.mt(px(12. * (1. - delta)))))
+            .with_animation("comparison-appear", motion(150), |this, delta| this.opacity(delta))
             .into_any_element()
     }
 
@@ -488,7 +489,9 @@ impl Explorer {
         div().id("quick-look-backdrop").absolute().inset_0().flex().items_center().justify_center()
             .bg(rgba(0x00000080))
             .on_mouse_down(MouseButton::Left, cx.listener(|this,_,_,cx| {this.quick_look=None;cx.notify();}))
-            .child(card)
+            // Like Quick Look on a Mac: the window rises a little as it fades in.
+            .child(card.with_animation("quick-look-card", motion(180), |card, delta| card.mt(px(16. * (1. - delta)))))
+            .with_animation("quick-look-appear", motion(140), |this, delta| this.opacity(delta))
             .into_any_element()
     }
 
@@ -553,6 +556,7 @@ impl Explorer {
                     .when(crate::updates::Updates::previous_exists(), |row| row.child(text_button("about-rollback", "Вернуть предыдущую версию", ButtonKind::Ghost)
                         .on_click(cx.listener(|this,_,_,cx| {this.about_open=false;this.rollback_update(cx);})))))
                 .when_some(self.updates.note.clone(), |panel, note| panel.child(div().text_color(rgb(TEXT)).child(note))))
+            .with_animation("about-appear", motion(130), |this, delta| this.opacity(delta).mt(px(-6. * (1. - delta))))
             .into_any_element()
     }
 
@@ -699,8 +703,13 @@ impl Explorer {
             .text_size(px(12.)).text_color(rgb(TEXT_MUTED)).font_weight(gpui::FontWeight::SEMIBOLD)
             .hover(|style| style.text_color(rgb(TEXT)))
             .child(div().flex_1().child(key))
-            .child(svg().path(if folded { "fm/chevron-right.svg" } else { "fm/chevron-down.svg" }).size(px(12.))
-                .text_color(rgb(TEXT_DIM)).when(!folded, |chevron| chevron.invisible().group_hover("section", |style| style.visible())))
+            // A disclosure triangle: it turns rather than swaps.
+            .child(svg().path("fm/chevron-right.svg").size(px(12.))
+                .text_color(rgb(TEXT_DIM)).when(!folded, |chevron| chevron.invisible().group_hover("section", |style| style.visible()))
+                .with_animation(SharedString::from(format!("section-turn-{key}-{folded}")), motion(160), move |chevron, delta| {
+                    let open = if folded { 1. - delta } else { delta };
+                    chevron.with_transformation(Transformation::rotate(gpui::radians(open * std::f32::consts::FRAC_PI_2)))
+                }))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(key, cx)))
     }
 
@@ -1882,8 +1891,8 @@ impl Explorer {
                         this.key_find(&crate::keys::Find, window, cx);
                     }))))
             .when(filter_shown, |this| this.child(
-                div().id("filter-field").flex_none().w(px(200.))
-                    .tooltip(|window, cx| Tooltip::new("Фильтр по имени в этой папке. Enter — во вложенных папках, Esc — закрыть.").build(window, cx))
+                div().id("filter-field").key_context("QuickFilter").flex_none().w(px(200.))
+                    .tooltip(|window, cx| Tooltip::new("Фильтр по имени в этой папке: ↑ ↓ — выбор, Enter — открыть, Shift+Enter — искать во вложенных папках, Esc — закрыть.").build(window, cx))
                     .child(Input::new(&self.search_input).h(px(24.)).text_size(px(12.))
                         .prefix(small_icon("fm/search.svg", TEXT_DIM)).cleanable(true))))
             .when_some(count, |this, count| this.child(items_label(count)))
@@ -2357,7 +2366,7 @@ impl Explorer {
         }
         let animated = list.with_animation(
             ("menu-appear", menu.serial as usize),
-            Animation::new(Duration::from_millis(130)).with_easing(ease_out_quint()),
+            motion(130),
             |this, delta| this.opacity(delta).mt(px(-6. * (1. - delta))),
         );
         deferred(anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(animated))
@@ -2459,7 +2468,7 @@ impl Explorer {
                 .child(text_button("conflict-keep", "Сохранить оба", ButtonKind::Primary)
                     .on_click(cx.listener(|this, _, _, cx| this.resolve_transfer(crate::ConflictChoice::KeepBoth, cx)))))
             .with_animation("conflict-appear",
-                Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
+                motion(150),
                 |this, delta| this.opacity(delta).mt(px(12. * (1. - delta))));
         Some(
             div().id("conflict-backdrop").absolute().inset_0().flex().items_center().justify_center()
@@ -2535,7 +2544,7 @@ impl Explorer {
                         window.focus(&handle, cx);
                     }))))
             .with_animation("dialog-appear",
-                Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
+                motion(150),
                 |this, delta| this.opacity(delta).mt(px(12. * (1. - delta))));
         Some(
             div().id("dialog-backdrop").absolute().inset_0().flex().items_center().justify_center()
@@ -2704,6 +2713,8 @@ impl Render for Explorer {
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_new_folder(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_dismiss(this,event,window,cx); }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_select_next(this,event,window,cx); }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_filter_enter(this,event,window,cx); } }))
+            .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_filter_search(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { Self::key_select_prev(this,event,window,cx); }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_first(this,event,window,cx); } }))
             .on_action(cx.listener(|this,event,window,cx| { if !this.interface_modal() { Self::key_select_last(this,event,window,cx); } }))

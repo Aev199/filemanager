@@ -587,8 +587,7 @@ impl Explorer {
                         // navigation itself stays instant.
                         .with_animation(
                             if self.palette.is_some() { "palette-appear" } else { "settings-appear" },
-                            gpui::Animation::new(std::time::Duration::from_millis(120))
-                                .with_easing(gpui::ease_out_quint()),
+                            crate::theme::motion(120),
                             |body, delta| body.opacity(delta).mt(px(-6. * (1. - delta))),
                         ),
                 )

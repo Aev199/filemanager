@@ -16,7 +16,7 @@ actions!(filemanager, [
     SplitRight, SplitDown, ClosePane, ReopenTab, PreviousPane, PaneLeft, PaneRight, PaneUp, PaneDown,
     ToggleHidden, SwitchPane, ToggleSidebar, ToggleInspector, ViewList, ViewColumns,
     CopyPath, SelectAll, ExtendNext, ExtendPrev, ClipboardCopy, ClipboardCut, ClipboardPaste, UndoLast,
-    OpenJump, LabelWork, LabelReview, LabelIssued, LabelObsolete, LabelImportant, LabelClear,
+    OpenJump, FilterEnter, FilterSearch, LabelWork, LabelReview, LabelIssued, LabelObsolete, LabelImportant, LabelClear,
 ]);
 
 const CONTEXT: &str = "Filemanager";
@@ -32,6 +32,12 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("space", SettingsToggle, Some("SettingsOverlay")),
         KeyBinding::new("enter", SettingsApply, Some("SettingsOverlay")),
         KeyBinding::new("escape", DismissOverlay, Some("SettingsOverlay")),
+        // The quick filter keeps the list under the keyboard: arrows move the
+        // selection, Enter opens it; Shift+Enter searches subfolders.
+        KeyBinding::new("up", SelectPrev, Some("QuickFilter > Input")),
+        KeyBinding::new("down", SelectNext, Some("QuickFilter > Input")),
+        KeyBinding::new("enter", FilterEnter, Some("QuickFilter > Input")),
+        KeyBinding::new("shift-enter", FilterSearch, Some("QuickFilter > Input")),
         KeyBinding::new("ctrl-k", OpenPalette, Some(CONTEXT)),
         KeyBinding::new("ctrl-p", OpenJump, Some(CONTEXT)),
         KeyBinding::new("ctrl-p", OpenJump, Some("CommandPalette > Input")),
@@ -521,7 +527,11 @@ impl Explorer {
         let folder = self.pane_path(self.active_side());
         if self.refuse_in_archive(&folder, cx) { return; }
         self.creating_folder = true;
-        self.folder_input.update(cx, |input, cx| input.set_value("Новая папка", window, cx));
+        // As Explorer: the suggested name is selected, typing replaces it.
+        self.folder_input.update(cx, |input, cx| {
+            input.set_value("Новая папка", window, cx);
+            input.select_all(window, cx);
+        });
         let focus = self.folder_input.focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -627,8 +637,70 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(1,cx); } else if self.settings.is_some() {self.settings_move(1,cx);} else if !self.interface_modal() { self.move_selection(1, None, cx); } }
-    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(-1,cx); } else if self.settings.is_some() {self.settings_move(-1,cx);} else if !self.interface_modal() { self.move_selection(-1, None, cx); } }
+    pub(crate) fn key_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(1,cx); } else if self.settings.is_some() {self.settings_move(1,cx);} else if self.search_active { self.move_search_selection(1, cx); } else if !self.interface_modal() { self.move_selection(1, None, cx); } }
+    pub(crate) fn key_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) { if self.palette.is_some() { self.palette_move(-1,cx); } else if self.settings.is_some() {self.settings_move(-1,cx);} else if self.search_active { self.move_search_selection(-1, cx); } else if !self.interface_modal() { self.move_selection(-1, None, cx); } }
+
+    /// Enter in the quick filter: the selected match opens (a folder, a
+    /// file); with nothing matching here, the subfolders are searched.
+    pub(crate) fn key_filter_enter(&mut self, _: &FilterEnter, _: &mut Window, cx: &mut Context<Self>) {
+        if self.search_active {
+            if let Some(index) = self.search.selected { self.open_search_hit(index, cx); }
+            return;
+        }
+        if self.selected_entry().is_none() { self.select_first_match(cx); }
+        match self.selected_entry() {
+            Some(entry) => {
+                let side = self.active_side();
+                self.open_entry(entry.path, entry.is_directory, side, cx);
+            }
+            None => self.start_full_search(cx),
+        }
+    }
+
+    pub(crate) fn key_filter_search(&mut self, _: &FilterSearch, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_full_search(cx);
+    }
+
+    /// Search the subfolders for the filter's words; results replace the panes.
+    pub(crate) fn start_full_search(&mut self, cx: &mut Context<Self>) {
+        if self.search_query.trim().is_empty() { return; }
+        self.search_active = true;
+        self.search_root = None;
+        // The panes are hidden behind the results: their selection
+        // must not be cut, copied or deleted from there.
+        self.selected = None;
+        self.marked.clear();
+        self.anchor = None;
+        self.run_search(cx);
+    }
+
+    /// While the filter narrows the list, the selection stays on a visible
+    /// name: the first match when the old one was filtered out.
+    pub(crate) fn select_first_match(&mut self, cx: &mut Context<Self>) {
+        if self.filter.is_empty() { return; }
+        let folder = self.pane_path(self.active_side());
+        let Some((listing, indices)) = self.folder_view(self.browser.active, &folder) else { return };
+        let visible = self.selected.as_ref().is_some_and(|selected| indices.iter().any(|&i| &listing.entries[i].path == selected));
+        if visible { return; }
+        let first = indices.first().map(|&i| listing.entries[i].path.clone());
+        self.anchor = first.clone();
+        self.selected = first;
+        self.marked.clear();
+        self.reveal_selected();
+        cx.notify();
+    }
+
+    fn move_search_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.search.hits.len();
+        if count == 0 { return; }
+        let next = match self.search.selected {
+            Some(current) => (current as isize + delta).clamp(0, count as isize - 1) as usize,
+            None => if delta < 0 { count - 1 } else { 0 },
+        };
+        self.search.selected = Some(next);
+        self.search.scroll.scroll_to_item(next, ScrollStrategy::Nearest);
+        cx.notify();
+    }
     pub(crate) fn key_select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(false), cx); }
     pub(crate) fn key_select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) { self.move_selection(0, Some(true), cx); }
 
