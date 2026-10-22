@@ -42,7 +42,10 @@ pub struct CopyControl {
     /// Paused transfers wait between and inside files until resumed.
     paused: AtomicBool,
     copied_bytes: AtomicU64,
+    /// Size of the item being transferred (a file, or a folder's files).
     total_bytes: AtomicU64,
+    /// `copied_bytes` when the current item began.
+    item_start: AtomicU64,
     phase: AtomicU8,
     progress: Mutex<TransferProgress>,
 }
@@ -57,7 +60,20 @@ impl CopyControl {
         let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
         progress.source = Some(plan.source.clone());
         progress.destination = plan.destination.clone();
+        self.item_start.store(self.bytes_copied(), Ordering::Relaxed);
+        self.total_bytes.store(0, Ordering::Relaxed);
         self.set_phase(TransferPhase::Copying);
+    }
+    /// How much of the batch is done, 0..=1: finished items plus the bytes
+    /// of the current one. None before the batch starts.
+    pub fn fraction(&self) -> Option<f64> {
+        let progress = self.progress();
+        if progress.total == 0 { return None; }
+        let total = self.total_bytes();
+        let current = if total == 0 { 0.0 } else {
+            (self.bytes_copied().saturating_sub(self.item_start.load(Ordering::Relaxed)) as f64 / total as f64).min(1.0)
+        };
+        Some(((progress.processed as f64 + current) / progress.total as f64).min(1.0))
     }
     fn finish_item(&self) {
         self.progress.lock().unwrap_or_else(|e| e.into_inner()).processed += 1;
@@ -845,6 +861,20 @@ mod tests {
         assert_eq!(progress.processed, 2);
         assert_eq!(progress.total, 2);
         assert!(crate::path_utils::same_place(progress.source.as_ref().unwrap(), &last));
+        assert_eq!(control.fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn fraction_weighs_finished_items_and_the_current_bytes() {
+        let control = CopyControl::default();
+        assert_eq!(control.fraction(), None);
+        control.begin_batch(4);
+        control.finish_item();
+        control.item_start.store(control.bytes_copied(), Ordering::Relaxed);
+        control.set_total_bytes(100);
+        control.copied_bytes.fetch_add(50, Ordering::Relaxed);
+        // One of four done, half of the second: 1.5 / 4.
+        assert_eq!(control.fraction(), Some(0.375));
     }
 
     #[test]

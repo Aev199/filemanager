@@ -237,6 +237,8 @@ struct Explorer {
     inspector_versions: Vec<filemanager_core::versions::Member>,
     zone: DropZone,
     copy_in_progress: bool,
+    /// Share of the running copy or move done, 0..=1, for the progress bar.
+    transfer_fraction: Option<f64>,
     operation_busy: bool,
     copy_control: Option<Arc<CopyControl>>,
     /// Items a transfer could not finish (e.g. the network dropped): their
@@ -532,6 +534,7 @@ impl Explorer {
             inspector_versions: Vec::new(),
             zone: DropZone::default(),
             copy_in_progress: false,
+            transfer_fraction: None,
             operation_busy: false,
             copy_control: None,
             retry: None,
@@ -1106,23 +1109,34 @@ impl Explorer {
 
     fn start_transfer_progress(&mut self, action: &'static str, cx: &mut Context<Self>) {
         let progress = self.copy_control.as_ref().unwrap().clone();
+        self.transfer_fraction = Some(0.0);
         cx.spawn(async move |weak, cx| {
+            // Time spent copying, without pauses: the basis for "осталось".
+            let mut active = Duration::ZERO;
+            let mut last = std::time::Instant::now();
             loop {
                 cx.background_spawn(async { std::thread::sleep(Duration::from_millis(250)); }).await;
+                let now = std::time::Instant::now();
+                if !progress.is_paused() { active += now - last; }
+                last = now;
                 let keep_going = weak.update(cx, |this, cx| {
                     if !this.copy_in_progress || !this.copy_control.as_ref()
                         .is_some_and(|active| Arc::ptr_eq(active, &progress)) { return false; }
                     let detail = progress.progress();
+                    let fraction = progress.fraction().unwrap_or(0.0);
+                    this.transfer_fraction = Some(fraction);
                     let phase: String = if progress.is_paused() { "На паузе".into() } else { match progress.phase() {
                         TransferPhase::Verifying => "Проверка копии…".into(),
                         TransferPhase::Recycling => "Завершение переноса…".into(),
-                        TransferPhase::Copying => {
-                            let mib = progress.bytes_copied() as f64 / 1_048_576.0;
-                            format!("{action}… {mib:.1} МБ")
-                        }
+                        TransferPhase::Copying => format!("{action}… {}", filemanager_core::format::format_size(progress.bytes_copied())),
                     } };
+                    // An estimate only once there is something to go by.
+                    let left = (fraction > 0.02 && active.as_secs() >= 3 && !progress.is_paused())
+                        .then(|| active.as_secs_f64() * (1.0 - fraction) / fraction)
+                        .map(|seconds| format!(" · осталось {}", remaining(seconds)))
+                        .unwrap_or_default();
                     let path = detail.source.as_ref().map(|path| browser::display_name(path)).unwrap_or_default();
-                    this.status = format!("{phase} · обработано {}/{} · {path}", detail.processed, detail.total);
+                    this.status = format!("{phase} · {}/{}{left} · {path}", detail.processed, detail.total);
                     cx.notify();
                     true
                 }).unwrap_or(false);
@@ -1989,4 +2003,15 @@ fn main() {
         .expect("GPUI window failed");
         cx.activate(true);
     });
+}
+
+/// "осталось" for a transfer: rounded the way people say it.
+fn remaining(seconds: f64) -> String {
+    let seconds = seconds.round() as u64;
+    match seconds {
+        0..=9 => "несколько секунд".into(),
+        10..=59 => format!("{} с", seconds.div_ceil(5) * 5),
+        60..=3599 => format!("{} мин", seconds.div_ceil(60)),
+        _ => format!("{} ч {} мин", seconds / 3600, (seconds % 3600) / 60),
+    }
 }

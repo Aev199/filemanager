@@ -1933,6 +1933,14 @@ impl Explorer {
                 .child(crate::messages::localize(&self.status)));
         if self.copy_in_progress {
             let paused = self.copy_control.as_ref().is_some_and(|control| control.is_paused());
+            // A capsule like Finder's: fills as the copy goes, dims on pause.
+            if let Some(fraction) = self.transfer_fraction {
+                bar = bar.child(div().flex_none().flex().items_center().gap_2()
+                    .child(div().w(px(140.)).h(px(6.)).rounded_full().bg(rgb(BORDER)).overflow_hidden()
+                        .child(div().h_full().rounded_full().bg(rgb(if paused { TEXT_DIM } else { ACCENT }))
+                            .w(gpui::relative(fraction.clamp(0.0, 1.0) as f32))))
+                    .child(div().w(px(32.)).text_color(rgb(TEXT_MUTED)).child(format!("{}%", (fraction * 100.0).floor() as u32))));
+            }
             bar = bar.child(
                 div().id("pause-copy").px_2().rounded_sm().cursor_pointer().text_color(rgb(TEXT))
                     .hover(|style| style.bg(rgb(HOVER)))
