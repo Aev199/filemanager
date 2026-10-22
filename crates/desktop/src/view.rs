@@ -1258,29 +1258,33 @@ impl Explorer {
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
-            // A star before every folder: lit for a favourite, an outline
-            // otherwise; a click adds or removes it. Files keep the place empty.
-            .when(self.favorite_stars, |row| row.child(if is_dir {
-                let favorite = self.favorites.contains(&path);
-                let target = path.clone();
-                div().id(SharedString::from(format!("star-{}", path.display()))).size(px(16.)).flex_none()
-                    .flex().items_center().justify_center().rounded_sm().cursor_pointer()
-                    .hover(|style| style.bg(rgb(if selected { SELECTED_BORDER } else { PRESSED })))
-                    .tooltip(move |window, cx| Tooltip::new(if favorite { "Убрать из избранного" } else { "Добавить в избранное" }).build(window, cx))
-                    .child(svg().path(if favorite { "fm/star-fill.svg" } else { "fm/star.svg" }).size(px(13.))
-                        .text_color(rgb(if favorite { FAVORITE } else if selected { SELECTION_TEXT } else { TEXT_DIM }))
-                        .when(!favorite && !selected, |star| star.opacity(0.45)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_favorite(&target, cx); }))
-                    .into_any_element()
-            } else {
-                div().w(px(16.)).flex_none().into_any_element()
-            }))
             // An older version sits indented under the newest one.
             .when(matches!(stack, Some(Stacked::Member { .. })), |row| row.child(div().w(px(16.)).flex_none()))
+            .group("file-row")
             .child(match self.system_icon(&path).filter(|_| !is_dir) {
                 // The program's own icon, as in Explorer.
                 Some(image) => img(image).size(px(16.)).flex_none().when(entry.hidden && !selected, |image| image.opacity(0.55)).into_any_element(),
+                None if is_dir && self.favorite_stars => {
+                    // A small star in the folder's top left corner: lit for a
+                    // favourite, an outline under the pointer otherwise; a
+                    // click adds or removes it.
+                    let favorite = self.favorites.contains(&path);
+                    let target = path.clone();
+                    let behind = if selected { SELECTED } else { bg.unwrap_or(base) };
+                    div().relative().size(px(16.)).flex_none()
+                        .child(icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)))
+                        .child(div().id(SharedString::from(format!("star-{}", path.display())))
+                            .absolute().top(px(-5.)).left(px(-6.)).size(px(12.)).cursor_pointer()
+                            .when(!favorite, |star| star.invisible().group_hover("file-row", |style| style.visible()))
+                            .tooltip(move |window, cx| Tooltip::new(if favorite { "Убрать из избранного" } else { "Добавить в избранное" }).build(window, cx))
+                            // A halo in the row's colour keeps the star apart from the folder.
+                            .child(svg().absolute().inset_0().path("fm/star-fill.svg").size(px(12.)).text_color(rgb(behind)))
+                            .child(svg().absolute().top(px(2.)).left(px(2.)).path(if favorite { "fm/star-fill.svg" } else { "fm/star.svg" }).size(px(8.))
+                                .text_color(rgb(if favorite { FAVORITE } else if selected { SELECTION_TEXT } else { TEXT_MUTED })))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_favorite(&target, cx); })))
+                        .into_any_element()
+                }
                 None => icon(icon_path, tint).when(entry.hidden && !selected, |svg| svg.opacity(0.55)).into_any_element(),
             });
         // F2 edits the name in place; Enter applies, Esc or a click elsewhere cancels.

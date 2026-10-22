@@ -21,8 +21,6 @@ pub(crate) const CHANNEL_KEY: &str = "update_channel";
 pub(crate) const AUTO_KEY: &str = "update_auto";
 const SKIPPED_KEY: &str = "update_skipped";
 const CHECKED_KEY: &str = "update_checked_at";
-pub(crate) const FOLDER_KEY: &str = "update_folder";
-pub(crate) const SHARE_KEY: &str = "update_share";
 /// How long Papka looks for a file the browser is downloading.
 const WATCH: Duration = Duration::from_secs(20 * 60);
 const DAY: u64 = 24 * 60 * 60;
@@ -61,11 +59,6 @@ pub(crate) struct Updates {
     offered: Option<Update>,
     /// Result line for a check asked for by hand.
     pub(crate) note: Option<String>,
-    /// Shared folder with `latest.json` and `Papka.exe` (settings or
-    /// `papka-update.txt` beside the EXE).
-    pub(crate) folder: Option<PathBuf>,
-    /// Put each installed version into `folder` for colleagues.
-    pub(crate) share: bool,
     /// Looking in Downloads for the file the browser is fetching.
     watching: bool,
 }
@@ -91,10 +84,7 @@ impl Updates {
             let stem = exe.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
             let _ = std::fs::remove_file(exe.with_file_name(format!("{stem}.new.exe")));
         }
-        let side_file = current_exe().ok().and_then(|exe| update::folder_from_side_file(&exe));
         Updates {
-            folder: value(FOLDER_KEY).filter(|text| !text.is_empty()).map(PathBuf::from).or(side_file),
-            share: value(SHARE_KEY).is_some_and(|flag| flag == "1"),
             channel: value(CHANNEL_KEY).map_or(Channel::Stable, |key| Channel::from_key(&key)),
             auto: value(AUTO_KEY).is_none_or(|flag| flag != "0"),
             skipped: value(SKIPPED_KEY),
@@ -121,8 +111,8 @@ impl Explorer {
                 let alive = this.update(cx, |this, cx| {
                     let last = this.workspaces.as_ref().and_then(|store| store.value(CHECKED_KEY).ok().flatten())
                         .and_then(|text| text.parse::<u64>().ok()).unwrap_or(0);
-                    // Downloads and the shared folder cost nothing to look at:
-                    // every hour. GitHub once a day.
+                    // Downloads cost nothing to look at: every hour.
+                    // GitHub once a day.
                     let due = now().saturating_sub(last) >= DAY;
                     if this.updates.auto && matches!(this.updates.phase, Phase::Idle) {
                         this.check_updates_from(false, due, cx);
@@ -138,8 +128,8 @@ impl Explorer {
         self.check_updates_from(manual, true, cx);
     }
 
-    /// Looks, in order, in Downloads (a file the browser fetched), the shared
-    /// folder, and — when `online` — GitHub itself.
+    /// Looks in Downloads (a file the browser fetched) and — when
+    /// `online` — on GitHub itself.
     fn check_updates_from(&mut self, manual: bool, online: bool, cx: &mut Context<Self>) {
         match &self.updates.phase {
             Phase::Checking | Phase::Downloading { .. } => return,
@@ -155,7 +145,6 @@ impl Explorer {
         self.updates.phase = Phase::Checking;
         self.updates.note = None;
         let channel = self.updates.channel;
-        let folder = self.updates.folder.clone();
         // A skipped version is passed over, not allowed to hide newer ones.
         let skipped = (!manual).then(|| self.updates.skipped.clone()).flatten();
         let task = cx.background_spawn(async move {
@@ -171,27 +160,13 @@ impl Explorer {
                 .and_then(|downloads| update::find_downloaded(&downloads, VERSION, &update::exe_version)) {
                 if let Ok(found) = update::downloaded_update(&path, &version) { consider(found); }
             }
-            let mut folder_error = None;
-            if let Some(folder) = folder.as_deref() {
-                match update::check_folder(folder, VERSION, channel) {
-                    Ok(Some(found)) => consider(found),
-                    Ok(None) => {}
-                    Err(error) => folder_error = Some(error.to_string()),
-                }
-            }
             let online_result = online.then(|| update::check(VERSION, channel, &update::fetch));
             if let Some(Ok(Some(found))) = &online_result { consider(found.clone()); }
             if let Some(found) = best { return Outcome::Found(found); }
             match online_result {
-                None => folder_error.map_or(Outcome::Latest, Outcome::Failed),
-                Some(Ok(_)) => Outcome::Latest,
-                // A shared folder that is up to date answers for the network.
-                Some(Err(_)) if folder.is_some() && folder_error.is_none() => Outcome::Latest,
+                None | Some(Ok(_)) => Outcome::Latest,
                 Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => Outcome::Failed(error.to_string()),
-                Some(Err(error)) => Outcome::Blocked(match folder_error {
-                    Some(folder_error) => format!("{error}. Папка обновлений: {folder_error}"),
-                    None => error.to_string(),
-                }),
+                Some(Err(error)) => Outcome::Blocked(error.to_string()),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -283,19 +258,12 @@ impl Explorer {
         let progress = Arc::new(Mutex::new((0u64, None::<u64>)));
         let shown = progress.clone();
         let job = found.clone();
-        let share = self.updates.share.then(|| self.updates.folder.clone()).flatten();
         let task = cx.background_spawn(async move {
             let exe = current_exe()?;
             let bytes = update::get(&job.exe_url, &mut |done, total| {
                 if let Ok(mut progress) = progress.lock() { *progress = (done, total); }
             })?;
-            update::install(&exe, &bytes, &job.sha256)?;
-            // Colleagues behind the same firewall take it from the shared folder.
-            Ok::<_, std::io::Error>(share.map(|folder| match update::publish_to_folder(&folder, &job, &bytes) {
-                Ok(true) => format!("Версия {} выложена в папку обновлений для коллег", job.version),
-                Ok(false) => String::new(),
-                Err(error) => format!("Не удалось выложить версию в папку обновлений: {error}"),
-            }))
+            update::install(&exe, &bytes, &job.sha256)
         });
         // Progress is read on a timer: the download runs off the UI thread.
         cx.spawn(async move |this, cx| loop {
@@ -315,9 +283,8 @@ impl Explorer {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.updates.phase = match result {
-                    Ok(shared) => {
+                    Ok(()) => {
                         this.status = format!("Версия {} установлена и запустится при следующем старте", found.version);
-                        this.updates.note = shared.filter(|text| !text.is_empty());
                         Phase::Ready(found)
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied =>
@@ -359,8 +326,8 @@ impl Explorer {
         cx.notify();
     }
 
-    pub(crate) fn set_update_preferences(&mut self, auto: bool, channel: Channel, folder: Option<PathBuf>, share: bool) {
-        if (self.updates.channel != channel || self.updates.folder != folder)
+    pub(crate) fn set_update_preferences(&mut self, auto: bool, channel: Channel) {
+        if self.updates.channel != channel
             && matches!(self.updates.phase, Phase::Available(_) | Phase::Failed(_) | Phase::Blocked(_)) {
             // Another source may offer a different version. A download in
             // progress or an installed update is left alone.
@@ -368,13 +335,8 @@ impl Explorer {
         }
         self.updates.auto = auto;
         self.updates.channel = channel;
-        self.updates.share = share;
         self.remember(AUTO_KEY, if auto { "1" } else { "0" });
         self.remember(CHANNEL_KEY, channel.key());
-        self.remember(SHARE_KEY, if share { "1" } else { "0" });
-        self.remember(FOLDER_KEY, &folder.as_ref().map(|folder| folder.to_string_lossy().into_owned()).unwrap_or_default());
-        // An emptied setting falls back to papka-update.txt, if there is one.
-        self.updates.folder = folder.or_else(|| current_exe().ok().and_then(|exe| update::folder_from_side_file(&exe)));
     }
 
     /// Title bar pill: something to act on.

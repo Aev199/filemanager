@@ -20,7 +20,7 @@ pub(crate) struct Palette {
     pub folders: Option<crate::jump::Folders>,
 }
 /// Check boxes of the settings window, in the order arrows walk them.
-const SETTING_FLAGS: [&str; 9] = [
+const SETTING_FLAGS: [&str; 8] = [
     "Светлая тема",
     "Боковая панель",
     "Панель сведений",
@@ -29,7 +29,6 @@ const SETTING_FLAGS: [&str; 9] = [
     "Показывать только последнюю версию файла (Отчёт_v_1_6 и т. п.)",
     "Звёздочка избранного у папок",
     "Проверять обновления раз в день",
-    "Класть установленные версии в папку обновлений для коллег",
 ];
 
 fn flag_value(s: &Settings, index: usize) -> bool {
@@ -41,8 +40,7 @@ fn flag_value(s: &Settings, index: usize) -> bool {
         4 => s.system_icons,
         5 => s.stack_versions,
         6 => s.favorite_stars,
-        7 => s.update_auto,
-        _ => s.update_share,
+        _ => s.update_auto,
     }
 }
 
@@ -55,8 +53,7 @@ fn toggle_flag(s: &mut Settings, index: usize) {
         4 => &mut s.system_icons,
         5 => &mut s.stack_versions,
         6 => &mut s.favorite_stars,
-        7 => &mut s.update_auto,
-        _ => &mut s.update_share,
+        _ => &mut s.update_auto,
     };
     *flag = !*flag;
 }
@@ -70,8 +67,6 @@ pub(crate) struct Settings {
     pub accent_light: usize,
     pub update_auto: bool,
     pub update_channel: filemanager_core::update::Channel,
-    pub update_folder: Option<std::path::PathBuf>,
-    pub update_share: bool,
     pub system_icons: bool,
     pub stack_versions: bool,
     pub favorite_stars: bool,
@@ -261,8 +256,6 @@ impl Explorer {
             accent_light: theme::accents().1,
             update_auto: self.updates.auto,
             update_channel: self.updates.channel,
-            update_folder: self.updates.folder.clone(),
-            update_share: self.updates.share,
             system_icons: self.icons.enabled,
             stack_versions: self.stack_versions,
             favorite_stars: self.favorite_stars,
@@ -314,7 +307,6 @@ impl Explorer {
         let prefs = settings.draft;
         let (accent_dark, accent_light) = (settings.accent_dark, settings.accent_light);
         let (update_auto, update_channel) = (settings.update_auto, settings.update_channel);
-        let (update_folder, update_share) = (settings.update_folder.clone(), settings.update_share);
         let system_icons = settings.system_icons;
         let stack_versions = settings.stack_versions;
         let favorite_stars = settings.favorite_stars;
@@ -336,7 +328,7 @@ impl Explorer {
                         settings.error = Some(format!("Не удалось сохранить настройки: {error}"));
                     }
                 } else {
-                    this.set_update_preferences(update_auto, update_channel, update_folder, update_share);
+                    this.set_update_preferences(update_auto, update_channel);
                     this.set_system_icons(system_icons);
                     this.set_stack_versions(stack_versions);
                     this.set_favorite_stars(favorite_stars);
@@ -497,10 +489,9 @@ impl Explorer {
                     .child(div().flex().gap_1p5().children(swatches)));
             }
             body = body.child(look)
-                .child(section("ФАЙЛЫ").child(check(3, cx)).child(check(4, cx)).child(check(5, cx)));
+                .child(section("ФАЙЛЫ").child(check(3, cx)).child(check(4, cx)).child(check(5, cx)).child(check(6, cx)));
 
-            // Updates: the channel, and the shared folder for networks where
-            // only the browser may reach the internet.
+            // Updates: daily checks and the channel.
             {
                 use filemanager_core::update::Channel;
                 let channel = settings.update_channel;
@@ -510,10 +501,8 @@ impl Explorer {
                     .when(!chosen, |chip| chip.border_color(rgb(BORDER)).text_color(rgb(TEXT_MUTED))
                         .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))))
                     .child(label);
-                let folder_text = settings.update_folder.as_ref()
-                    .map_or("не задана".to_string(), |folder| folder.display().to_string());
                 body = body.child(section("ОБНОВЛЕНИЯ")
-                    .child(check(6, cx))
+                    .child(check(7, cx))
                     .child(div().h(px(30.)).px_2().flex().items_center().gap_2()
                         .child(div().flex_1().child("Канал"))
                         .children([Channel::Stable, Channel::Beta].into_iter().map(|option| {
@@ -522,22 +511,8 @@ impl Explorer {
                                     if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_channel = option; cx.notify(); }
                                 }))
                         })))
-                    .child(div().h(px(30.)).px_2().flex().items_center().gap_2()
-                        .child(div().flex_none().child("Папка обновлений"))
-                        .child(div().flex_1().min_w_0().truncate().text_color(rgb(TEXT_MUTED)).child(folder_text))
-                        .child(chip("update-folder-here", "Текущая папка", false)
-                            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Взять папку, открытую в активной панели").build(window, cx))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let folder = this.pane_path(this.active_side());
-                                if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_folder = Some(folder); cx.notify(); }
-                            })))
-                        .when(settings.update_folder.is_some(), |row| row.child(chip("update-folder-clear", "Убрать", false)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(s) = this.settings.as_mut().filter(|s| !s.saving) { s.update_folder = None; cx.notify(); }
-                            })))))
-                    .child(check(7, cx))
                     .child(div().px_2().pb_1().text_size(px(11.)).text_color(rgb(TEXT_DIM))
-                        .child("Если программе закрыт интернет: обновления берутся из этой папки или из файла Papka.exe, скачанного браузером в «Загрузки».")));
+                        .child("Если программе закрыт интернет, обновление берётся из файла Papka.exe, скачанного браузером в «Загрузки».")));
             }
             if let Some(error) = settings.error.as_ref() {
                 body = body.child(div().text_size(px(12.)).text_color(rgb(DANGER)).child(error.clone()));

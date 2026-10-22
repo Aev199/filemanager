@@ -303,72 +303,7 @@ pub fn downloaded_update(path: &Path, version: &str) -> io::Result<Update> {
     })
 }
 
-/// Puts an installed version into the shared update folder for colleagues,
-/// unless the folder already has it or a newer one. The EXE goes first and
-/// the manifest last, so the folder never announces a file that is not there.
-pub fn publish_to_folder(folder: &Path, update: &Update, bytes: &[u8]) -> io::Result<bool> {
-    let manifest_path = folder.join(MANIFEST_ASSET);
-    if let Ok(existing) = fs::read(&manifest_path).map_err(io::Error::other)
-        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).map_err(io::Error::other)) {
-        if compare_versions(&existing.version, &update.version) != Ordering::Less { return Ok(false); }
-    }
-    let staged = folder.join(format!("{EXE_ASSET}.part"));
-    fs::write(&staged, bytes)?;
-    let exe = folder.join(EXE_ASSET);
-    // A colleague may be copying the old EXE right now; replace, not truncate.
-    let _ = fs::remove_file(&exe);
-    fs::rename(&staged, &exe)?;
-    let manifest = serde_json::json!({
-        "version": update.version,
-        "commit": update.commit,
-        "channel": if update.prerelease { "beta" } else { "stable" },
-        "sha256": sha256_hex(bytes),
-        "notes": update.notes,
-    });
-    let staged = folder.join(format!("{MANIFEST_ASSET}.part"));
-    fs::write(&staged, serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?)?;
-    let _ = fs::remove_file(&manifest_path);
-    fs::rename(&staged, &manifest_path)?;
-    Ok(true)
-}
-
-/// A text file beside the EXE naming the update folder: an administrator
-/// sets it once for everybody who runs Papka from there.
-pub const SOURCE_FILE: &str = "papka-update.txt";
-
-/// The folder named in `SOURCE_FILE` next to `exe`, if any.
-pub fn folder_from_side_file(exe: &Path) -> Option<PathBuf> {
-    let text = fs::read_to_string(exe.with_file_name(SOURCE_FILE)).ok()?;
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('#'))?;
-    Some(PathBuf::from(line.trim_matches('"')))
-}
-
-/// An update kept in a shared folder: `latest.json` and `Papka.exe`, as
-/// unpacked from the release archive. No internet access is needed: the
-/// files are read like any other file on the network.
-pub fn check_folder(folder: &Path, current: &str, channel: Channel) -> io::Result<Option<Update>> {
-    let unreachable = |error: io::Error| io::Error::new(error.kind(), format!("папка обновлений «{}» недоступна: {error}", folder.display()));
-    let manifest: Manifest = serde_json::from_slice(&fs::read(folder.join(MANIFEST_ASSET)).map_err(unreachable)?)
-        .map_err(|error| io::Error::other(format!("{MANIFEST_ASSET} в папке обновлений повреждён: {error}")))?;
-    if compare_versions(&manifest.version, current) != Ordering::Greater { return Ok(None); }
-    // A colleague on test builds may have put one there.
-    if channel == Channel::Stable && manifest.channel == "beta" { return Ok(None); }
-    let exe = folder.join(EXE_ASSET);
-    if !exe.is_file() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("в папке обновлений нет {EXE_ASSET}")));
-    }
-    Ok(Some(Update {
-        version: manifest.version,
-        commit: manifest.commit,
-        notes: manifest.notes,
-        sha256: manifest.sha256.to_ascii_lowercase(),
-        exe_url: exe.to_string_lossy().into_owned(),
-        page: folder.to_string_lossy().into_owned(),
-        prerelease: manifest.channel == "beta",
-    }))
-}
-
-/// The update's EXE: downloaded for a release, read for a shared folder.
+/// The update's EXE: downloaded for a release, read for a file the browser fetched.
 pub fn get(location: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Result<Vec<u8>> {
     if location.starts_with("https://") { return fetch(location, progress); }
     let mut file = fs::File::open(location)?;
@@ -400,6 +335,16 @@ pub fn clixml_text(output: &str) -> String {
         .replace("_x000D_", "").replace("_x000A_", " ")
         .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&");
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One readable sentence of an error text: no line breaks, no stack, at
+/// most about 160 characters.
+pub fn short_error(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim_end_matches('.');
+    if text.is_empty() { return "неизвестная ошибка".into(); }
+    if text.chars().count() <= 160 { return text.to_string(); }
+    format!("{}…", text.chars().take(160).collect::<String>().trim_end())
 }
 
 /// Readable text for WinHTTP's own error codes, which Windows cannot format.
@@ -442,7 +387,7 @@ pub fn fetch(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Resul
                 Ok(body)
             }
             Err(second) => Err(io::Error::other(format!(
-                "{}. Запасной способ (PowerShell) тоже не сработал: {second}", describe(&first)))),
+                "{}. Через PowerShell тоже не вышло: {second}", describe(&first)))),
         },
     }
 }
@@ -510,17 +455,23 @@ fn winhttp_get(url: &str, progress: &mut dyn FnMut(u64, Option<u64>)) -> io::Res
     }
 }
 
-/// The PowerShell script that downloads `url` into `target`.
+/// The PowerShell script that downloads `url` into `target`. A failure
+/// leaves only its innermost message, in UTF-8, in `target` + ".err": the
+/// console's own encoding garbles Russian text and adds a stack of noise.
 pub fn powershell_script(url: &str, target: &Path) -> String {
     let quote = |text: &str| format!("'{}'", text.replace('\'', "''"));
-    format!("$ErrorActionPreference='Stop'; \
+    let error_file = format!("{}.err", target.to_string_lossy());
+    format!("$ErrorActionPreference='Stop'; try {{ \
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; \
         $c = New-Object Net.WebClient; \
         $c.Headers.Add('User-Agent', 'Papka'); \
         $c.Headers.Add('Accept', 'application/vnd.github+json, application/octet-stream'); \
         $c.Proxy = [Net.WebRequest]::GetSystemWebProxy(); \
         $c.Proxy.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials; \
-        $c.DownloadFile({}, {})", quote(url), quote(&target.to_string_lossy()))
+        $c.DownloadFile({}, {}) }} catch {{ \
+        $e = $_.Exception; while ($e.InnerException) {{ $e = $e.InnerException }}; \
+        [IO.File]::WriteAllText({}, $e.Message, [Text.Encoding]::UTF8); exit 1 }}",
+        quote(url), quote(&target.to_string_lossy()), quote(&error_file))
 }
 
 /// `-EncodedCommand` text: Base64 of UTF-16LE, so no quoting can break it.
@@ -552,9 +503,11 @@ fn powershell_get(url: &str) -> io::Result<Vec<u8>> {
     let result = match output {
         Ok(output) if output.status.success() => fs::read(&target),
         Ok(output) => {
-            let text = clixml_text(&String::from_utf8_lossy(&output.stderr));
-            let text = if text.is_empty() { "неизвестная ошибка".to_string() } else { text };
-            Err(io::Error::other(text.chars().take(300).collect::<String>()))
+            let error_file = PathBuf::from(format!("{}.err", target.to_string_lossy()));
+            let text = fs::read_to_string(&error_file).map(|text| text.trim_start_matches('\u{feff}').trim().to_string())
+                .unwrap_or_else(|_| clixml_text(&String::from_utf8_lossy(&output.stderr)));
+            let _ = fs::remove_file(&error_file);
+            Err(io::Error::other(short_error(&text)))
         }
         Err(error) => Err(error),
     };
@@ -606,29 +559,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_folder_offers_a_newer_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let exe = b"MZ new".to_vec();
-        fs::write(dir.path().join(EXE_ASSET), &exe).unwrap();
-        fs::write(dir.path().join(MANIFEST_ASSET), format!(
-            r#"{{"version":"0.1.47","commit":"abc","channel":"stable","sha256":"{}","notes":["Сеть"]}}"#, sha256_hex(&exe))).unwrap();
-        let found = check_folder(dir.path(), "0.1.46", Channel::Beta).unwrap().unwrap();
-        assert_eq!((found.version.as_str(), found.prerelease), ("0.1.47", false));
-        let bytes = get(&found.exe_url, &mut |_, _| {}).unwrap();
-        assert_eq!(bytes, exe);
-        assert!(check_folder(dir.path(), "0.1.47", Channel::Beta).unwrap().is_none());
-        assert!(check_folder(&dir.path().join("нет"), "0.1.0", Channel::Beta).unwrap_err().to_string().contains("недоступна"));
-        fs::remove_file(dir.path().join(EXE_ASSET)).unwrap();
-        assert!(check_folder(dir.path(), "0.1.0", Channel::Beta).is_err());
-    }
-
-    #[test]
-    fn side_file_names_the_update_folder() {
-        let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("Papka.exe");
-        assert_eq!(folder_from_side_file(&exe), None);
-        fs::write(dir.path().join(SOURCE_FILE), "# папка обновлений\n\"\\\\server\\soft\\Papka\"\n").unwrap();
-        assert_eq!(folder_from_side_file(&exe), Some(PathBuf::from(r"\\server\soft\Papka")));
+    fn errors_are_one_short_line() {
+        assert_eq!(short_error("  Невозможно соединиться\r\n с удаленным сервером. "), "Невозможно соединиться с удаленным сервером");
+        assert!(short_error(&"а".repeat(400)).chars().count() <= 161);
+        assert_eq!(short_error(""), "неизвестная ошибка");
+        assert!(powershell_script("https://x", Path::new(r"C:\T\a.tmp")).contains(r"'C:\T\a.tmp.err'"));
     }
 
     #[test]
@@ -652,21 +587,6 @@ mod tests {
         assert!(find_downloaded(dir.path(), "0.1.48", &version_of).is_none());
         let update = downloaded_update(&path, &version).unwrap();
         assert_eq!(update.sha256, sha256_hex(b"MZ"));
-    }
-
-    #[test]
-    fn publishing_fills_the_shared_folder_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = b"MZ release".to_vec();
-        let update = Update { version: "0.1.48".into(), commit: "abc".into(), notes: vec!["Сеть".into()],
-            sha256: sha256_hex(&bytes), exe_url: String::new(), page: String::new(), prerelease: true };
-        assert!(publish_to_folder(dir.path(), &update, &bytes).unwrap());
-        let found = check_folder(dir.path(), "0.1.47", Channel::Beta).unwrap().unwrap();
-        assert_eq!((found.version.as_str(), found.notes.as_slice()), ("0.1.48", &["Сеть".to_string()][..]));
-        assert_eq!(get(&found.exe_url, &mut |_, _| {}).unwrap(), bytes);
-        // The same or an older version is not written again.
-        assert!(!publish_to_folder(dir.path(), &update, &bytes).unwrap());
-        assert!(!dir.path().join("Papka.exe.part").exists());
     }
 
     #[test]
