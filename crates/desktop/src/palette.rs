@@ -28,6 +28,8 @@ pub const TEXT_DIM: u32 = 0x8D8D94;
 pub const FOLDER: u32 = 0xE6B54A;
 pub const DANGER: u32 = 0xEF6F7A;
 pub const WARNING: u32 = 0xE5BD62;
+/// A lit favourite star.
+pub const FAVORITE: u32 = 0xF5C04A;
 pub const SUCCESS: u32 = 0x74C98A;
 
 pub const KIND_IMAGE: u32 = 0xC88BE8;
@@ -120,6 +122,7 @@ pub fn resolve(light: bool, color: u32) -> u32 {
             FOLDER => 0xB9831B,
             DANGER => 0xBD3343,
             WARNING => 0x896000,
+            FAVORITE => 0xC98A00,
             SUCCESS => 0x24734A,
             KIND_IMAGE => 0x8643A4,
             KIND_DOCUMENT => 0x326AA8,

@@ -1258,6 +1258,24 @@ impl Explorer {
             .when_some(bg, |this, bg| this.bg(rgb(bg)))
             .when(bg.is_none() && striped, |this| this.bg(rgb(STRIPE)))
             .when(bg.is_none(), |this| this.hover(|style| style.bg(rgb(HOVER))))
+            // A star before every folder: lit for a favourite, an outline
+            // otherwise; a click adds or removes it. Files keep the place empty.
+            .when(self.favorite_stars, |row| row.child(if is_dir {
+                let favorite = self.favorites.contains(&path);
+                let target = path.clone();
+                div().id(SharedString::from(format!("star-{}", path.display()))).size(px(16.)).flex_none()
+                    .flex().items_center().justify_center().rounded_sm().cursor_pointer()
+                    .hover(|style| style.bg(rgb(if selected { SELECTED_BORDER } else { PRESSED })))
+                    .tooltip(move |window, cx| Tooltip::new(if favorite { "Убрать из избранного" } else { "Добавить в избранное" }).build(window, cx))
+                    .child(svg().path(if favorite { "fm/star-fill.svg" } else { "fm/star.svg" }).size(px(13.))
+                        .text_color(rgb(if favorite { FAVORITE } else if selected { SELECTION_TEXT } else { TEXT_DIM }))
+                        .when(!favorite && !selected, |star| star.opacity(0.45)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_favorite(&target, cx); }))
+                    .into_any_element()
+            } else {
+                div().w(px(16.)).flex_none().into_any_element()
+            }))
             // An older version sits indented under the newest one.
             .when(matches!(stack, Some(Stacked::Member { .. })), |row| row.child(div().w(px(16.)).flex_none()))
             .child(match self.system_icon(&path).filter(|_| !is_dir) {

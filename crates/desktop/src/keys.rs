@@ -189,6 +189,12 @@ impl Explorer {
         cx.notify();
     }
 
+    pub(crate) fn set_favorite_stars(&mut self, enabled: bool) {
+        if self.favorite_stars == enabled { return; }
+        self.favorite_stars = enabled;
+        if let Some(store) = &self.workspaces { let _ = store.set_value(crate::FAVORITE_STARS, if enabled { "1" } else { "0" }); }
+    }
+
     pub(crate) fn set_stack_versions(&mut self, enabled: bool) {
         if self.stack_versions == enabled { return; }
         self.stack_versions = enabled;

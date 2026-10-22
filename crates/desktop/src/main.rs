@@ -130,6 +130,8 @@ const TOUR_SEEN: &str = "tour_seen";
 const LIST_WIDTHS: &str = "list_widths";
 const COLUMN_WIDTH: &str = "column_width";
 const STACK_VERSIONS: &str = "stack_versions";
+/// A star before each folder adds it to favourites, and shows that it is one.
+const FAVORITE_STARS: &str = "favorite_stars";
 const DEFAULT_LIST_WIDTHS: [f32; 3] = [140., 110., 90.];
 pub(crate) const LIST_WIDTH_RANGE: (f32, f32) = (60., 400.);
 
@@ -312,6 +314,7 @@ struct Explorer {
     stacks_rev: u64,
     /// Versions of a document shown as one row (setting).
     stack_versions: bool,
+    favorite_stars: bool,
     list_resize: Option<(GroupId, usize, Pixels, f32)>,
     tab_scroll: HashMap<GroupId, gpui::ScrollHandle>,
     tab_reveal: HashMap<GroupId, (usize, usize)>,
@@ -498,6 +501,8 @@ impl Explorer {
         let favorites = workspaces.as_ref().and_then(|s|s.favorites().ok()).unwrap_or_default();
         let stack_versions = workspaces.as_ref().and_then(|store| store.value(STACK_VERSIONS).ok().flatten())
             .is_none_or(|flag| flag != "0");
+        let favorite_stars = workspaces.as_ref().and_then(|store| store.value(FAVORITE_STARS).ok().flatten())
+            .is_none_or(|flag| flag != "0");
         let system_icons = workspaces.as_ref().and_then(|store| store.value(icons::ENABLED_KEY).ok().flatten())
             .is_none_or(|flag| flag != "0");
         let search_depth = workspaces.as_ref().and_then(|store| store.value(search_panel::DEPTH_KEY).ok().flatten())
@@ -578,7 +583,7 @@ impl Explorer {
                 .and_then(|text| parse_widths(&text)).unwrap_or(DEFAULT_LIST_WIDTHS),
             pane_list_widths: HashMap::new(),
             last_click: None,
-            open_stacks: HashSet::new(), stacks_rev: 0, stack_versions,
+            open_stacks: HashSet::new(), stacks_rev: 0, stack_versions, favorite_stars,
             list_resize: None,
             tab_scroll: HashMap::new(),
             tab_reveal: HashMap::new(),

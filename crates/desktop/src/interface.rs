@@ -20,13 +20,14 @@ pub(crate) struct Palette {
     pub folders: Option<crate::jump::Folders>,
 }
 /// Check boxes of the settings window, in the order arrows walk them.
-const SETTING_FLAGS: [&str; 8] = [
+const SETTING_FLAGS: [&str; 9] = [
     "Светлая тема",
     "Боковая панель",
     "Панель сведений",
     "Показывать скрытые файлы",
     "Значки программ у файлов, как в Проводнике",
     "Показывать только последнюю версию файла (Отчёт_v_1_6 и т. п.)",
+    "Звёздочка избранного у папок",
     "Проверять обновления раз в день",
     "Класть установленные версии в папку обновлений для коллег",
 ];
@@ -39,7 +40,8 @@ fn flag_value(s: &Settings, index: usize) -> bool {
         3 => s.draft.show_hidden,
         4 => s.system_icons,
         5 => s.stack_versions,
-        6 => s.update_auto,
+        6 => s.favorite_stars,
+        7 => s.update_auto,
         _ => s.update_share,
     }
 }
@@ -52,7 +54,8 @@ fn toggle_flag(s: &mut Settings, index: usize) {
         3 => &mut s.draft.show_hidden,
         4 => &mut s.system_icons,
         5 => &mut s.stack_versions,
-        6 => &mut s.update_auto,
+        6 => &mut s.favorite_stars,
+        7 => &mut s.update_auto,
         _ => &mut s.update_share,
     };
     *flag = !*flag;
@@ -71,6 +74,7 @@ pub(crate) struct Settings {
     pub update_share: bool,
     pub system_icons: bool,
     pub stack_versions: bool,
+    pub favorite_stars: bool,
     pub saving: bool,
     pub error: Option<String>,
 }
@@ -261,6 +265,7 @@ impl Explorer {
             update_share: self.updates.share,
             system_icons: self.icons.enabled,
             stack_versions: self.stack_versions,
+            favorite_stars: self.favorite_stars,
             saving: false,
             error: None,
         });
@@ -312,6 +317,7 @@ impl Explorer {
         let (update_folder, update_share) = (settings.update_folder.clone(), settings.update_share);
         let system_icons = settings.system_icons;
         let stack_versions = settings.stack_versions;
+        let favorite_stars = settings.favorite_stars;
         cx.spawn(async move |weak, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -333,6 +339,7 @@ impl Explorer {
                     this.set_update_preferences(update_auto, update_channel, update_folder, update_share);
                     this.set_system_icons(system_icons);
                     this.set_stack_versions(stack_versions);
+                    this.set_favorite_stars(favorite_stars);
                     this.show_hidden = prefs.show_hidden;
                     this.show_sidebar = prefs.show_sidebar;
                     this.show_inspector = prefs.show_inspector;
