@@ -77,7 +77,7 @@ pub struct Candidate {
 pub fn pick_release(list: &[u8], channel: Channel) -> io::Result<Option<Candidate>> {
     let releases: Vec<GithubRelease> = serde_json::from_slice(list).map_err(io::Error::other)?;
     Ok(releases.into_iter()
-        .filter(|release| !release.draft && (channel == Channel::Beta || !release.prerelease))
+        .filter(|release| !release.draft && release.tag_name != NEWEST_TAG && (channel == Channel::Beta || !release.prerelease))
         .filter_map(|release| {
             let url = |name: &str| release.assets.iter().find(|asset| asset.name == name).map(|asset| asset.browser_download_url.clone());
             Some(Candidate {
@@ -223,13 +223,16 @@ pub fn rollback(exe: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The newest final release's EXE, fetched by the browser when Papka
-/// itself has no way out (GitHub serves "latest" for final releases only).
+/// A release that only holds the newest build's EXE under a fixed tag:
+/// GitHub's own "latest" link skips test builds. It is not an update.
+pub const NEWEST_TAG: &str = "beta";
+
+/// The newest EXE of the channel, fetched by the browser when Papka itself
+/// has no way out.
 pub fn browser_url(channel: Channel) -> String {
     match channel {
         Channel::Stable => format!("https://github.com/{REPOSITORY}/releases/latest/download/{EXE_ASSET}"),
-        // Test builds have no "latest" link: the list, newest first.
-        Channel::Beta => format!("https://github.com/{REPOSITORY}/releases"),
+        Channel::Beta => format!("https://github.com/{REPOSITORY}/releases/download/{NEWEST_TAG}/{EXE_ASSET}"),
     }
 }
 
@@ -592,7 +595,7 @@ mod tests {
     #[test]
     fn browser_links_follow_the_channel() {
         assert!(browser_url(Channel::Stable).ends_with("/releases/latest/download/Papka.exe"));
-        assert!(browser_url(Channel::Beta).ends_with("/releases"));
+        assert!(browser_url(Channel::Beta).ends_with("/releases/download/beta/Papka.exe"));
     }
 
     #[test]
@@ -610,6 +613,10 @@ mod tests {
         let stable = pick_release(LIST.as_bytes(), Channel::Stable).unwrap().unwrap();
         assert_eq!((stable.version.as_str(), stable.manifest_url.as_str()), ("0.1.44", "m44"));
         assert!(pick_release(b"[]", Channel::Beta).unwrap().is_none());
+        // The fixed "beta" release is a download link, never an update.
+        let fixed = br#"[{"tag_name":"beta","draft":false,"prerelease":true,"html_url":"p","assets":[
+            {"name":"Papka.exe","browser_download_url":"e"},{"name":"latest.json","browser_download_url":"m"}]}]"#;
+        assert!(pick_release(fixed, Channel::Beta).unwrap().is_none());
     }
 
     fn stub(manifest: &'static str) -> impl Fn(&str, &mut dyn FnMut(u64, Option<u64>)) -> io::Result<Vec<u8>> {
