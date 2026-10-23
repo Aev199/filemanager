@@ -31,11 +31,16 @@ pub fn render_page(path: &Path, index: u32, width: u32) -> io::Result<(u32, Vec<
         reader.ReadBytes(&mut png)?;
         Ok((pages, png))
     };
-    // WinRT calls need the thread in a COM apartment.
-    unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-    }
-    run().map_err(|error| io::Error::other(format!("PDF не открыт: {}", error.message())))
+    // WinRT needs a COM apartment. A thread of its own: the shared worker
+    // threads also serve shell icons in single-threaded apartments, and an
+    // apartment set here would stay on them.
+    std::thread::scope(|scope| scope.spawn(|| {
+        use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+        let initialised = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+        let result = run().map_err(|error| io::Error::other(format!("PDF не открыт: {}", error.message())));
+        if initialised { unsafe { CoUninitialize() }; }
+        result
+    }).join().unwrap_or_else(|_| Err(io::Error::other("PDF не открыт"))))
 }
 
 #[cfg(not(windows))]

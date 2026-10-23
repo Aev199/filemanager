@@ -61,7 +61,8 @@ impl Explorer {
         // Deeper folders of the current folder and the favourites; network
         // favourites are left out, their reading could take minutes.
         let near = |path: &PathBuf| !path_utils::is_network_path(path) && filemanager_core::archive::split(path).is_none();
-        let mut roots = vec![current.clone()];
+        // A network folder is read one level only (its listing is cached).
+        let mut roots: Vec<PathBuf> = Some(current.clone()).filter(|path| near(path)).into_iter().collect();
         roots.extend(self.favorites.iter().filter(|path| near(path)).cloned());
         // One level of the places, recent folders and the current folder's
         // neighbours.
@@ -98,7 +99,9 @@ impl Explorer {
         // A typed path goes first when it is a folder (shares are not
         // asked: a slow server must not stall typing).
         let typed = PathBuf::from(query);
-        if (query.contains('\\') || query.contains('/')) && !query.starts_with(r"\\") && typed.is_absolute() && typed.is_dir() {
+        // Asked on every keystroke on the UI thread: never on a share.
+        if (query.contains('\\') || query.contains('/')) && !query.starts_with(r"\\") && typed.is_absolute()
+            && !path_utils::is_network_path(&typed) && typed.is_dir() {
             results.push((typed, "Путь"));
         }
         if query.is_empty() {
