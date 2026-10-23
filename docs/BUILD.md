@@ -8,7 +8,7 @@ build. This avoids burning limited free GitHub Actions minutes.
 
 After this workflow exists on the repository's default branch:
 
-1. Open **GitHub → Aev199/filemanager → Actions**.
+1. Open **GitHub → Aev199/papka → Actions**.
 2. Pick **Windows portable EXE (manual)**.
 3. Click **Run workflow**, choose the branch, and confirm.
 4. When green, open the run, under **Artifacts** download

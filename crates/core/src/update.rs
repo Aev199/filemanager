@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-pub const REPOSITORY: &str = "Aev199/filemanager";
+pub const REPOSITORY: &str = "Aev199/papka";
 pub const EXE_ASSET: &str = "Papka.exe";
 pub const MANIFEST_ASSET: &str = "latest.json";
 
