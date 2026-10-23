@@ -58,6 +58,15 @@ pub fn drag_out(hwnd: isize, paths: &[PathBuf]) -> io::Result<DragOutcome> {
     })
 }
 
+/// Whether a mouse button is held down right now, whichever window has
+/// the focus: a drag carried to another program by Alt+Tab goes on.
+#[cfg(windows)]
+pub fn mouse_button_down(right: bool) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    // The buttons as the user sees them, even with swapped mouse buttons.
+    (unsafe { GetAsyncKeyState(i32::from(if right { VK_RBUTTON } else { VK_LBUTTON })) } as u16 & 0x8000) != 0
+}
+
 /// Copies `paths` into `target` with the Windows copy engine, as Explorer
 /// does on a drop. Archivers such as 7-Zip (since 23) drop a placeholder
 /// folder that does not exist yet: their copy hook sees Windows copy it and

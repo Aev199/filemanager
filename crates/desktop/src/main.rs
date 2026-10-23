@@ -623,6 +623,11 @@ impl Explorer {
             search_active: false, search_busy: false, search_generation: 0,
             selected_history_event: None,
             _subscriptions: vec![
+                // Alt+Tab while dragging files: Explorer's drag goes on into
+                // the program brought forward, so ours does too.
+                cx.observe_window_activation(window, |this, window, cx| {
+                    if !window.is_window_active() { this.drag_out_on_deactivate(window, cx); }
+                }),
                 search_subscription, address_subscription, rename_subscription, folder_subscription,
                 workspace_subscription,
                 bulk_subscription,
@@ -845,6 +850,24 @@ impl Explorer {
     /// Shift moves, otherwise moves within one volume and copies across.
     /// Hands dragged files to Windows once the cursor leaves the window, so
     /// they can be dropped into Explorer or any program that takes files.
+    /// The window lost the focus with files still held by the mouse: they
+    /// go on as a Windows drag, to be dropped in the other program.
+    fn drag_out_on_deactivate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            if self.dragging_out { return; }
+            if self.file_drag && cx.has_active_drag() && !self.drag_paths.is_empty()
+                && filemanager_core::shell_drag::mouse_button_down(false) {
+                let paths = self.drag_paths.clone();
+                self.drag_out(paths, window, cx);
+            } else if let Some(paths) = self.right_drag.as_ref().filter(|drag| drag.active).map(|drag| drag.paths.clone()) {
+                if filemanager_core::shell_drag::mouse_button_down(true) { self.drag_out(paths, window, cx); }
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = (window, cx);
+    }
+
     fn drag_out(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         if Self::any_in_archive(&paths) {
             if !self.dragging_out {
